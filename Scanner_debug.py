@@ -265,8 +265,6 @@ class FilmScanner:
         self.state_file = None
         
         log_debug("Scanner initialized - Arduino uses FULL STEPS")
-        log_debug(f"Scanner initialized with {self.microsteps}x microstepping")
-        log_debug(f"Total microsteps/rev: {self.total_microsteps_per_rev}")
     
     def find_arduino(self, stdscr=None):
         """Find Arduino"""
