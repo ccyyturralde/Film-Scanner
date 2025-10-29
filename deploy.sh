@@ -1,93 +1,75 @@
 #!/bin/bash
-# Film Scanner Deployment Script
-# Run this on your Raspberry Pi to update everything
+# Quick deployment script for film scanner updates
 
-set -e  # Exit on error
+set -e
 
-REPO_URL="https://github.com/ccyyturralde/Film-Scanner.git"
-INSTALL_DIR="$HOME/film-scanner"
-ARDUINO_PORT="/dev/ttyACM0"  # Change if needed
-
-echo "=================================="
-echo "Film Scanner Deployment"
-echo "=================================="
-
-# Check if git is installed
-if ! command -v git &> /dev/null; then
-    echo "Installing git..."
-    sudo apt update
-    sudo apt install -y git
-fi
-
-# Clone or update repository
-if [ -d "$INSTALL_DIR" ]; then
-    echo "Updating repository..."
-    cd "$INSTALL_DIR"
-    git pull
-else
-    echo "Cloning repository..."
-    git clone "$REPO_URL" "$INSTALL_DIR"
-    cd "$INSTALL_DIR"
-fi
-
-# Install Python dependencies
-echo "Installing Python dependencies..."
-pip3 install --break-system-packages -r requirements.txt 2>/dev/null || true
-
-# Check if arduino-cli is installed
-if ! command -v arduino-cli &> /dev/null; then
-    echo ""
-    echo "Arduino CLI not found. Install? (y/n)"
-    read -r response
-    if [[ "$response" =~ ^[Yy]$ ]]; then
-        echo "Installing Arduino CLI..."
-        curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
-        export PATH=$PATH:$HOME/bin
-        echo 'export PATH=$PATH:$HOME/bin' >> ~/.bashrc
-        
-        # Initialize and install board support
-        arduino-cli core update-index
-        arduino-cli core install arduino:avr
-    else
-        echo "Skipping Arduino flash. You'll need to upload manually."
-        exit 0
-    fi
-fi
-
-# Find Arduino port
+echo "==================================="
+echo "Film Scanner - Quick Deploy"
+echo "==================================="
 echo ""
-echo "Detecting Arduino..."
-PORTS=$(arduino-cli board list | grep -E "tty(ACM|USB)" | awk '{print $1}')
 
-if [ -z "$PORTS" ]; then
-    echo "No Arduino detected. Connect it and try again."
+# Check if we're in the outputs directory
+if [ ! -f "optimized_edge_detect.py" ] || [ ! -f "scanner_app_improved.py" ]; then
+    echo "ERROR: Run this from /mnt/user-data/outputs/"
     exit 1
 fi
 
-# If multiple ports, let user choose
-PORT_COUNT=$(echo "$PORTS" | wc -l)
-if [ "$PORT_COUNT" -gt 1 ]; then
-    echo "Multiple Arduinos detected:"
-    echo "$PORTS"
-    echo "Enter port to use (e.g., /dev/ttyACM0):"
-    read -r ARDUINO_PORT
+# Find film-scanner directory
+if [ -d "$HOME/film-scanner" ]; then
+    SCANNER_DIR="$HOME/film-scanner"
+elif [ -d "$HOME/Film-Scanner" ]; then
+    SCANNER_DIR="$HOME/Film-Scanner"
 else
-    ARDUINO_PORT=$PORTS
-    echo "Found Arduino on: $ARDUINO_PORT"
+    echo "ERROR: Cannot find film-scanner directory"
+    echo "Please specify path:"
+    read -r SCANNER_DIR
 fi
 
-# Flash Arduino
+echo "Scanner directory: $SCANNER_DIR"
 echo ""
-echo "Flashing Arduino..."
-arduino-cli compile --fqbn arduino:avr:uno Arduino_Film_Scanner/Arduino_Film_Scanner.ino
-arduino-cli upload -p "$ARDUINO_PORT" --fqbn arduino:avr:uno Arduino_Film_Scanner/Arduino_Film_Scanner.ino
+
+# Backup existing files
+if [ -f "$SCANNER_DIR/optimized_edge_detect.py" ]; then
+    echo "Backing up existing files..."
+    cp "$SCANNER_DIR/optimized_edge_detect.py" "$SCANNER_DIR/optimized_edge_detect.py.backup"
+    echo "  ✓ Backed up optimized_edge_detect.py"
+fi
+
+if [ -f "$SCANNER_DIR/scanner_app_improved.py" ]; then
+    cp "$SCANNER_DIR/scanner_app_improved.py" "$SCANNER_DIR/scanner_app_improved.py.backup"
+    echo "  ✓ Backed up scanner_app_improved.py"
+fi
 
 echo ""
-echo "=================================="
-echo "✓ Deployment Complete!"
-echo "=================================="
+
+# Copy new files
+echo "Copying new files..."
+cp optimized_edge_detect.py "$SCANNER_DIR/"
+echo "  ✓ Copied optimized_edge_detect.py"
+
+cp scanner_app_improved.py "$SCANNER_DIR/"
+echo "  ✓ Copied scanner_app_improved.py"
+
 echo ""
-echo "To run the scanner:"
-echo "  cd $INSTALL_DIR"
-echo "  python3 scanner_app.py"
+echo "==================================="
+echo "✓ Deployment Complete!"
+echo "==================================="
+echo ""
+echo "Next steps:"
+echo ""
+echo "1. Test detection:"
+echo "   cd $SCANNER_DIR"
+echo "   python3 optimized_edge_detect.py /path/to/image.jpg --debug"
+echo ""
+echo "2. Commit to git:"
+echo "   cd $SCANNER_DIR"
+echo "   git add optimized_edge_detect.py scanner_app_improved.py"
+echo "   git commit -m 'Implement proper two-gap frame detection'"
+echo "   git push"
+echo ""
+echo "3. Run scanner:"
+echo "   cd $SCANNER_DIR"
+echo "   python3 scanner_app_improved.py"
+echo ""
+echo "Backup files saved with .backup extension"
 echo ""
