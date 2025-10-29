@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-35mm Film Scanner Control Application - Production Version
-Uses proper two-gap detection to center frames correctly
+35mm Film Scanner Control - Professional Version
+Focus: Manual control and calibrated advance without problematic CV
 """
 
 import curses
@@ -13,15 +13,6 @@ import os
 from datetime import datetime
 import json
 
-try:
-    import cv2
-    import numpy as np
-    from optimized_edge_detect import detect_frame_gaps, get_motor_command
-    HAS_CV2 = True
-except ImportError:
-    HAS_CV2 = False
-    print("Warning: OpenCV not available. Auto-align disabled.")
-
 class FilmScanner:
     def __init__(self):
         self.arduino = None
@@ -30,55 +21,45 @@ class FilmScanner:
         self.frame_count = 0
         self.status_msg = "Ready"
         
-        # Motor configuration
-        self.fine_step = 8
-        self.coarse_step = 64
-        self.steps_per_frame = 1200  # Will be calibrated
+        # Motor configuration (adjust for your hardware)
+        self.fine_step = 8       # Fine jog steps
+        self.coarse_step = 64    # Coarse jog steps
+        self.step_delay = 800    # Microseconds between steps
+        
+        # Calibration
+        self.frame_advance = None  # Steps between frames (will be calibrated)
+        self.default_advance = 1200  # Default estimate for 35mm
         
         # Position tracking
-        self.position_steps = 0
-        self.is_large_step = False
+        self.position = 0
+        self.frame_positions = []  # Store position of each captured frame
         
         # Mode
-        self.mode = 'smart'  # 'manual' or 'smart'
+        self.mode = 'manual'  # 'manual' or 'calibrated'
+        self.is_large_step = False
         
-        # Calibration (learned during use)
-        self.pixels_per_step = 2.0  # Initial estimate, will be refined
-        self.last_frame_advance = None  # Steps to advance between frames
-        
-        # State file
+        # State persistence
         self.state_file = None
         
     def find_arduino(self, stdscr=None):
-        """Find Arduino on any available port"""
-        
+        """Find Arduino on available ports"""
         ports = list(serial.tools.list_ports.comports())
         
         # Add Raspberry Pi specific ports
-        pi_ports = ['/dev/ttyS0', '/dev/ttyAMA0', '/dev/serial0', '/dev/ttyUSB0', '/dev/ttyACM0']
-        for pi_port in pi_ports:
-            if os.path.exists(pi_port):
+        pi_ports = ['/dev/ttyACM0', '/dev/ttyUSB0', '/dev/serial0', '/dev/ttyAMA0']
+        for port_path in pi_ports:
+            if os.path.exists(port_path):
                 class SimplePort:
                     def __init__(self, device):
                         self.device = device
-                ports.append(SimplePort(pi_port))
+                ports.append(SimplePort(port_path))
         
-        if stdscr:
-            stdscr.clear()
-            stdscr.addstr(0, 0, "Searching for Arduino...", curses.A_BOLD)
-            stdscr.addstr(2, 0, f"Checking {len(ports)} ports")
-            stdscr.refresh()
-        
-        for idx, port in enumerate(ports):
+        for port in ports:
             device = port.device if hasattr(port, 'device') else str(port)
             
-            if stdscr:
-                stdscr.addstr(3 + idx, 0, f"Trying {device}...")
-                stdscr.refresh()
-            
             try:
-                ser = serial.Serial(device, 115200, timeout=3, exclusive=False)
-                time.sleep(2.5)
+                ser = serial.Serial(device, 115200, timeout=3)
+                time.sleep(2.5)  # Arduino reset time
                 
                 ser.reset_input_buffer()
                 ser.write(b'?\n')
@@ -87,25 +68,18 @@ class FilmScanner:
                 if ser.in_waiting:
                     response = ser.read_all().decode('utf-8', errors='ignore')
                     if any(word in response for word in ['READY', 'STATUS', 'NEMA', 'Position']):
-                        if stdscr:
-                            stdscr.addstr(3 + idx, 0, f"✓ Found Arduino on {device}!", curses.A_BOLD)
-                            stdscr.refresh()
-                            time.sleep(1)
                         return ser
                 
                 ser.close()
-                
-            except (OSError, serial.SerialException):
-                continue
-            except Exception:
+            except:
                 continue
         
         return None
     
-    def send_command(self, cmd):
+    def send(self, cmd):
         """Send command to Arduino and track position"""
         if not self.arduino or not self.arduino.is_open:
-            return
+            return False
         
         try:
             self.arduino.write(f"{cmd}\n".encode())
@@ -113,202 +87,54 @@ class FilmScanner:
             
             # Track position changes
             if cmd == 'f':
-                self.position_steps += self.fine_step
+                self.position += self.fine_step
             elif cmd == 'b':
-                self.position_steps -= self.fine_step
+                self.position -= self.fine_step
             elif cmd == 'F':
-                self.position_steps += self.coarse_step
+                self.position += self.coarse_step
             elif cmd == 'B':
-                self.position_steps -= self.coarse_step
-            elif cmd == 'N':
-                self.position_steps += self.steps_per_frame
-            elif cmd == 'R':
-                self.position_steps -= self.steps_per_frame
+                self.position -= self.coarse_step
             elif cmd.startswith('H'):
                 steps = int(cmd[1:])
-                self.position_steps += steps
+                self.position += steps
             elif cmd.startswith('h'):
                 steps = int(cmd[1:])
-                self.position_steps -= steps
+                self.position -= steps
             elif cmd == 'Z':
-                self.position_steps = 0
-                
+                self.position = 0
+                self.frame_positions = []
+            
+            return True
         except Exception as e:
             self.status_msg = f"Command error: {str(e)[:40]}"
+            return False
     
-    def capture_preview(self, output_path="/tmp/preview.jpg"):
-        """Capture camera preview"""
+    def capture_preview(self):
+        """Capture camera preview for positioning"""
         try:
-            if os.path.exists(output_path):
-                os.remove(output_path)
-            
             subprocess.run(["killall", "gphoto2"], capture_output=True, timeout=1)
             time.sleep(0.3)
             
             result = subprocess.run(
-                ["gphoto2", "--capture-preview", f"--filename={output_path}"],
+                ["gphoto2", "--capture-preview", "--filename=/tmp/preview.jpg"],
                 capture_output=True,
                 timeout=10
             )
             
             # Handle Canon thumb_ prefix
-            if not os.path.exists(output_path):
-                thumb_path = os.path.join(
-                    os.path.dirname(output_path),
-                    "thumb_" + os.path.basename(output_path)
-                )
-                if os.path.exists(thumb_path):
-                    os.rename(thumb_path, output_path)
+            if not os.path.exists("/tmp/preview.jpg") and os.path.exists("/tmp/thumb_preview.jpg"):
+                os.rename("/tmp/thumb_preview.jpg", "/tmp/preview.jpg")
             
-            time.sleep(0.4)
-            return os.path.exists(output_path)
-            
-        except subprocess.TimeoutExpired:
-            subprocess.run(["killall", "-9", "gphoto2"], capture_output=True)
-            return False
-        except Exception:
+            return os.path.exists("/tmp/preview.jpg")
+        except:
             return False
     
-    def smart_align_step(self, stdscr):
-        """
-        Single step of intelligent frame alignment.
-        Uses two-gap detection to properly center frames.
-        """
-        if not HAS_CV2:
-            self.status_msg = "OpenCV not available"
-            return False
-        
-        # Capture preview
-        self.status_msg = "Capturing preview..."
-        self.draw_screen(stdscr)
-        
-        if not self.capture_preview():
-            self.status_msg = "Preview failed"
-            return False
-        
-        # Detect frame gaps
-        self.status_msg = "Analyzing frame position..."
-        self.draw_screen(stdscr)
-        
-        result = detect_frame_gaps("/tmp/preview.jpg", debug=False)
-        
-        # Update status message
-        self.status_msg = result.get('message', result.get('action', 'Processing...'))
-        self.draw_screen(stdscr)
-        
-        # Check if aligned
-        if result['action'] in ['CAPTURE', 'CAPTURE_OK']:
-            self.status_msg = f"✓ ALIGNED! {result['message']}"
-            self.draw_screen(stdscr)
-            time.sleep(1)
-            return True
-        
-        # Get motor command
-        motor_cmd = get_motor_command(result, self.pixels_per_step)
-        
-        if motor_cmd['command']:
-            self.status_msg = f"{result['status']}: {motor_cmd['description']}"
-            self.draw_screen(stdscr)
-            
-            # Send command to Arduino
-            self.send_command(motor_cmd['command'])
-            time.sleep(0.4)  # Wait for movement
-            
-            return False
-        else:
-            # No movement needed - aligned
-            return True
-    
-    def calibrate_frame_spacing(self, stdscr):
-        """
-        Calibrate pixels-per-step and frame spacing.
-        Call this on the first frame after manual positioning.
-        """
-        if not HAS_CV2:
-            return False
-        
-        stdscr.clear()
-        stdscr.addstr(0, 0, "=== CALIBRATION ===", curses.A_BOLD)
-        stdscr.addstr(2, 0, "Capturing initial position...")
-        stdscr.refresh()
-        
-        # Capture first position
-        if not self.capture_preview():
-            stdscr.addstr(4, 0, "Preview failed!")
-            stdscr.refresh()
-            time.sleep(2)
-            return False
-        
-        result1 = detect_frame_gaps("/tmp/preview.jpg")
-        
-        if not result1.get('frame_center'):
-            stdscr.addstr(4, 0, "Could not detect frame - adjust position manually")
-            stdscr.refresh()
-            time.sleep(2)
-            return False
-        
-        initial_center = result1['frame_center']
-        initial_steps = self.position_steps
-        
-        stdscr.addstr(4, 0, f"Initial frame center: {initial_center}px")
-        stdscr.addstr(5, 0, "")
-        stdscr.addstr(6, 0, "Advancing to next frame...")
-        stdscr.refresh()
-        
-        # Advance approximately one frame
-        advance_steps = int(self.steps_per_frame * 0.8)  # Conservative estimate
-        self.send_command(f'H{advance_steps}')
-        time.sleep(1.5)
-        
-        # Capture new position
-        if not self.capture_preview():
-            stdscr.addstr(8, 0, "Second preview failed!")
-            stdscr.refresh()
-            time.sleep(2)
-            return False
-        
-        result2 = detect_frame_gaps("/tmp/preview.jpg")
-        
-        if not result2.get('frame_center'):
-            stdscr.addstr(8, 0, "Could not detect second frame")
-            stdscr.refresh()
-            time.sleep(2)
-            return False
-        
-        new_center = result2['frame_center']
-        steps_moved = self.position_steps - initial_steps
-        pixels_moved = abs(new_center - initial_center)
-        
-        # Calculate pixels per step
-        if steps_moved > 0 and pixels_moved > 0:
-            self.pixels_per_step = pixels_moved / steps_moved
-            
-            # Also estimate frame spacing in steps
-            # If we moved ~1 frame, this is our frame spacing
-            if result2['action'] in ['CAPTURE', 'CAPTURE_OK', 'NEEDS_FINE_TUNE']:
-                self.last_frame_advance = steps_moved
-        
-        stdscr.addstr(8, 0, f"New frame center: {new_center}px")
-        stdscr.addstr(9, 0, f"Moved: {pixels_moved}px in {steps_moved} steps")
-        stdscr.addstr(10, 0, f"Calculated: {self.pixels_per_step:.2f} pixels/step")
-        stdscr.addstr(11, 0, "")
-        stdscr.addstr(12, 0, "✓ Calibration complete!")
-        stdscr.addstr(14, 0, "Press any key to continue...")
-        stdscr.refresh()
-        stdscr.getch()
-        
-        self.save_state()
-        return True
-    
-    def capture_image(self, stdscr):
-        """Capture RAW image"""
-        self.status_msg = "Focusing and capturing..."
-        self.draw_screen(stdscr)
-        
+    def capture_image(self):
+        """Capture final image"""
         subprocess.run(["killall", "gphoto2"], capture_output=True, timeout=1)
         time.sleep(0.3)
         
-        # Autofocus
+        # Autofocus (optional, comment out if not needed)
         try:
             subprocess.run(
                 ["gphoto2", "--set-config", "autofocus=1"],
@@ -316,30 +142,147 @@ class FilmScanner:
                 timeout=5
             )
             time.sleep(1.5)
-        except subprocess.TimeoutExpired:
-            subprocess.run(["killall", "-9", "gphoto2"], capture_output=True)
+        except:
+            pass
         
-        # Capture
+        # Generate filename
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        filename = f"{timestamp}.cr3"
+        filename = f"{timestamp}.cr3"  # Adjust extension for your camera
         filepath = os.path.join(self.roll_folder, filename)
         
+        # Capture
         try:
-            subprocess.run(
+            result = subprocess.run(
                 ["gphoto2", "--capture-image-and-download", f"--filename={filepath}"],
                 capture_output=True,
                 timeout=20
             )
+            
+            if os.path.exists(filepath):
+                self.frame_count += 1
+                self.frame_positions.append(self.position)
+                self.save_state()
+                return True
         except subprocess.TimeoutExpired:
             subprocess.run(["killall", "-9", "gphoto2"], capture_output=True)
-            self.status_msg = "Capture timeout"
-            return False
         
-        if os.path.exists(filepath):
-            self.frame_count += 1
-            self.save_state()
-            self.status_msg = f"✓ Frame {self.frame_count}: {filename}"
-            time.sleep(1.2)
+        return False
+    
+    def calibrate(self, stdscr):
+        """
+        Calibrate frame advance distance.
+        Assumes frame 1 is already manually positioned.
+        """
+        stdscr.clear()
+        stdscr.addstr(0, 0, "=== CALIBRATION ===", curses.A_BOLD)
+        stdscr.addstr(2, 0, "Frame 1 should be properly positioned")
+        stdscr.addstr(3, 0, "Press ENTER when ready, or Q to cancel")
+        stdscr.refresh()
+        
+        while True:
+            key = stdscr.getch()
+            if key == 10:  # Enter
+                break
+            elif key in [ord('q'), ord('Q')]:
+                return False
+        
+        # Record frame 1 position
+        frame1_pos = self.position
+        
+        stdscr.clear()
+        stdscr.addstr(0, 0, "=== CALIBRATION ===", curses.A_BOLD)
+        stdscr.addstr(2, 0, f"Frame 1 position: {frame1_pos}")
+        stdscr.addstr(4, 0, "Now advance to frame 2 using arrow keys")
+        stdscr.addstr(5, 0, "Press ENTER when frame 2 is centered")
+        stdscr.addstr(7, 0, "Controls:")
+        stdscr.addstr(8, 0, "  ← →     Fine movement")
+        stdscr.addstr(9, 0, "  Shift+← →   Coarse movement")
+        stdscr.addstr(10, 0, "  P       Preview")
+        stdscr.addstr(12, 0, f"Position: {self.position}")
+        stdscr.refresh()
+        
+        # Manual positioning loop
+        while True:
+            key = stdscr.getch()
+            
+            if key == 10:  # Enter - done positioning
+                frame2_pos = self.position
+                self.frame_advance = frame2_pos - frame1_pos
+                
+                if self.frame_advance <= 0:
+                    stdscr.addstr(14, 0, "ERROR: Frame 2 must be ahead of frame 1!", curses.A_REVERSE)
+                    stdscr.refresh()
+                    time.sleep(2)
+                    return False
+                
+                stdscr.clear()
+                stdscr.addstr(0, 0, "✓ CALIBRATION COMPLETE", curses.A_BOLD)
+                stdscr.addstr(2, 0, f"Frame spacing: {self.frame_advance} steps")
+                stdscr.addstr(4, 0, "This will be used for all frames")
+                stdscr.addstr(6, 0, "Press any key to continue...")
+                stdscr.refresh()
+                stdscr.getch()
+                
+                self.save_state()
+                return True
+                
+            elif key == curses.KEY_LEFT:
+                self.send('b')
+                stdscr.addstr(12, 0, f"Position: {self.position}     ")
+                stdscr.refresh()
+                
+            elif key == curses.KEY_RIGHT:
+                self.send('f')
+                stdscr.addstr(12, 0, f"Position: {self.position}     ")
+                stdscr.refresh()
+                
+            elif key == curses.KEY_SLEFT:
+                self.send('B')
+                stdscr.addstr(12, 0, f"Position: {self.position}     ")
+                stdscr.refresh()
+                
+            elif key == curses.KEY_SRIGHT:
+                self.send('F')
+                stdscr.addstr(12, 0, f"Position: {self.position}     ")
+                stdscr.refresh()
+                
+            elif key in [ord('p'), ord('P')]:
+                stdscr.addstr(14, 0, "Capturing preview...")
+                stdscr.refresh()
+                if self.capture_preview():
+                    stdscr.addstr(14, 0, "Preview saved to /tmp/preview.jpg     ")
+                else:
+                    stdscr.addstr(14, 0, "Preview failed                        ")
+                stdscr.refresh()
+                
+            elif key in [ord('q'), ord('Q')]:
+                return False
+    
+    def advance_frame(self):
+        """Advance to next frame using calibrated distance"""
+        if self.frame_advance is None:
+            # Use default if not calibrated
+            advance = self.default_advance
+            self.status_msg = f"Advancing {advance} steps (default)"
+        else:
+            advance = self.frame_advance
+            self.status_msg = f"Advancing {advance} steps (calibrated)"
+        
+        return self.send(f'H{advance}')
+    
+    def capture_frame(self, stdscr):
+        """Capture current frame"""
+        self.status_msg = "Capturing..."
+        self.draw(stdscr)
+        
+        if self.capture_image():
+            self.status_msg = f"✓ Frame {self.frame_count} captured"
+            
+            # Calculate actual advance if we have previous frames
+            if len(self.frame_positions) >= 2:
+                actual_advance = self.frame_positions[-1] - self.frame_positions[-2]
+                self.status_msg += f" (advanced {actual_advance} steps)"
+            
             return True
         else:
             self.status_msg = "✗ Capture failed"
@@ -351,16 +294,16 @@ class FilmScanner:
             state = {
                 'roll_name': self.roll_name,
                 'frame_count': self.frame_count,
-                'position_steps': self.position_steps,
+                'position': self.position,
+                'frame_advance': self.frame_advance,
+                'frame_positions': self.frame_positions,
                 'mode': self.mode,
-                'pixels_per_step': self.pixels_per_step,
-                'last_frame_advance': self.last_frame_advance,
                 'last_updated': datetime.now().isoformat()
             }
             try:
                 with open(self.state_file, 'w') as f:
                     json.dump(state, f, indent=2)
-            except Exception:
+            except:
                 pass
     
     def load_state(self):
@@ -370,57 +313,17 @@ class FilmScanner:
                 with open(self.state_file, 'r') as f:
                     state = json.load(f)
                 self.frame_count = state.get('frame_count', 0)
-                self.position_steps = state.get('position_steps', 0)
-                self.mode = state.get('mode', 'smart')
-                self.pixels_per_step = state.get('pixels_per_step', 2.0)
-                self.last_frame_advance = state.get('last_frame_advance')
+                self.position = state.get('position', 0)
+                self.frame_advance = state.get('frame_advance')
+                self.frame_positions = state.get('frame_positions', [])
+                self.mode = state.get('mode', 'manual')
                 return True
-            except Exception:
+            except:
                 return False
         return False
     
-    def draw_screen(self, stdscr):
-        """Draw interface"""
-        stdscr.clear()
-        
-        try:
-            stdscr.addstr(0, 0, "=== 35MM FILM SCANNER ===", curses.A_BOLD)
-        except:
-            pass
-        
-        # Status
-        stdscr.addstr(2, 0, f"Roll: {self.roll_name if self.roll_name else 'None'}")
-        stdscr.addstr(3, 0, f"Frames: {self.frame_count}")
-        stdscr.addstr(4, 0, f"Position: {self.position_steps} steps")
-        
-        step_str = 'LARGE' if self.is_large_step else 'small'
-        mode_str = self.mode.upper()
-        stdscr.addstr(5, 0, f"Step: {step_str} | Mode: {mode_str}")
-        
-        if self.pixels_per_step != 2.0:
-            stdscr.addstr(6, 0, f"Calibrated: {self.pixels_per_step:.2f} px/step")
-        
-        # Controls
-        stdscr.addstr(8, 0, "Controls:", curses.A_BOLD)
-        stdscr.addstr(9, 0, "  ← / →   Jog film (G toggles size)")
-        stdscr.addstr(10, 0, "  SPACE   Auto-align + Capture")
-        stdscr.addstr(11, 0, "  A       Auto-align only")
-        stdscr.addstr(12, 0, "  C       Calibrate (first frame)")
-        stdscr.addstr(13, 0, "  M       Toggle Manual/Smart mode")
-        stdscr.addstr(14, 0, "  N       New roll")
-        stdscr.addstr(15, 0, "  P       Preview")
-        stdscr.addstr(16, 0, "  Z       Zero position")
-        stdscr.addstr(17, 0, "  Q       Quit")
-        
-        # Status message
-        if self.status_msg:
-            stdscr.addstr(19, 0, "Status:", curses.A_BOLD)
-            stdscr.addstr(20, 0, self.status_msg[:75])
-        
-        stdscr.refresh()
-    
     def new_roll(self, stdscr):
-        """Initialize new roll"""
+        """Create new roll"""
         stdscr.clear()
         stdscr.addstr(0, 0, "=== NEW ROLL ===", curses.A_BOLD)
         stdscr.addstr(2, 0, "Enter roll name: ")
@@ -430,12 +333,12 @@ class FilmScanner:
         curses.curs_set(1)
         
         try:
-            roll_input = stdscr.getstr(2, 17, 40).decode('utf-8', errors='ignore').strip()
-        except Exception:
+            roll_input = stdscr.getstr(2, 17, 40).decode('utf-8').strip()
+        except:
             roll_input = ""
-        
-        curses.noecho()
-        curses.curs_set(0)
+        finally:
+            curses.noecho()
+            curses.curs_set(0)
         
         if not roll_input:
             self.status_msg = "Cancelled"
@@ -457,199 +360,203 @@ class FilmScanner:
         if self.load_state():
             stdscr.clear()
             stdscr.addstr(0, 0, "Found existing roll!", curses.A_BOLD)
-            stdscr.addstr(2, 0, f"Frames: {self.frame_count}")
-            stdscr.addstr(3, 0, f"Position: {self.position_steps} steps")
-            stdscr.addstr(4, 0, f"Mode: {self.mode}")
-            if self.pixels_per_step != 2.0:
-                stdscr.addstr(5, 0, f"Calibrated: {self.pixels_per_step:.2f} px/step")
-            stdscr.addstr(7, 0, "Continue (C) or Start Over (S)?")
+            stdscr.addstr(2, 0, f"Frames captured: {self.frame_count}")
+            stdscr.addstr(3, 0, f"Position: {self.position} steps")
+            if self.frame_advance:
+                stdscr.addstr(4, 0, f"Frame advance: {self.frame_advance} steps")
+            stdscr.addstr(6, 0, "Resume (R) or Start Over (S)?")
             stdscr.refresh()
             
             while True:
                 key = stdscr.getch()
-                if key in [ord('c'), ord('C')]:
+                if key in [ord('r'), ord('R')]:
                     self.status_msg = f"Resumed at frame {self.frame_count}"
                     return True
                 elif key in [ord('s'), ord('S')]:
-                    self.frame_count = 0
-                    self.position_steps = 0
-                    self.pixels_per_step = 2.0
-                    self.last_frame_advance = None
                     break
                 elif key in [ord('q'), ord('Q')]:
                     return False
         
-        # New roll setup
+        # New roll
         self.frame_count = 0
-        self.mode = 'smart'
-        self.pixels_per_step = 2.0
-        self.last_frame_advance = None
+        self.position = 0
+        self.frame_positions = []
+        self.frame_advance = None
         
         stdscr.clear()
         stdscr.addstr(0, 0, f"Roll: {self.roll_name}", curses.A_BOLD)
-        stdscr.addstr(2, 0, "Smart mode enabled")
-        stdscr.addstr(4, 0, "Workflow:")
-        stdscr.addstr(5, 0, "  1. Position first frame roughly (arrow keys)")
-        stdscr.addstr(6, 0, "  2. Press C to calibrate")
-        stdscr.addstr(7, 0, "  3. Press SPACE to auto-align + capture")
-        stdscr.addstr(8, 0, "  4. Repeat for each frame")
-        stdscr.addstr(10, 0, "Press any key to start...")
+        stdscr.addstr(2, 0, "WORKFLOW:")
+        stdscr.addstr(4, 0, "Manual Mode:")
+        stdscr.addstr(5, 0, "  1. Use arrows to position each frame")
+        stdscr.addstr(6, 0, "  2. Press SPACE to capture")
+        stdscr.addstr(8, 0, "Calibrated Mode:")
+        stdscr.addstr(9, 0, "  1. Position frame 1 manually")
+        stdscr.addstr(10, 0, "  2. Press C to calibrate advance")
+        stdscr.addstr(11, 0, "  3. Press SPACE to auto-advance and capture")
+        stdscr.addstr(13, 0, "Press any key to continue...")
         stdscr.refresh()
         stdscr.getch()
         
-        self.status_msg = "Position first frame, then press C to calibrate"
+        self.status_msg = "Position frame 1"
         self.save_state()
         return True
+    
+    def draw(self, stdscr):
+        """Draw main interface"""
+        stdscr.clear()
+        
+        stdscr.addstr(0, 0, "=== 35MM FILM SCANNER ===", curses.A_BOLD)
+        
+        # Status
+        stdscr.addstr(2, 0, f"Roll: {self.roll_name if self.roll_name else 'None'}")
+        stdscr.addstr(3, 0, f"Frames: {self.frame_count}")
+        stdscr.addstr(4, 0, f"Position: {self.position} steps")
+        
+        # Mode and calibration
+        mode_str = "MANUAL" if self.mode == 'manual' else "CALIBRATED"
+        stdscr.addstr(5, 0, f"Mode: {mode_str}")
+        
+        if self.frame_advance:
+            stdscr.addstr(6, 0, f"Frame advance: {self.frame_advance} steps", curses.A_BOLD)
+        else:
+            stdscr.addstr(6, 0, "Not calibrated (using default)", curses.A_DIM)
+        
+        step_str = "LARGE" if self.is_large_step else "small"
+        stdscr.addstr(7, 0, f"Step size: {step_str}")
+        
+        # Controls
+        stdscr.addstr(9, 0, "Controls:", curses.A_BOLD)
+        stdscr.addstr(10, 0, "  ← / →       Manual jog")
+        stdscr.addstr(11, 0, "  G           Toggle step size")
+        stdscr.addstr(12, 0, "  SPACE       Capture (advance if calibrated)")
+        stdscr.addstr(13, 0, "  A           Advance one frame")
+        stdscr.addstr(14, 0, "  C           Calibrate frame spacing")
+        stdscr.addstr(15, 0, "  M           Toggle Manual/Calibrated mode")
+        stdscr.addstr(16, 0, "  N           New roll")
+        stdscr.addstr(17, 0, "  P           Preview")
+        stdscr.addstr(18, 0, "  Z           Zero position")
+        stdscr.addstr(19, 0, "  Q           Quit")
+        
+        # Status message
+        if self.status_msg:
+            stdscr.addstr(21, 0, "Status:", curses.A_BOLD)
+            stdscr.addstr(22, 0, self.status_msg[:75])
+        
+        stdscr.refresh()
     
     def run(self, stdscr):
         """Main loop"""
         curses.curs_set(0)
         stdscr.nodelay(False)
-        stdscr.clear()
         
-        # Connect to Arduino
+        # Find Arduino
+        stdscr.clear()
+        stdscr.addstr(0, 0, "Searching for Arduino...")
+        stdscr.refresh()
+        
         self.arduino = self.find_arduino(stdscr)
         
         if not self.arduino:
             stdscr.clear()
             stdscr.addstr(0, 0, "ERROR: Arduino not found!", curses.A_BOLD)
-            stdscr.addstr(2, 0, "Check USB connection and sketch upload")
-            stdscr.addstr(4, 0, "Press any key to exit...")
+            stdscr.addstr(2, 0, "Check:")
+            stdscr.addstr(3, 0, "  1. USB cable connection")
+            stdscr.addstr(4, 0, "  2. Arduino sketch uploaded")
+            stdscr.addstr(5, 0, "  3. Correct serial port permissions")
+            stdscr.addstr(7, 0, "Press any key to exit...")
             stdscr.refresh()
             stdscr.getch()
             return
         
-        time.sleep(1)
-        
         # Initialize Arduino
-        stdscr.clear()
-        stdscr.addstr(0, 0, f"✓ Arduino: {self.arduino.port}", curses.A_BOLD)
-        stdscr.addstr(2, 0, "Initializing...")
-        stdscr.refresh()
-        
-        self.send_command(f'S{self.steps_per_frame}')
-        self.send_command(f'm{self.fine_step}')
-        self.send_command(f'l{self.coarse_step}')
-        self.send_command('U')
-        self.send_command('E')
-        time.sleep(0.5)
-        
-        stdscr.addstr(3, 0, "✓ Ready")
-        stdscr.addstr(5, 0, "Press any key to start...")
-        stdscr.refresh()
-        stdscr.getch()
+        time.sleep(1)
+        self.send('U')  # Unlock
+        self.send('E')  # Enable motor
+        self.send(f'v{self.step_delay}')  # Set step delay
         
         self.status_msg = "Ready - Press N for new roll"
         
         # Main loop
         while True:
-            self.draw_screen(stdscr)
+            self.draw(stdscr)
             
             key = stdscr.getch()
             
-            if key in [ord('q'), ord('Q'), 27]:
+            if key in [ord('q'), ord('Q'), 27]:  # Q or ESC
                 break
             
             elif key == curses.KEY_LEFT:
                 cmd = 'B' if self.is_large_step else 'b'
-                self.send_command(cmd)
-                self.status_msg = f"Moved backward ({cmd})"
+                if self.send(cmd):
+                    self.status_msg = f"← Moved backward ({self.coarse_step if self.is_large_step else self.fine_step} steps)"
             
             elif key == curses.KEY_RIGHT:
                 cmd = 'F' if self.is_large_step else 'f'
-                self.send_command(cmd)
-                self.status_msg = f"Moved forward ({cmd})"
+                if self.send(cmd):
+                    self.status_msg = f"→ Moved forward ({self.coarse_step if self.is_large_step else self.fine_step} steps)"
             
             elif key in [ord('g'), ord('G')]:
                 self.is_large_step = not self.is_large_step
-                self.status_msg = f"Step: {'LARGE' if self.is_large_step else 'small'}"
+                self.status_msg = f"Step size: {'LARGE' if self.is_large_step else 'small'}"
             
             elif key in [ord('m'), ord('M')]:
-                self.mode = 'smart' if self.mode == 'manual' else 'manual'
+                self.mode = 'calibrated' if self.mode == 'manual' else 'manual'
                 self.status_msg = f"Mode: {self.mode.upper()}"
                 self.save_state()
             
             elif key in [ord('z'), ord('Z')]:
-                self.send_command('Z')
+                self.send('Z')
+                self.frame_positions = []
                 self.status_msg = "Position zeroed"
             
             elif key in [ord('p'), ord('P')]:
+                self.status_msg = "Capturing preview..."
+                self.draw(stdscr)
                 if self.capture_preview():
                     self.status_msg = "✓ Preview: /tmp/preview.jpg"
                 else:
                     self.status_msg = "✗ Preview failed"
             
             elif key in [ord('c'), ord('C')]:
-                if self.roll_name:
-                    self.calibrate_frame_spacing(stdscr)
-                else:
+                if not self.roll_name:
                     self.status_msg = "Create roll first (press N)"
+                else:
+                    if self.calibrate(stdscr):
+                        self.status_msg = f"✓ Calibrated: {self.frame_advance} steps/frame"
+                        self.mode = 'calibrated'
+                    else:
+                        self.status_msg = "Calibration cancelled"
             
             elif key in [ord('a'), ord('A')]:
-                if not self.roll_name:
-                    self.status_msg = "Create roll first (press N)"
-                    continue
-                
-                if not HAS_CV2:
-                    self.status_msg = "OpenCV not available"
-                    continue
-                
-                self.status_msg = "Auto-aligning..."
-                self.draw_screen(stdscr)
-                
-                for attempt in range(20):
-                    if self.smart_align_step(stdscr):
-                        break
-                    time.sleep(0.2)
+                if self.advance_frame():
+                    self.status_msg = f"Advanced to next frame"
                 else:
-                    self.status_msg = "Alignment timeout - try manual positioning"
+                    self.status_msg = "Advance failed"
             
-            elif key == ord(' '):
+            elif key == ord(' '):  # SPACE
                 if not self.roll_name:
                     self.status_msg = "Create roll first (press N)"
                     continue
                 
-                if not HAS_CV2:
-                    self.status_msg = "OpenCV not available - use manual mode"
-                    continue
+                # In calibrated mode, advance first (except for first frame)
+                if self.mode == 'calibrated' and self.frame_count > 0:
+                    if not self.advance_frame():
+                        self.status_msg = "Advance failed"
+                        continue
+                    time.sleep(1)  # Wait for movement to complete
                 
-                # Smart capture: align then shoot
-                self.status_msg = "Smart capture: aligning..."
-                self.draw_screen(stdscr)
-                
-                aligned = False
-                for attempt in range(20):
-                    if self.smart_align_step(stdscr):
-                        aligned = True
-                        break
-                    time.sleep(0.2)
-                
-                if aligned:
-                    if self.capture_image(stdscr):
-                        self.status_msg = f"✓ Frame {self.frame_count} complete!"
-                        
-                        # Auto-advance to next frame using learned spacing
-                        if self.last_frame_advance:
-                            self.status_msg = "Advancing to next frame..."
-                            self.draw_screen(stdscr)
-                            
-                            # Use 85% of last advance (conservative)
-                            advance = int(self.last_frame_advance * 0.85)
-                            self.send_command(f'H{advance}')
-                            time.sleep(0.8)
-                            
-                            self.status_msg = f"✓ Frame {self.frame_count} - ready for next"
-                    else:
-                        self.status_msg = "Capture failed"
+                # Capture
+                if self.capture_frame(stdscr):
+                    pass  # Status already set by capture_frame
                 else:
-                    self.status_msg = "Could not align - adjust manually and try again"
+                    self.status_msg = "Capture failed"
             
             elif key in [ord('n'), ord('N')]:
                 self.new_roll(stdscr)
         
         # Cleanup
         if self.arduino:
-            self.send_command('M')
+            self.send('M')  # Disable motor
             time.sleep(0.2)
             self.arduino.close()
 
