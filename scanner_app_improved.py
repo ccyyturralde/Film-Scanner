@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-35mm Film Scanner Control Application
-Raspberry Pi 4 - Production Version
+35mm Film Scanner Control Application - Production Version
+Uses proper two-gap detection to center frames correctly
 """
 
 import curses
@@ -16,9 +16,11 @@ import json
 try:
     import cv2
     import numpy as np
+    from optimized_edge_detect import detect_frame_gaps, get_motor_command
     HAS_CV2 = True
 except ImportError:
     HAS_CV2 = False
+    print("Warning: OpenCV not available. Auto-align disabled.")
 
 class FilmScanner:
     def __init__(self):
@@ -31,24 +33,24 @@ class FilmScanner:
         # Motor configuration
         self.fine_step = 8
         self.coarse_step = 64
-        self.steps_per_frame = 1200
+        self.steps_per_frame = 1200  # Will be calibrated
         
         # Position tracking
         self.position_steps = 0
         self.is_large_step = False
         
-        # Mode flags
-        self.mode = 'manual'  # 'manual' or 'smart'
+        # Mode
+        self.mode = 'smart'  # 'manual' or 'smart'
         
-        # Smart mode parameters
-        self.pixels_per_step = None  # Calibrated during use
-        self.target_gap_percent = 82  # Ideal gap position (75-90% range)
+        # Calibration (learned during use)
+        self.pixels_per_step = 2.0  # Initial estimate, will be refined
+        self.last_frame_advance = None  # Steps to advance between frames
         
         # State file
         self.state_file = None
         
     def find_arduino(self, stdscr=None):
-        """Find Arduino on any available port (Raspberry Pi compatible)"""
+        """Find Arduino on any available port"""
         
         ports = list(serial.tools.list_ports.comports())
         
@@ -167,88 +169,10 @@ class FilmScanner:
         except Exception:
             return False
     
-    def detect_gap(self, img_path):
-        """Detect frame gap using local edge detection"""
-        if not HAS_CV2:
-            return None, 0.0
-        
-        try:
-            img = cv2.imread(img_path)
-            if img is None:
-                return None, 0.0
-            
-            h, w = img.shape[:2]
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            
-            # Focus on middle 40% vertically
-            y1, y2 = int(h * 0.3), int(h * 0.7)
-            roi = gray[y1:y2, :]
-            
-            # Brightness profile
-            brightness = np.mean(roi, axis=0)
-            
-            # Smooth
-            kernel_size = max(5, int(w * 0.005))
-            kernel = np.ones(kernel_size) / kernel_size
-            smoothed = np.convolve(brightness, kernel, mode='same')
-            
-            # Find bright peaks
-            median_bright = np.median(smoothed)
-            std_bright = np.std(smoothed)
-            threshold = median_bright + 0.8 * std_bright
-            bright_mask = smoothed > threshold
-            
-            # Find gaps
-            gaps = []
-            in_gap = False
-            gap_start = 0
-            
-            for i in range(len(bright_mask)):
-                if bright_mask[i] and not in_gap:
-                    gap_start = i
-                    in_gap = True
-                elif not bright_mask[i] and in_gap:
-                    gap_end = i
-                    gap_width = gap_end - gap_start
-                    
-                    if 7 < gap_width < 100:
-                        gap_center = (gap_start + gap_end) // 2
-                        gap_brightness = np.mean(smoothed[gap_start:gap_end])
-                        gaps.append({
-                            'center': gap_center,
-                            'width': gap_width,
-                            'brightness': gap_brightness,
-                            'percent': (gap_center / w) * 100
-                        })
-                    in_gap = False
-            
-            if not gaps:
-                return None, 0.0
-            
-            # Find rightmost gap
-            target_min_pct = 55
-            right_gaps = [g for g in gaps if g['percent'] > target_min_pct]
-            
-            if not right_gaps:
-                selected = max(gaps, key=lambda g: g['center'])
-            else:
-                selected = max(right_gaps, key=lambda g: g['center'])
-            
-            # Calculate confidence
-            max_bright = np.max(smoothed)
-            brightness_ratio = selected['brightness'] / max_bright
-            width_score = min(selected['width'] / 40, 1.0)
-            confidence = (brightness_ratio * 0.7 + width_score * 0.3)
-            
-            return selected['center'], confidence
-            
-        except Exception:
-            return None, 0.0
-    
     def smart_align_step(self, stdscr):
         """
-        Single step of smart alignment.
-        Makes intelligent decisions about how far to move based on distance to target.
+        Single step of intelligent frame alignment.
+        Uses two-gap detection to properly center frames.
         """
         if not HAS_CV2:
             self.status_msg = "OpenCV not available"
@@ -262,88 +186,119 @@ class FilmScanner:
             self.status_msg = "Preview failed"
             return False
         
-        # Detect gap
-        self.status_msg = "Detecting gap..."
+        # Detect frame gaps
+        self.status_msg = "Analyzing frame position..."
         self.draw_screen(stdscr)
         
-        gap_col, confidence = self.detect_gap("/tmp/preview.jpg")
+        result = detect_frame_gaps("/tmp/preview.jpg", debug=False)
         
-        if gap_col is None:
-            # No gap visible - advance forward to find next frame
-            self.status_msg = "No gap - advancing"
-            self.draw_screen(stdscr)
-            self.send_command('F')
-            time.sleep(0.5)
-            return False
-        
-        # Get image width
-        img = cv2.imread("/tmp/preview.jpg")
-        img_width = img.shape[1]
-        
-        # Target: 75-90% of width, ideal at 82%
-        target_min = int(img_width * 0.75)
-        target_max = int(img_width * 0.90)
-        target_ideal = int(img_width * 0.82)
-        
-        # Calculate offset
-        offset = gap_col - target_ideal
-        gap_percent = (gap_col / img_width) * 100
+        # Update status message
+        self.status_msg = result.get('message', result.get('action', 'Processing...'))
+        self.draw_screen(stdscr)
         
         # Check if aligned
-        if target_min <= gap_col <= target_max and abs(offset) <= 8:
-            self.status_msg = f"✓ ALIGNED at {gap_percent:.1f}%"
+        if result['action'] in ['CAPTURE', 'CAPTURE_OK']:
+            self.status_msg = f"✓ ALIGNED! {result['message']}"
             self.draw_screen(stdscr)
             time.sleep(1)
             return True
         
-        # Calculate movement needed
-        # Key insight: pixels to steps conversion
-        # Estimate: ~2 pixels per step (calibrate during use)
-        if self.pixels_per_step is None:
-            self.pixels_per_step = 2.0  # Initial estimate
+        # Get motor command
+        motor_cmd = get_motor_command(result, self.pixels_per_step)
         
-        steps_needed = int(abs(offset) / self.pixels_per_step)
-        
-        # Determine movement strategy based on distance
-        if abs(offset) > 200:
-            # Large distance - use coarse movement
-            self.status_msg = f"Gap at {gap_percent:.1f}%, advancing ~{steps_needed} steps"
+        if motor_cmd['command']:
+            self.status_msg = f"{result['status']}: {motor_cmd['description']}"
             self.draw_screen(stdscr)
             
-            # Make multiple coarse movements if needed
-            num_coarse = max(1, steps_needed // self.coarse_step)
-            for _ in range(min(num_coarse, 5)):  # Limit to 5 moves per iteration
-                if offset > 0:
-                    self.send_command('B')
-                else:
-                    self.send_command('F')
-                time.sleep(0.3)
+            # Send command to Arduino
+            self.send_command(motor_cmd['command'])
+            time.sleep(0.4)  # Wait for movement
             
-        elif abs(offset) > 50:
-            # Medium distance - use fine movement
-            self.status_msg = f"Gap at {gap_percent:.1f}%, fine adjustment"
-            self.draw_screen(stdscr)
-            
-            num_fine = max(1, steps_needed // self.fine_step)
-            for _ in range(min(num_fine, 3)):
-                if offset > 0:
-                    self.send_command('b')
-                else:
-                    self.send_command('f')
-                time.sleep(0.2)
-        
+            return False
         else:
-            # Small distance - single fine movement
-            self.status_msg = f"Almost aligned, {abs(offset)}px offset"
-            self.draw_screen(stdscr)
-            
-            if offset > 0:
-                self.send_command('b')
-            else:
-                self.send_command('f')
-            time.sleep(0.2)
+            # No movement needed - aligned
+            return True
+    
+    def calibrate_frame_spacing(self, stdscr):
+        """
+        Calibrate pixels-per-step and frame spacing.
+        Call this on the first frame after manual positioning.
+        """
+        if not HAS_CV2:
+            return False
         
-        return False
+        stdscr.clear()
+        stdscr.addstr(0, 0, "=== CALIBRATION ===", curses.A_BOLD)
+        stdscr.addstr(2, 0, "Capturing initial position...")
+        stdscr.refresh()
+        
+        # Capture first position
+        if not self.capture_preview():
+            stdscr.addstr(4, 0, "Preview failed!")
+            stdscr.refresh()
+            time.sleep(2)
+            return False
+        
+        result1 = detect_frame_gaps("/tmp/preview.jpg")
+        
+        if not result1.get('frame_center'):
+            stdscr.addstr(4, 0, "Could not detect frame - adjust position manually")
+            stdscr.refresh()
+            time.sleep(2)
+            return False
+        
+        initial_center = result1['frame_center']
+        initial_steps = self.position_steps
+        
+        stdscr.addstr(4, 0, f"Initial frame center: {initial_center}px")
+        stdscr.addstr(5, 0, "")
+        stdscr.addstr(6, 0, "Advancing to next frame...")
+        stdscr.refresh()
+        
+        # Advance approximately one frame
+        advance_steps = int(self.steps_per_frame * 0.8)  # Conservative estimate
+        self.send_command(f'H{advance_steps}')
+        time.sleep(1.5)
+        
+        # Capture new position
+        if not self.capture_preview():
+            stdscr.addstr(8, 0, "Second preview failed!")
+            stdscr.refresh()
+            time.sleep(2)
+            return False
+        
+        result2 = detect_frame_gaps("/tmp/preview.jpg")
+        
+        if not result2.get('frame_center'):
+            stdscr.addstr(8, 0, "Could not detect second frame")
+            stdscr.refresh()
+            time.sleep(2)
+            return False
+        
+        new_center = result2['frame_center']
+        steps_moved = self.position_steps - initial_steps
+        pixels_moved = abs(new_center - initial_center)
+        
+        # Calculate pixels per step
+        if steps_moved > 0 and pixels_moved > 0:
+            self.pixels_per_step = pixels_moved / steps_moved
+            
+            # Also estimate frame spacing in steps
+            # If we moved ~1 frame, this is our frame spacing
+            if result2['action'] in ['CAPTURE', 'CAPTURE_OK', 'NEEDS_FINE_TUNE']:
+                self.last_frame_advance = steps_moved
+        
+        stdscr.addstr(8, 0, f"New frame center: {new_center}px")
+        stdscr.addstr(9, 0, f"Moved: {pixels_moved}px in {steps_moved} steps")
+        stdscr.addstr(10, 0, f"Calculated: {self.pixels_per_step:.2f} pixels/step")
+        stdscr.addstr(11, 0, "")
+        stdscr.addstr(12, 0, "✓ Calibration complete!")
+        stdscr.addstr(14, 0, "Press any key to continue...")
+        stdscr.refresh()
+        stdscr.getch()
+        
+        self.save_state()
+        return True
     
     def capture_image(self, stdscr):
         """Capture RAW image"""
@@ -398,6 +353,8 @@ class FilmScanner:
                 'frame_count': self.frame_count,
                 'position_steps': self.position_steps,
                 'mode': self.mode,
+                'pixels_per_step': self.pixels_per_step,
+                'last_frame_advance': self.last_frame_advance,
                 'last_updated': datetime.now().isoformat()
             }
             try:
@@ -414,7 +371,9 @@ class FilmScanner:
                     state = json.load(f)
                 self.frame_count = state.get('frame_count', 0)
                 self.position_steps = state.get('position_steps', 0)
-                self.mode = state.get('mode', 'manual')
+                self.mode = state.get('mode', 'smart')
+                self.pixels_per_step = state.get('pixels_per_step', 2.0)
+                self.last_frame_advance = state.get('last_frame_advance')
                 return True
             except Exception:
                 return False
@@ -438,21 +397,25 @@ class FilmScanner:
         mode_str = self.mode.upper()
         stdscr.addstr(5, 0, f"Step: {step_str} | Mode: {mode_str}")
         
+        if self.pixels_per_step != 2.0:
+            stdscr.addstr(6, 0, f"Calibrated: {self.pixels_per_step:.2f} px/step")
+        
         # Controls
-        stdscr.addstr(7, 0, "Controls:", curses.A_BOLD)
-        stdscr.addstr(8, 0, "  ← / →   Jog film (G toggles size)")
-        stdscr.addstr(9, 0, "  SPACE   Capture frame")
-        stdscr.addstr(10, 0, "  M       Toggle Manual/Smart mode")
-        stdscr.addstr(11, 0, "  A       Auto-align (smart mode)")
-        stdscr.addstr(12, 0, "  N       New roll")
-        stdscr.addstr(13, 0, "  P       Preview")
-        stdscr.addstr(14, 0, "  Z       Zero position")
-        stdscr.addstr(15, 0, "  Q       Quit")
+        stdscr.addstr(8, 0, "Controls:", curses.A_BOLD)
+        stdscr.addstr(9, 0, "  ← / →   Jog film (G toggles size)")
+        stdscr.addstr(10, 0, "  SPACE   Auto-align + Capture")
+        stdscr.addstr(11, 0, "  A       Auto-align only")
+        stdscr.addstr(12, 0, "  C       Calibrate (first frame)")
+        stdscr.addstr(13, 0, "  M       Toggle Manual/Smart mode")
+        stdscr.addstr(14, 0, "  N       New roll")
+        stdscr.addstr(15, 0, "  P       Preview")
+        stdscr.addstr(16, 0, "  Z       Zero position")
+        stdscr.addstr(17, 0, "  Q       Quit")
         
         # Status message
         if self.status_msg:
-            stdscr.addstr(17, 0, "Status:", curses.A_BOLD)
-            stdscr.addstr(18, 0, self.status_msg[:75])
+            stdscr.addstr(19, 0, "Status:", curses.A_BOLD)
+            stdscr.addstr(20, 0, self.status_msg[:75])
         
         stdscr.refresh()
     
@@ -497,7 +460,9 @@ class FilmScanner:
             stdscr.addstr(2, 0, f"Frames: {self.frame_count}")
             stdscr.addstr(3, 0, f"Position: {self.position_steps} steps")
             stdscr.addstr(4, 0, f"Mode: {self.mode}")
-            stdscr.addstr(6, 0, "Continue (C) or Start Over (S)?")
+            if self.pixels_per_step != 2.0:
+                stdscr.addstr(5, 0, f"Calibrated: {self.pixels_per_step:.2f} px/step")
+            stdscr.addstr(7, 0, "Continue (C) or Start Over (S)?")
             stdscr.refresh()
             
             while True:
@@ -508,35 +473,33 @@ class FilmScanner:
                 elif key in [ord('s'), ord('S')]:
                     self.frame_count = 0
                     self.position_steps = 0
+                    self.pixels_per_step = 2.0
+                    self.last_frame_advance = None
                     break
                 elif key in [ord('q'), ord('Q')]:
                     return False
         
-        # Choose mode
+        # New roll setup
+        self.frame_count = 0
+        self.mode = 'smart'
+        self.pixels_per_step = 2.0
+        self.last_frame_advance = None
+        
         stdscr.clear()
         stdscr.addstr(0, 0, f"Roll: {self.roll_name}", curses.A_BOLD)
-        stdscr.addstr(2, 0, "Choose mode:")
-        stdscr.addstr(3, 0, "  1 = Manual (arrow keys + space)")
-        stdscr.addstr(4, 0, "  2 = Smart (auto-align frames)")
-        stdscr.addstr(6, 0, "Press 1 or 2...")
+        stdscr.addstr(2, 0, "Smart mode enabled")
+        stdscr.addstr(4, 0, "Workflow:")
+        stdscr.addstr(5, 0, "  1. Position first frame roughly (arrow keys)")
+        stdscr.addstr(6, 0, "  2. Press C to calibrate")
+        stdscr.addstr(7, 0, "  3. Press SPACE to auto-align + capture")
+        stdscr.addstr(8, 0, "  4. Repeat for each frame")
+        stdscr.addstr(10, 0, "Press any key to start...")
         stdscr.refresh()
+        stdscr.getch()
         
-        while True:
-            key = stdscr.getch()
-            if key == ord('1'):
-                self.mode = 'manual'
-                self.frame_count = 0
-                self.status_msg = "Manual mode - use arrows to position, space to capture"
-                self.save_state()
-                return True
-            elif key == ord('2'):
-                self.mode = 'smart'
-                self.frame_count = 0
-                self.status_msg = "Smart mode - press A to align, space to capture"
-                self.save_state()
-                return True
-            elif key in [ord('q'), ord('Q')]:
-                return False
+        self.status_msg = "Position first frame, then press C to calibrate"
+        self.save_state()
+        return True
     
     def run(self, stdscr):
         """Main loop"""
@@ -616,51 +579,70 @@ class FilmScanner:
                 else:
                     self.status_msg = "✗ Preview failed"
             
-            elif key in [ord('a'), ord('A')]:
-                if self.roll_name and self.mode == 'smart':
-                    self.status_msg = "Auto-aligning..."
-                    self.draw_screen(stdscr)
-                    
-                    for attempt in range(20):
-                        if self.smart_align_step(stdscr):
-                            break
-                        time.sleep(0.2)
-                    else:
-                        self.status_msg = "Alignment timeout"
+            elif key in [ord('c'), ord('C')]:
+                if self.roll_name:
+                    self.calibrate_frame_spacing(stdscr)
                 else:
-                    self.status_msg = "Auto-align only in smart mode"
+                    self.status_msg = "Create roll first (press N)"
+            
+            elif key in [ord('a'), ord('A')]:
+                if not self.roll_name:
+                    self.status_msg = "Create roll first (press N)"
+                    continue
+                
+                if not HAS_CV2:
+                    self.status_msg = "OpenCV not available"
+                    continue
+                
+                self.status_msg = "Auto-aligning..."
+                self.draw_screen(stdscr)
+                
+                for attempt in range(20):
+                    if self.smart_align_step(stdscr):
+                        break
+                    time.sleep(0.2)
+                else:
+                    self.status_msg = "Alignment timeout - try manual positioning"
             
             elif key == ord(' '):
                 if not self.roll_name:
-                    self.status_msg = "Press N to create roll first"
+                    self.status_msg = "Create roll first (press N)"
                     continue
                 
-                if self.mode == 'smart':
-                    # Smart mode: align then capture
-                    self.status_msg = "Smart capture: aligning..."
-                    self.draw_screen(stdscr)
-                    
-                    aligned = False
-                    for attempt in range(20):
-                        if self.smart_align_step(stdscr):
-                            aligned = True
-                            break
-                        time.sleep(0.2)
-                    
-                    if aligned:
-                        if self.capture_image(stdscr):
-                            self.status_msg = f"✓ Frame {self.frame_count} captured"
-                        else:
-                            self.status_msg = "Capture failed"
-                    else:
-                        self.status_msg = "Could not align - try manual positioning"
+                if not HAS_CV2:
+                    self.status_msg = "OpenCV not available - use manual mode"
+                    continue
                 
-                else:
-                    # Manual mode: just capture
+                # Smart capture: align then shoot
+                self.status_msg = "Smart capture: aligning..."
+                self.draw_screen(stdscr)
+                
+                aligned = False
+                for attempt in range(20):
+                    if self.smart_align_step(stdscr):
+                        aligned = True
+                        break
+                    time.sleep(0.2)
+                
+                if aligned:
                     if self.capture_image(stdscr):
-                        self.status_msg = f"✓ Frame {self.frame_count} captured"
+                        self.status_msg = f"✓ Frame {self.frame_count} complete!"
+                        
+                        # Auto-advance to next frame using learned spacing
+                        if self.last_frame_advance:
+                            self.status_msg = "Advancing to next frame..."
+                            self.draw_screen(stdscr)
+                            
+                            # Use 85% of last advance (conservative)
+                            advance = int(self.last_frame_advance * 0.85)
+                            self.send_command(f'H{advance}')
+                            time.sleep(0.8)
+                            
+                            self.status_msg = f"✓ Frame {self.frame_count} - ready for next"
                     else:
                         self.status_msg = "Capture failed"
+                else:
+                    self.status_msg = "Could not align - adjust manually and try again"
             
             elif key in [ord('n'), ord('N')]:
                 self.new_roll(stdscr)
