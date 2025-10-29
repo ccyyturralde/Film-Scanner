@@ -4,7 +4,7 @@
 
 set -e  # Exit on error
 
-REPO_URL="https://github.com/YOUR_USERNAME/film-scanner.git"
+REPO_URL="https://github.com/ccyyturralde/Film-Scanner.git"
 INSTALL_DIR="$HOME/film-scanner"
 ARDUINO_PORT="/dev/ttyACM0"  # Change if needed
 
