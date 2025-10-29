@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+dist/
+*.egg-info/
+
+# Temporary files
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Scan outputs
+scans/
+*.cr3
+*.jpg
+*.raw
+
+# Debug
+/tmp/
+debug_*.jpg
+
+# IDE
+.vscode/
+.idea/
+*.sublime-*
+
+# State files
+.scan_state.json
+
+# Arduino
+*.hex
+*.eep
+*.elf
