@@ -248,26 +248,23 @@ class FilmScanner:
         self.frame_count = 0
         self.status_msg = "Ready"
         
-        # IMPORTANT: Microstepping configuration
-        # A4988 set to 1/16 microstepping by default
-        self.microsteps = 16  # 16 microsteps per full step
-        self.steps_per_rev = 200  # NEMA 17 standard
-        self.total_microsteps_per_rev = self.steps_per_rev * self.microsteps  # 3200
+        # IMPORTANT: Arduino commands are in FULL STEPS
+        # A4988 driver handles microstepping internally
+        self.fine_step = 8      # Full steps
+        self.coarse_step = 64   # Full steps
+        self.steps_per_frame = 1200  # Full steps (will calibrate)
         
-        self.fine_step = 8 * self.microsteps  # 128 microsteps
-        self.coarse_step = 64 * self.microsteps  # 1024 microsteps
-        self.steps_per_frame = 1200 * self.microsteps  # 19200 microsteps
-        
-        self.position_steps = 0
+        self.position_steps = 0  # Track in full steps
         self.is_large_step = False
         self.mode = 'smart'
         
-        # Calibration
-        self.pixels_per_microstep = 0.125  # Initial estimate, will calibrate
-        self.last_frame_advance = None
+        # Calibration (in full steps)
+        self.pixels_per_step = 2.0  # Pixels per FULL STEP (will calibrate)
+        self.last_frame_advance = None  # Full steps between frames
         
         self.state_file = None
         
+        log_debug("Scanner initialized - Arduino uses FULL STEPS")
         log_debug(f"Scanner initialized with {self.microsteps}x microstepping")
         log_debug(f"Total microsteps/rev: {self.total_microsteps_per_rev}")
     
@@ -382,25 +379,33 @@ class FilmScanner:
             log_debug("ALIGNED - ready to capture")
             return True
         
-        # Convert pixels to microsteps
+        # Convert pixels to full steps
         if result.get('movement'):
-            microsteps = int(result['movement'] / self.pixels_per_microstep)
+            steps = int(result['movement'] / self.pixels_per_step)
+            
+            # SAFETY: Limit movement before calibration
+            if self.last_frame_advance is None:  # Not calibrated
+                log_debug(f"WARNING: Not calibrated, limiting movement")
+                steps = min(steps, 100)  # Max 100 steps (~1/2 rotation)
+            
+            # SAFETY: Absolute maximum
+            steps = min(steps, 300)  # Never more than 300 steps (~1.5 rotations)
             
             if result['action'] in ['ADVANCE_COARSE', 'ADVANCE_MEDIUM', 'ADVANCE_FINE']:
-                cmd = f'H{microsteps}'
+                cmd = f'H{steps}'
             elif result['action'] in ['BACKUP_MEDIUM', 'BACKUP_FINE']:
-                cmd = f'h{microsteps}'
+                cmd = f'h{steps}'
             else:
                 cmd = 'F'  # Default
             
-            log_debug(f"Executing: {cmd} ({result['movement']}px)")
+            log_debug(f"Executing: {cmd} ({result['movement']}px -> {steps} steps)")
             self.send_command(cmd)
             time.sleep(0.5)
         
         return False
     
     def calibrate_frame_spacing(self, stdscr):
-        """Calibrate with microstepping"""
+        """Calibrate pixels per step"""
         if not HAS_CV2:
             return False
         
@@ -432,11 +437,12 @@ class FilmScanner:
         stdscr.addstr(6, 0, "Advancing one frame...")
         stdscr.refresh()
         
-        # Advance ~1 frame (accounting for microstepping)
-        advance_microsteps = int(self.steps_per_frame * 0.85)
-        log_debug(f"Calibration advance: {advance_microsteps} microsteps")
+        # Advance approximately 1 frame
+        # Start conservative - about 100 steps
+        advance_steps = 100
+        log_debug(f"Calibration advance: {advance_steps} steps")
         
-        self.send_command(f'H{advance_microsteps}')
+        self.send_command(f'H{advance_steps}')
         time.sleep(1.5)
         
         if not self.capture_preview():
@@ -445,24 +451,33 @@ class FilmScanner:
         result2 = detect_frame_gaps_debug("/tmp/preview.jpg")
         
         if not result2.get('right_gap'):
+            log_debug("Calibration: advancing more...")
+            # Try advancing more
+            self.send_command('H50')
+            time.sleep(1)
+            if not self.capture_preview():
+                return False
+            result2 = detect_frame_gaps_debug("/tmp/preview.jpg")
+        
+        if not result2.get('right_gap'):
             log_debug("Calibration failed: second gap not found")
             return False
         
         new_center = result2['right_gap']['center']
-        microsteps_moved = self.position_steps - initial_steps
+        steps_moved = self.position_steps - initial_steps
         pixels_moved = abs(new_center - initial_center)
         
-        if microsteps_moved > 0 and pixels_moved > 0:
-            self.pixels_per_microstep = pixels_moved / microsteps_moved
-            self.last_frame_advance = microsteps_moved
+        if steps_moved > 0 and pixels_moved > 0:
+            self.pixels_per_step = pixels_moved / steps_moved
+            self.last_frame_advance = steps_moved
             
             log_debug(f"Calibration complete:")
-            log_debug(f"  Moved {pixels_moved}px in {microsteps_moved} microsteps")
-            log_debug(f"  Ratio: {self.pixels_per_microstep:.4f} px/microstep")
-            log_debug(f"  Frame advance: {microsteps_moved} microsteps")
+            log_debug(f"  Moved {pixels_moved}px in {steps_moved} steps")
+            log_debug(f"  Ratio: {self.pixels_per_step:.3f} px/step")
+            log_debug(f"  Frame advance: {steps_moved} steps")
         
-        stdscr.addstr(8, 0, f"Moved: {pixels_moved}px in {microsteps_moved} microsteps")
-        stdscr.addstr(9, 0, f"Ratio: {self.pixels_per_microstep:.4f} px/microstep")
+        stdscr.addstr(8, 0, f"Moved: {pixels_moved}px in {steps_moved} steps")
+        stdscr.addstr(9, 0, f"Ratio: {self.pixels_per_step:.3f} px/step")
         stdscr.addstr(11, 0, "✓ Calibration complete!")
         stdscr.addstr(13, 0, "Press any key...")
         stdscr.refresh()
@@ -510,9 +525,8 @@ class FilmScanner:
                 'roll_name': self.roll_name,
                 'frame_count': self.frame_count,
                 'position_steps': self.position_steps,
-                'pixels_per_microstep': self.pixels_per_microstep,
-                'last_frame_advance': self.last_frame_advance,
-                'microsteps': self.microsteps
+                'pixels_per_step': self.pixels_per_step,
+                'last_frame_advance': self.last_frame_advance
             }
             try:
                 with open(self.state_file, 'w') as f:
@@ -528,9 +542,9 @@ class FilmScanner:
                     state = json.load(f)
                 self.frame_count = state.get('frame_count', 0)
                 self.position_steps = state.get('position_steps', 0)
-                self.pixels_per_microstep = state.get('pixels_per_microstep', 0.125)
+                self.pixels_per_step = state.get('pixels_per_step', 2.0)
                 self.last_frame_advance = state.get('last_frame_advance')
-                log_debug(f"Loaded state: frame {self.frame_count}, pos {self.position_steps}")
+                log_debug(f"Loaded state: frame {self.frame_count}, pos {self.position_steps} steps")
                 return True
             except:
                 return False
@@ -542,43 +556,50 @@ class FilmScanner:
         stdscr.addstr(0, 0, "=== FILM SCANNER DEBUG ===", curses.A_BOLD)
         stdscr.addstr(2, 0, f"Roll: {self.roll_name if self.roll_name else 'None'}")
         stdscr.addstr(3, 0, f"Frames: {self.frame_count}")
-        stdscr.addstr(4, 0, f"Position: {self.position_steps} microsteps")
+        stdscr.addstr(4, 0, f"Position: {self.position_steps} steps")
         
-        if self.pixels_per_microstep != 0.125:
-            stdscr.addstr(5, 0, f"Calibrated: {self.pixels_per_microstep:.4f} px/µstep")
+        # Calibration status
+        if self.last_frame_advance is not None:
+            stdscr.addstr(5, 0, f"Calibrated: YES ({self.pixels_per_step:.3f} px/step)", curses.A_BOLD)
+            stdscr.addstr(6, 0, f"Frame spacing: {self.last_frame_advance} steps")
+        else:
+            stdscr.addstr(5, 0, "Calibrated: NO - PRESS C TO CALIBRATE", curses.A_REVERSE)
         
-        stdscr.addstr(7, 0, "Controls:", curses.A_BOLD)
-        stdscr.addstr(8, 0, "  SPACE   Auto-align + Capture")
-        stdscr.addstr(9, 0, "  A       Auto-align only")
-        stdscr.addstr(10, 0, "  C       Calibrate")
-        stdscr.addstr(11, 0, "  N       New roll")
-        stdscr.addstr(12, 0, "  Q       Quit")
-        stdscr.addstr(13, 0, f"  Debug: {DEBUG_LOG}")
+        stdscr.addstr(8, 0, "Controls:", curses.A_BOLD)
+        stdscr.addstr(9, 0, "  ← / →   Manual jog (G = toggle size)")
+        stdscr.addstr(10, 0, "  C       Calibrate (REQUIRED FIRST)")
+        stdscr.addstr(11, 0, "  A       Auto-align only")
+        stdscr.addstr(12, 0, "  SPACE   Align + Capture + Advance")
+        stdscr.addstr(13, 0, "  N       New roll")
+        stdscr.addstr(14, 0, "  Q       Quit")
+        stdscr.addstr(15, 0, f"  Debug:  {DEBUG_LOG}")
         
         if self.status_msg:
-            stdscr.addstr(15, 0, "Status:", curses.A_BOLD)
-            stdscr.addstr(16, 0, self.status_msg[:75])
+            stdscr.addstr(17, 0, "Status:", curses.A_BOLD)
+            stdscr.addstr(18, 0, self.status_msg[:75])
         
         stdscr.refresh()
     
     def new_roll(self, stdscr):
         """Create new roll"""
         stdscr.clear()
-        stdscr.addstr(0, 0, "Enter roll name: ")
+        stdscr.addstr(0, 0, "=== NEW ROLL ===", curses.A_BOLD)
+        stdscr.addstr(2, 0, "Roll name: ")
         stdscr.refresh()
         
         curses.echo()
         curses.curs_set(1)
         
         try:
-            roll_input = stdscr.getstr(0, 17, 40).decode('utf-8').strip()
+            roll_input = stdscr.getstr(2, 11, 40).decode('utf-8').strip()
         except:
             roll_input = ""
-        
-        curses.noecho()
-        curses.curs_set(0)
+        finally:
+            curses.noecho()
+            curses.curs_set(0)
         
         if not roll_input:
+            self.status_msg = "Cancelled"
             return False
         
         self.roll_name = roll_input
@@ -588,19 +609,49 @@ class FilmScanner:
         os.makedirs(self.roll_folder, exist_ok=True)
         self.state_file = os.path.join(self.roll_folder, '.scan_state.json')
         
+        # Check for existing
         if self.load_state():
             stdscr.clear()
-            stdscr.addstr(0, 0, f"Resume at frame {self.frame_count}? (y/n)")
+            stdscr.addstr(0, 0, "Found existing roll!", curses.A_BOLD)
+            stdscr.addstr(2, 0, f"Frames: {self.frame_count}")
+            stdscr.addstr(3, 0, f"Position: {self.position_steps}")
+            stdscr.addstr(5, 0, "Continue? (c) or Start Over (s) or Cancel (q)")
             stdscr.refresh()
-            key = stdscr.getch()
-            if key not in [ord('y'), ord('Y')]:
-                self.frame_count = 0
-                self.position_steps = 0
-        else:
-            self.frame_count = 0
-            self.position_steps = 0
+            
+            while True:
+                key = stdscr.getch()
+                if key in [ord('c'), ord('C')]:
+                    log_debug(f"Resumed roll: {self.roll_name} at frame {self.frame_count}")
+                    self.status_msg = f"Resumed at frame {self.frame_count}"
+                    return True
+                elif key in [ord('s'), ord('S')]:
+                    self.frame_count = 0
+                    self.position_steps = 0
+                    self.pixels_per_step = 2.0
+                    self.last_frame_advance = None
+                    break
+                elif key in [ord('q'), ord('Q')]:
+                    return False
         
-        log_debug(f"New roll: {self.roll_name}")
+        # New roll setup
+        self.frame_count = 0
+        self.position_steps = 0
+        self.pixels_per_step = 2.0
+        self.last_frame_advance = None
+        
+        stdscr.clear()
+        stdscr.addstr(0, 0, f"Roll: {self.roll_name}", curses.A_BOLD)
+        stdscr.addstr(2, 0, "Workflow:")
+        stdscr.addstr(3, 0, "  1. Use arrow keys to position first frame")
+        stdscr.addstr(4, 0, "  2. Press C to calibrate (REQUIRED)")
+        stdscr.addstr(5, 0, "  3. Press SPACE to align + capture")
+        stdscr.addstr(6, 0, "  4. Repeat for each frame")
+        stdscr.addstr(8, 0, "Press any key to continue...")
+        stdscr.refresh()
+        stdscr.getch()
+        
+        log_debug(f"New roll created: {self.roll_name}")
+        self.status_msg = "Position first frame, then press C to calibrate"
         self.save_state()
         return True
     
@@ -622,9 +673,9 @@ class FilmScanner:
             return
         
         # Initialize
-        self.send_command(f'S{self.steps_per_frame // self.microsteps}')
-        self.send_command(f'm{self.fine_step // self.microsteps}')
-        self.send_command(f'l{self.coarse_step // self.microsteps}')
+        self.send_command(f'S{self.steps_per_frame}')
+        self.send_command(f'm{self.fine_step}')
+        self.send_command(f'l{self.coarse_step}')
         self.send_command('U')
         self.send_command('E')
         time.sleep(0.5)
@@ -655,8 +706,21 @@ class FilmScanner:
                     self.status_msg = "Create roll first (N)"
             
             elif key in [ord('a'), ord('A')]:
-                if not self.roll_name or not HAS_CV2:
+                if not self.roll_name:
+                    self.status_msg = "Create roll first (N)"
                     continue
+                
+                if not HAS_CV2:
+                    self.status_msg = "OpenCV not available"
+                    continue
+                
+                # CHECK: Should calibrate first (but allow without for testing)
+                if self.last_frame_advance is None:
+                    log_debug("WARNING: Aligning without calibration - movements may be wrong")
+                    self.status_msg = "WARNING: Not calibrated!"
+                    stdscr.addstr(18, 0, ">>> NOT CALIBRATED - movements may be incorrect <<<", curses.A_BOLD)
+                    stdscr.refresh()
+                    time.sleep(1)
                 
                 log_debug("\n=== ALIGNMENT START ===")
                 for attempt in range(15):
@@ -670,7 +734,21 @@ class FilmScanner:
                     self.status_msg = "Alignment failed"
             
             elif key == ord(' '):
-                if not self.roll_name or not HAS_CV2:
+                if not self.roll_name:
+                    self.status_msg = "Create roll first (N)"
+                    continue
+                
+                if not HAS_CV2:
+                    self.status_msg = "OpenCV not available"
+                    continue
+                
+                # CHECK: Must calibrate first
+                if self.last_frame_advance is None:
+                    self.status_msg = "CALIBRATE FIRST! Press C to calibrate"
+                    log_debug("Attempted capture without calibration")
+                    stdscr.addstr(18, 0, ">>> PRESS C TO CALIBRATE FIRST <<<", curses.A_BOLD | curses.A_REVERSE)
+                    stdscr.refresh()
+                    time.sleep(1.5)
                     continue
                 
                 log_debug("\n=== SMART CAPTURE START ===")
@@ -690,12 +768,12 @@ class FilmScanner:
                         self.status_msg = f"✓ Frame {self.frame_count}"
                         
                         # Auto-advance to next frame
-                        if self.last_frame_advance:
-                            log_debug("Auto-advancing to next frame")
-                            advance = int(self.last_frame_advance * 0.80)
-                            self.send_command(f'H{advance}')
-                            time.sleep(0.8)
-                            log_debug(f"Ready for frame {self.frame_count + 1}")
+                        log_debug("Auto-advancing to next frame")
+                        advance = int(self.last_frame_advance * 0.80)
+                        log_debug(f"Advancing {advance} steps (80% of {self.last_frame_advance})")
+                        self.send_command(f'H{advance}')
+                        time.sleep(0.8)
+                        log_debug(f"Ready for frame {self.frame_count + 1}")
                 else:
                     log_debug("Capture aborted - alignment failed")
                     self.status_msg = "Alignment failed"
