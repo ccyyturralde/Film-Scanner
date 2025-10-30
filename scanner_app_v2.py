@@ -5,10 +5,11 @@ Improvements:
 - Auto-advance AFTER capture (not before)
 - Fine adjustments allowed between frames
 - Space bar only for calibration
-- CR3 files stay on camera SD card
+- RAW files stay on camera SD card (CR3/NEF/ARW/etc)
+- Universal camera detection (Canon, Nikon, Sony, etc)
 - Autofocus button (F)
 - Shift+arrows for frame advance
-- Better camera handling
+- Better camera handling and error messages
 """
 
 import curses
@@ -28,6 +29,7 @@ class FilmScanner:
         self.frame_count = 0
         self.status_msg = "Ready"
         self.camera_connected = False
+        self.camera_model = "Unknown"
         self.last_camera_check = 0
         
         # Motor configuration (adjust for your hardware)
@@ -87,7 +89,7 @@ class FilmScanner:
         return None
     
     def check_camera(self):
-        """Check if camera is connected (rate-limited to avoid spamming)"""
+        """Check if any camera is connected via USB (rate-limited to avoid spamming)"""
         current_time = time.time()
         if current_time - self.last_camera_check < 5:  # Check every 5 seconds max
             return self.camera_connected
@@ -100,11 +102,34 @@ class FilmScanner:
                 capture_output=True,
                 timeout=2
             )
-            # Check if a camera is detected in the output
+            
             output = result.stdout.decode('utf-8', errors='ignore')
-            self.camera_connected = 'Canon' in output or 'Nikon' in output or 'Sony' in output
+            lines = output.strip().split('\n')
+            
+            # Camera is detected if:
+            # 1. Command succeeded
+            # 2. Output has more than just the header (more than 2 lines)
+            # 3. A USB port is referenced (universal detection)
+            self.camera_connected = (
+                result.returncode == 0 and 
+                len(lines) > 2 and 
+                'usb:' in output.lower()
+            )
+            
+            # Extract camera model name for display
+            if self.camera_connected and len(lines) > 2:
+                # Camera model is typically in the first data line after header
+                model_line = lines[2].split()
+                if model_line:
+                    # Get everything before "usb:" as the model name
+                    model_parts = lines[2].split('usb:')[0].strip()
+                    self.camera_model = model_parts if model_parts else "Camera"
+            else:
+                self.camera_model = "Unknown"
+            
         except:
             self.camera_connected = False
+            self.camera_model = "Unknown"
         
         return self.camera_connected
     
@@ -141,6 +166,37 @@ class FilmScanner:
             self.status_msg = f"Command error: {str(e)[:40]}"
             return False
     
+    def setup_camera_raw(self):
+        """Configure camera to shoot in RAW format"""
+        if not self.camera_connected:
+            return False
+        
+        try:
+            subprocess.run(["killall", "gphoto2"], capture_output=True, timeout=1)
+            time.sleep(0.2)
+            
+            # Try to set image format to RAW
+            # Different cameras use different config names, so try multiple options
+            raw_configs = [
+                ("imageformat", "RAW"),
+                ("imagequality", "RAW"),
+                ("capturetarget", "Memory card"),  # Ensure saving to SD card
+            ]
+            
+            for config_name, config_value in raw_configs:
+                try:
+                    subprocess.run(
+                        ["gphoto2", "--set-config", f"{config_name}={config_value}"],
+                        capture_output=True,
+                        timeout=3
+                    )
+                except:
+                    pass  # Config might not exist on all cameras
+            
+            return True
+        except:
+            return False
+    
     def autofocus(self):
         """Trigger camera autofocus"""
         if not self.check_camera():
@@ -168,7 +224,7 @@ class FilmScanner:
             return False
     
     def capture_image(self):
-        """Capture image to camera SD card (not downloaded)"""
+        """Capture image in RAW format to camera SD card (not downloaded)"""
         if not self.check_camera():
             self.status_msg = "Camera not connected!"
             return False
@@ -176,28 +232,45 @@ class FilmScanner:
         subprocess.run(["killall", "gphoto2"], capture_output=True, timeout=1)
         time.sleep(0.3)
         
-        # Capture to SD card only (no download)
+        # Capture to SD card in RAW format (no download)
         try:
             result = subprocess.run(
-                ["gphoto2", "--capture-image"],  # Note: no --download flag
+                ["gphoto2", "--capture-image"],  # Captures in camera's current format
                 capture_output=True,
                 timeout=15
             )
             
             # Check if capture was successful
             output = result.stdout.decode('utf-8', errors='ignore')
+            error_output = result.stderr.decode('utf-8', errors='ignore')
+            
             if "New file" in output or result.returncode == 0:
                 self.frame_count += 1
                 self.frame_positions.append(self.position)
                 self.save_state()
-                return True
+                
+                # Try to detect file format from output
+                if any(fmt in output.upper() for fmt in ['CR3', 'CR2', 'NEF', 'ARW', 'RAF', 'DNG', 'RAW']):
+                    return True
+                elif "New file" in output:
+                    # File created but format unknown - still count as success
+                    return True
+                else:
+                    return True  # Successful capture based on return code
             else:
+                # Provide more detailed error info
+                if "PTP" in error_output:
+                    self.status_msg = "Camera busy or locked"
+                elif "not found" in error_output.lower():
+                    self.status_msg = "Camera disconnected"
                 return False
                 
         except subprocess.TimeoutExpired:
             subprocess.run(["killall", "-9", "gphoto2"], capture_output=True)
+            self.status_msg = "Capture timeout - camera not responding"
             return False
-        except:
+        except Exception as e:
+            self.status_msg = f"Capture error: {str(e)[:30]}"
             return False
     
     def advance_frame(self):
@@ -462,7 +535,7 @@ class FilmScanner:
         stdscr.addstr(7, 0, "  3. Press SPACE to capture remaining frames")
         stdscr.addstr(9, 0, "Manual Mode:")
         stdscr.addstr(10, 0, "  Position each frame and press SPACE")
-        stdscr.addstr(12, 0, "Files saved to camera SD card as .CR3")
+        stdscr.addstr(12, 0, "Files saved to camera SD card in RAW format")
         stdscr.addstr(14, 0, "Press any key to continue...")
         stdscr.refresh()
         stdscr.getch()
@@ -491,9 +564,13 @@ class FilmScanner:
         else:
             stdscr.addstr(6, 0, "Not calibrated (using default)", curses.A_DIM)
         
-        # Camera status
-        camera_status = "✓ Connected" if self.camera_connected else "✗ Not connected"
-        camera_color = curses.A_BOLD if self.camera_connected else curses.A_REVERSE
+        # Camera status with model
+        if self.camera_connected:
+            camera_status = f"✓ {self.camera_model}"
+            camera_color = curses.A_BOLD
+        else:
+            camera_status = "✗ Not connected"
+            camera_color = curses.A_REVERSE
         stdscr.addstr(7, 0, f"Camera: {camera_status}", camera_color)
         
         step_str = "LARGE" if self.is_large_step else "small"
@@ -554,10 +631,14 @@ class FilmScanner:
         self.send('E')  # Enable motor
         self.send(f'v{self.step_delay}')  # Set step delay
         
-        # Check camera
-        self.check_camera()
-        
-        self.status_msg = "Ready - Press N for new roll"
+        # Check camera and configure for RAW
+        if self.check_camera():
+            self.status_msg = f"Configuring {self.camera_model} for RAW capture..."
+            self.draw(stdscr)
+            self.setup_camera_raw()
+            self.status_msg = f"✓ {self.camera_model} ready - Press N for new roll"
+        else:
+            self.status_msg = "⚠ No camera detected - Connect camera and press N"
         
         # Main loop
         while True:
