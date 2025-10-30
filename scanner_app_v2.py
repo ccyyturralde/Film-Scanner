@@ -27,6 +27,8 @@ class FilmScanner:
         self.roll_name = ""
         self.roll_folder = ""
         self.frame_count = 0
+        self.strip_count = 0  # Track which strip we're on
+        self.frames_in_strip = 0  # Frames captured in current strip
         self.status_msg = "Ready"
         self.camera_connected = False
         self.camera_model = "Unknown"
@@ -198,7 +200,7 @@ class FilmScanner:
             return False
     
     def autofocus(self):
-        """Trigger camera autofocus"""
+        """Trigger camera autofocus by doing a capture-preview"""
         if not self.check_camera():
             self.status_msg = "Camera not connected"
             return False
@@ -207,11 +209,23 @@ class FilmScanner:
             subprocess.run(["killall", "gphoto2"], capture_output=True, timeout=1)
             time.sleep(0.2)
             
-            result = subprocess.run(
+            # Try multiple autofocus methods - different cameras support different ones
+            # Method 1: Set autofocus config
+            subprocess.run(
                 ["gphoto2", "--set-config", "autofocus=1"],
+                capture_output=True,
+                timeout=3
+            )
+            
+            # Method 2: Capture preview (triggers AF on many cameras)
+            result = subprocess.run(
+                ["gphoto2", "--capture-preview"],
                 capture_output=True,
                 timeout=5
             )
+            
+            # Clean up preview file if created
+            subprocess.run(["rm", "-f", "capture_preview.jpg"], capture_output=True)
             
             self.status_msg = "✓ Autofocus complete"
             return True
@@ -220,7 +234,7 @@ class FilmScanner:
             self.status_msg = "Autofocus timeout"
             return False
         except:
-            self.status_msg = "Autofocus failed"
+            self.status_msg = "Autofocus failed - check camera"
             return False
     
     def capture_image(self):
@@ -246,6 +260,7 @@ class FilmScanner:
             
             if "New file" in output or result.returncode == 0:
                 self.frame_count += 1
+                self.frames_in_strip += 1
                 self.frame_positions.append(self.position)
                 self.save_state()
                 
@@ -295,43 +310,97 @@ class FilmScanner:
         self.status_msg = f"Backing up {backup} steps"
         return self.send(f'h{backup}')
     
-    def calibrate(self, stdscr):
-        """
-        Calibrate frame advance distance.
-        Uses SPACE bar for all confirmations.
-        """
-        stdscr.clear()
-        stdscr.addstr(0, 0, "=== CALIBRATION ===", curses.A_BOLD)
-        stdscr.addstr(2, 0, "Frame 1 should be properly positioned")
-        stdscr.addstr(3, 0, "Press SPACE when ready, or Q to cancel")
-        stdscr.refresh()
+    def new_strip(self, stdscr):
+        """Start a new strip - hand-feed frame 1, then use existing calibration"""
+        if not self.roll_name:
+            self.status_msg = "Create roll first (press N)"
+            return False
         
-        while True:
-            key = stdscr.getch()
-            if key == ord(' '):  # SPACE
-                break
-            elif key in [ord('q'), ord('Q')]:
-                return False
-        
-        # Record frame 1 position
-        frame1_pos = self.position
-        
-        # Capture frame 1
-        stdscr.addstr(5, 0, "Capturing frame 1...")
-        stdscr.refresh()
-        
-        if not self.capture_image():
-            stdscr.addstr(6, 0, "Failed to capture frame 1!", curses.A_REVERSE)
-            stdscr.addstr(8, 0, "Press any key...")
-            stdscr.refresh()
-            stdscr.getch()
+        if self.frame_advance is None:
+            self.status_msg = "Calibrate first (press C)"
             return False
         
         stdscr.clear()
-        stdscr.addstr(0, 0, "=== CALIBRATION ===", curses.A_BOLD)
-        stdscr.addstr(2, 0, f"✓ Frame 1 captured at position {frame1_pos}")
-        stdscr.addstr(4, 0, "Now position frame 2 using arrow keys")
-        stdscr.addstr(5, 0, "Press SPACE when frame 2 is centered")
+        stdscr.addstr(0, 0, "=== NEW STRIP ===", curses.A_BOLD)
+        stdscr.addstr(2, 0, f"Current: Strip {self.strip_count}, Frame {self.frames_in_strip} in strip, {self.frame_count} total")
+        stdscr.addstr(4, 0, "Hand-feed the new strip and position frame 1")
+        stdscr.addstr(5, 0, "Use arrow keys to align frame 1 perfectly")
+        stdscr.addstr(7, 0, "Press SPACE when frame 1 is aligned")
+        stdscr.addstr(8, 0, "Press Q to cancel")
+        stdscr.addstr(10, 0, f"Position: {self.position}")
+        stdscr.addstr(11, 0, f"Calibrated spacing: {self.frame_advance} steps")
+        stdscr.refresh()
+        
+        # Manual positioning loop for frame 1 of new strip
+        while True:
+            key = stdscr.getch()
+            
+            if key == ord(' '):  # SPACE - frame aligned, capture it
+                stdscr.addstr(13, 0, "Capturing frame 1 of new strip...")
+                stdscr.refresh()
+                
+                if self.capture_image():
+                    self.strip_count += 1
+                    self.frames_in_strip = 1  # Reset to 1 (just captured frame 1)
+                    self.save_state()
+                    
+                    stdscr.clear()
+                    stdscr.addstr(0, 0, "✓ NEW STRIP STARTED", curses.A_BOLD)
+                    stdscr.addstr(2, 0, f"Strip {self.strip_count}, Frame 1 captured")
+                    stdscr.addstr(3, 0, f"Total frames: {self.frame_count}")
+                    stdscr.addstr(5, 0, f"Will use {self.frame_advance} steps between frames")
+                    stdscr.addstr(6, 0, "Press SPACE to capture remaining frames")
+                    stdscr.addstr(8, 0, "Press any key to continue...")
+                    stdscr.refresh()
+                    stdscr.getch()
+                    
+                    self.status_msg = f"Strip {self.strip_count} - Press SPACE for frame 2"
+                    return True
+                else:
+                    stdscr.addstr(14, 0, "Failed to capture frame 1!", curses.A_REVERSE)
+                    stdscr.addstr(15, 0, "Press any key...")
+                    stdscr.refresh()
+                    stdscr.getch()
+                    return False
+            
+            elif key == curses.KEY_LEFT:
+                cmd = 'B' if self.is_large_step else 'b'
+                self.send(cmd)
+                stdscr.addstr(10, 0, f"Position: {self.position}     ")
+                stdscr.refresh()
+                
+            elif key == curses.KEY_RIGHT:
+                cmd = 'F' if self.is_large_step else 'f'
+                self.send(cmd)
+                stdscr.addstr(10, 0, f"Position: {self.position}     ")
+                stdscr.refresh()
+                
+            elif key in [ord('g'), ord('G')]:
+                self.is_large_step = not self.is_large_step
+                step_size = "LARGE" if self.is_large_step else "small"
+                stdscr.addstr(12, 0, f"Step size: {step_size}     ")
+                stdscr.refresh()
+                
+            elif key in [ord('f'), ord('F')]:
+                stdscr.addstr(13, 0, "Focusing...           ")
+                stdscr.refresh()
+                self.autofocus()
+                stdscr.addstr(13, 0, "                      ")
+                stdscr.refresh()
+                
+            elif key in [ord('q'), ord('Q')]:
+                return False
+    
+    def calibrate(self, stdscr):
+        """
+        Calibrate frame advance distance (Frame 1 → Frame 2).
+        This is the first strip, so it captures frames 1 and 2 to learn spacing.
+        """
+        stdscr.clear()
+        stdscr.addstr(0, 0, "=== CALIBRATION (STRIP 1) ===", curses.A_BOLD)
+        stdscr.addstr(2, 0, "Hand-feed strip 1 and position frame 1")
+        stdscr.addstr(3, 0, "Use arrow keys to align perfectly")
+        stdscr.addstr(5, 0, "Press SPACE when frame 1 is aligned, or Q to cancel")
         stdscr.addstr(7, 0, "Controls:")
         stdscr.addstr(8, 0, "  ← →     Fine movement")
         stdscr.addstr(9, 0, "  G       Toggle step size")
@@ -339,67 +408,135 @@ class FilmScanner:
         stdscr.addstr(12, 0, f"Position: {self.position}")
         stdscr.refresh()
         
-        # Manual positioning loop
+        # Position and capture frame 1
         while True:
             key = stdscr.getch()
             
-            if key == ord(' '):  # SPACE - done positioning
-                frame2_pos = self.position
-                self.frame_advance = frame2_pos - frame1_pos
-                
-                if self.frame_advance <= 0:
-                    stdscr.addstr(14, 0, "ERROR: Frame 2 must be ahead of frame 1!", curses.A_REVERSE)
-                    stdscr.refresh()
-                    time.sleep(2)
-                    return False
-                
-                # Capture frame 2
-                stdscr.addstr(14, 0, "Capturing frame 2...")
-                stdscr.refresh()
-                
-                if not self.capture_image():
-                    stdscr.addstr(15, 0, "Failed to capture frame 2!", curses.A_REVERSE)
-                    stdscr.refresh()
-                    time.sleep(2)
-                    return False
-                
-                stdscr.clear()
-                stdscr.addstr(0, 0, "✓ CALIBRATION COMPLETE", curses.A_BOLD)
-                stdscr.addstr(2, 0, f"Frame spacing: {self.frame_advance} steps")
-                stdscr.addstr(3, 0, f"Captured 2 frames")
-                stdscr.addstr(5, 0, "This spacing will be used for all frames")
-                stdscr.addstr(6, 0, "You can still make fine adjustments")
-                stdscr.addstr(8, 0, "Press any key to continue...")
-                stdscr.refresh()
-                stdscr.getch()
-                
-                self.mode = 'calibrated'  # Switch to calibrated mode
-                self.save_state()
-                return True
-                
+            if key == ord(' '):  # SPACE - frame 1 aligned
+                break
             elif key == curses.KEY_LEFT:
                 cmd = 'B' if self.is_large_step else 'b'
                 self.send(cmd)
                 stdscr.addstr(12, 0, f"Position: {self.position}     ")
                 stdscr.refresh()
-                
             elif key == curses.KEY_RIGHT:
                 cmd = 'F' if self.is_large_step else 'f'
                 self.send(cmd)
                 stdscr.addstr(12, 0, f"Position: {self.position}     ")
                 stdscr.refresh()
-                
             elif key in [ord('g'), ord('G')]:
                 self.is_large_step = not self.is_large_step
                 step_size = "LARGE" if self.is_large_step else "small"
                 stdscr.addstr(13, 0, f"Step size: {step_size}     ")
                 stdscr.refresh()
-                
             elif key in [ord('f'), ord('F')]:
-                stdscr.addstr(14, 0, "Focusing...")
+                stdscr.addstr(14, 0, "Focusing...           ")
                 stdscr.refresh()
                 self.autofocus()
-                stdscr.addstr(14, 0, "            ")
+                stdscr.addstr(14, 0, "                      ")
+                stdscr.refresh()
+            elif key in [ord('q'), ord('Q')]:
+                return False
+        
+        # Record frame 1 position BEFORE capture
+        frame1_pos = self.position
+        
+        # Capture frame 1
+        stdscr.addstr(14, 0, "Capturing frame 1...  ")
+        stdscr.refresh()
+        
+        if not self.capture_image():
+            stdscr.addstr(15, 0, "Failed to capture frame 1!", curses.A_REVERSE)
+            stdscr.addstr(17, 0, "Press any key...")
+            stdscr.refresh()
+            stdscr.getch()
+            return False
+        
+        # Now position frame 2
+        stdscr.clear()
+        stdscr.addstr(0, 0, "=== CALIBRATION (STRIP 1) ===", curses.A_BOLD)
+        stdscr.addstr(2, 0, f"✓ Frame 1 captured at position {frame1_pos}")
+        stdscr.addstr(4, 0, "Now position frame 2 using arrow keys")
+        stdscr.addstr(5, 0, "Press SPACE when frame 2 is perfectly centered")
+        stdscr.addstr(7, 0, "Controls:")
+        stdscr.addstr(8, 0, "  ← →     Fine movement")
+        stdscr.addstr(9, 0, "  G       Toggle step size")
+        stdscr.addstr(10, 0, "  F       Autofocus")
+        stdscr.addstr(12, 0, f"Frame 1 pos: {frame1_pos}")
+        stdscr.addstr(13, 0, f"Current pos: {self.position}")
+        stdscr.addstr(14, 0, f"Distance: {self.position - frame1_pos} steps")
+        stdscr.refresh()
+        
+        # Manual positioning loop for frame 2
+        while True:
+            key = stdscr.getch()
+            
+            if key == ord(' '):  # SPACE - frame 2 aligned
+                frame2_pos = self.position
+                self.frame_advance = frame2_pos - frame1_pos
+                
+                if self.frame_advance <= 0:
+                    stdscr.addstr(16, 0, "ERROR: Frame 2 must be ahead of frame 1!", curses.A_REVERSE)
+                    stdscr.refresh()
+                    time.sleep(2)
+                    return False
+                
+                # Capture frame 2
+                stdscr.addstr(16, 0, "Capturing frame 2...                          ")
+                stdscr.refresh()
+                
+                if not self.capture_image():
+                    stdscr.addstr(17, 0, "Failed to capture frame 2!", curses.A_REVERSE)
+                    stdscr.refresh()
+                    time.sleep(2)
+                    return False
+                
+                # Calibration complete - this was strip 1 with 2 frames
+                self.strip_count = 1
+                self.frames_in_strip = 2
+                self.mode = 'calibrated'
+                self.save_state()
+                
+                stdscr.clear()
+                stdscr.addstr(0, 0, "✓ CALIBRATION COMPLETE", curses.A_BOLD)
+                stdscr.addstr(2, 0, f"Frame spacing: {self.frame_advance} steps")
+                stdscr.addstr(3, 0, f"Strip 1: 2 frames captured")
+                stdscr.addstr(5, 0, "This spacing will be used for all remaining frames")
+                stdscr.addstr(7, 0, "Next steps:")
+                stdscr.addstr(8, 0, "  SPACE - Capture remaining frames in this strip")
+                stdscr.addstr(9, 0, "  S     - Start new strip (after finishing this one)")
+                stdscr.addstr(11, 0, "Press any key to continue...")
+                stdscr.refresh()
+                stdscr.getch()
+                
+                self.status_msg = f"Strip 1, Frame 2 - Press SPACE for frame 3"
+                return True
+                
+            elif key == curses.KEY_LEFT:
+                cmd = 'B' if self.is_large_step else 'b'
+                self.send(cmd)
+                stdscr.addstr(13, 0, f"Current pos: {self.position}     ")
+                stdscr.addstr(14, 0, f"Distance: {self.position - frame1_pos} steps     ")
+                stdscr.refresh()
+                
+            elif key == curses.KEY_RIGHT:
+                cmd = 'F' if self.is_large_step else 'f'
+                self.send(cmd)
+                stdscr.addstr(13, 0, f"Current pos: {self.position}     ")
+                stdscr.addstr(14, 0, f"Distance: {self.position - frame1_pos} steps     ")
+                stdscr.refresh()
+                
+            elif key in [ord('g'), ord('G')]:
+                self.is_large_step = not self.is_large_step
+                step_size = "LARGE" if self.is_large_step else "small"
+                stdscr.addstr(15, 0, f"Step size: {step_size}     ")
+                stdscr.refresh()
+                
+            elif key in [ord('f'), ord('F')]:
+                stdscr.addstr(16, 0, "Focusing...                                   ")
+                stdscr.refresh()
+                self.autofocus()
+                stdscr.addstr(16, 0, "                                              ")
                 stdscr.refresh()
                 
             elif key in [ord('q'), ord('Q')]:
@@ -411,15 +548,16 @@ class FilmScanner:
         self.draw(stdscr)
         
         if self.capture_image():
-            self.status_msg = f"✓ Frame {self.frame_count} captured"
+            # Show strip and frame info
+            self.status_msg = f"✓ Strip {self.strip_count}, Frame {self.frames_in_strip} (Total: {self.frame_count})"
             
             # Auto-advance AFTER capture if in calibrated mode
             if self.mode == 'calibrated' and self.auto_advance:
                 time.sleep(0.5)  # Brief pause before advancing
                 if self.advance_frame():
-                    self.status_msg = f"✓ Frame {self.frame_count} captured, advanced to next"
+                    self.status_msg = f"✓ Frame captured, advanced to next"
                 else:
-                    self.status_msg = f"✓ Frame {self.frame_count} captured, advance failed"
+                    self.status_msg = f"✓ Frame captured, advance failed"
             
             return True
         else:
@@ -435,6 +573,8 @@ class FilmScanner:
             state = {
                 'roll_name': self.roll_name,
                 'frame_count': self.frame_count,
+                'strip_count': self.strip_count,
+                'frames_in_strip': self.frames_in_strip,
                 'position': self.position,
                 'frame_advance': self.frame_advance,
                 'frame_positions': self.frame_positions,
@@ -455,6 +595,8 @@ class FilmScanner:
                 with open(self.state_file, 'r') as f:
                     state = json.load(f)
                 self.frame_count = state.get('frame_count', 0)
+                self.strip_count = state.get('strip_count', 0)
+                self.frames_in_strip = state.get('frames_in_strip', 0)
                 self.position = state.get('position', 0)
                 self.frame_advance = state.get('frame_advance')
                 self.frame_positions = state.get('frame_positions', [])
@@ -528,19 +670,22 @@ class FilmScanner:
         
         stdscr.clear()
         stdscr.addstr(0, 0, f"Roll: {self.roll_name}", curses.A_BOLD)
-        stdscr.addstr(2, 0, "WORKFLOW:")
-        stdscr.addstr(4, 0, "Quick Start:")
-        stdscr.addstr(5, 0, "  1. Position frame 1 with arrows")
+        stdscr.addstr(2, 0, "WORKFLOW (Strip-Based Scanning):")
+        stdscr.addstr(4, 0, "First Strip (Calibration):")
+        stdscr.addstr(5, 0, "  1. Hand-feed strip 1, position frame 1 with arrows")
         stdscr.addstr(6, 0, "  2. Press C to calibrate (captures frames 1 & 2)")
-        stdscr.addstr(7, 0, "  3. Press SPACE to capture remaining frames")
-        stdscr.addstr(9, 0, "Manual Mode:")
-        stdscr.addstr(10, 0, "  Position each frame and press SPACE")
-        stdscr.addstr(12, 0, "Files saved to camera SD card in RAW format")
-        stdscr.addstr(14, 0, "Press any key to continue...")
+        stdscr.addstr(7, 0, "  3. Press SPACE to capture remaining frames (3-6)")
+        stdscr.addstr(9, 0, "Additional Strips:")
+        stdscr.addstr(10, 0, "  1. Press S for new strip")
+        stdscr.addstr(11, 0, "  2. Hand-feed next strip, align frame 1")
+        stdscr.addstr(12, 0, "  3. Press SPACE to capture all frames (uses saved spacing)")
+        stdscr.addstr(14, 0, "Each strip: 5-6 frames | Total: ~36-40 frames per roll")
+        stdscr.addstr(15, 0, "Files saved to camera SD card in RAW format")
+        stdscr.addstr(17, 0, "Press any key to continue...")
         stdscr.refresh()
         stdscr.getch()
         
-        self.status_msg = "Position frame 1, then press C to calibrate"
+        self.status_msg = "Hand-feed strip 1, position frame 1, then press C to calibrate"
         self.save_state()
         return True
     
@@ -552,17 +697,19 @@ class FilmScanner:
         
         # Status
         stdscr.addstr(2, 0, f"Roll: {self.roll_name if self.roll_name else 'None'}")
-        stdscr.addstr(3, 0, f"Frame: {self.frame_count}")  # Frame counter
-        stdscr.addstr(4, 0, f"Position: {self.position} steps")
+        stdscr.addstr(3, 0, f"Total frames: {self.frame_count}")
+        if self.strip_count > 0:
+            stdscr.addstr(4, 0, f"Strip {self.strip_count}, Frame {self.frames_in_strip} in strip")
+        stdscr.addstr(5, 0, f"Position: {self.position} steps")
         
         # Mode and calibration
         mode_str = "MANUAL" if self.mode == 'manual' else "CALIBRATED"
-        stdscr.addstr(5, 0, f"Mode: {mode_str}")
+        stdscr.addstr(6, 0, f"Mode: {mode_str}")
         
         if self.frame_advance:
-            stdscr.addstr(6, 0, f"Frame advance: {self.frame_advance} steps", curses.A_BOLD)
+            stdscr.addstr(7, 0, f"Frame advance: {self.frame_advance} steps", curses.A_BOLD)
         else:
-            stdscr.addstr(6, 0, "Not calibrated (using default)", curses.A_DIM)
+            stdscr.addstr(7, 0, "Not calibrated (using default)", curses.A_DIM)
         
         # Camera status with model
         if self.camera_connected:
@@ -571,33 +718,34 @@ class FilmScanner:
         else:
             camera_status = "✗ Not connected"
             camera_color = curses.A_REVERSE
-        stdscr.addstr(7, 0, f"Camera: {camera_status}", camera_color)
+        stdscr.addstr(8, 0, f"Camera: {camera_status}", camera_color)
         
         step_str = "LARGE" if self.is_large_step else "small"
-        stdscr.addstr(8, 0, f"Step size: {step_str}")
+        stdscr.addstr(9, 0, f"Step size: {step_str}")
         
         if self.mode == 'calibrated':
             auto_str = "ON" if self.auto_advance else "OFF"
-            stdscr.addstr(9, 0, f"Auto-advance: {auto_str}")
+            stdscr.addstr(10, 0, f"Auto-advance: {auto_str}")
         
         # Controls
-        stdscr.addstr(11, 0, "Controls:", curses.A_BOLD)
-        stdscr.addstr(12, 0, "  ← / →       Fine adjustment")
-        stdscr.addstr(13, 0, "  Shift+← / → Full frame forward/back")
-        stdscr.addstr(14, 0, "  G           Toggle step size")
-        stdscr.addstr(15, 0, "  SPACE       Capture (+ auto-advance)")
-        stdscr.addstr(16, 0, "  A           Toggle auto-advance")
-        stdscr.addstr(17, 0, "  C           Calibrate (captures 1 & 2)")
-        stdscr.addstr(18, 0, "  F           Autofocus")
-        stdscr.addstr(19, 0, "  M           Toggle Manual/Calibrated")
-        stdscr.addstr(20, 0, "  N           New roll")
-        stdscr.addstr(21, 0, "  Z           Zero position")
-        stdscr.addstr(22, 0, "  Q           Quit")
+        stdscr.addstr(12, 0, "Controls:", curses.A_BOLD)
+        stdscr.addstr(13, 0, "  ← / →       Fine adjustment")
+        stdscr.addstr(14, 0, "  Shift+← / → Full frame forward/back")
+        stdscr.addstr(15, 0, "  G           Toggle step size")
+        stdscr.addstr(16, 0, "  SPACE       Capture (+ auto-advance)")
+        stdscr.addstr(17, 0, "  A           Toggle auto-advance")
+        stdscr.addstr(18, 0, "  C           Calibrate (strip 1)")
+        stdscr.addstr(19, 0, "  S           Start new strip")
+        stdscr.addstr(20, 0, "  F           Autofocus")
+        stdscr.addstr(21, 0, "  M           Toggle Manual/Calibrated")
+        stdscr.addstr(22, 0, "  N           New roll")
+        stdscr.addstr(23, 0, "  Z           Zero position")
+        stdscr.addstr(24, 0, "  Q           Quit")
         
         # Status message
         if self.status_msg:
-            stdscr.addstr(24, 0, "Status:", curses.A_BOLD)
-            stdscr.addstr(25, 0, self.status_msg[:75])
+            stdscr.addstr(26, 0, "Status:", curses.A_BOLD)
+            stdscr.addstr(27, 0, self.status_msg[:75])
         
         stdscr.refresh()
     
@@ -702,6 +850,17 @@ class FilmScanner:
                         self.status_msg = f"✓ Calibrated: {self.frame_advance} steps/frame"
                     else:
                         self.status_msg = "Calibration cancelled"
+            
+            elif key in [ord('s'), ord('S')]:
+                if not self.roll_name:
+                    self.status_msg = "Create roll first (press N)"
+                elif self.frame_advance is None:
+                    self.status_msg = "Calibrate first (press C)"
+                else:
+                    if self.new_strip(stdscr):
+                        self.status_msg = f"✓ Strip {self.strip_count} started"
+                    else:
+                        self.status_msg = "New strip cancelled"
             
             elif key == ord(' '):  # SPACE
                 if not self.roll_name:
