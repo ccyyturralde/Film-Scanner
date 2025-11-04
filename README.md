@@ -47,16 +47,13 @@ cd film-scanner
 ### 2. Install Dependencies
 
 ```bash
-# System packages
+# Run the automated setup script
+bash setup.sh
+
+# Or install manually:
 sudo apt update
 sudo apt install -y python3-pip gphoto2 screen
-
-# Python packages
 pip3 install --break-system-packages pyserial
-
-# Arduino CLI (optional, for command-line flashing)
-curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
-sudo mv bin/arduino-cli /usr/local/bin/
 ```
 
 ### 3. Flash Arduino
@@ -65,14 +62,16 @@ Upload the Arduino sketch using Arduino IDE or CLI:
 
 ```bash
 # Using arduino-cli
-arduino-cli compile --fqbn arduino:avr:uno Arduino_Film_Scanner/
-arduino-cli upload -p /dev/ttyACM0 --fqbn arduino:avr:uno Arduino_Film_Scanner/
+arduino-cli compile --fqbn arduino:avr:uno arduino/film_scanner/
+arduino-cli upload -p /dev/ttyACM0 --fqbn arduino:avr:uno arduino/film_scanner/
+
+# Or open arduino/film_scanner/film_scanner.ino in Arduino IDE and upload
 ```
 
 ### 4. Run Scanner
 
 ```bash
-python3 scanner_app_v2.py
+python3 "scanner_app_v3 test.py"
 ```
 
 ## Usage Guide
@@ -81,7 +80,7 @@ python3 scanner_app_v2.py
 
 1. **Start Application**
    ```bash
-   python3 scanner_app_v2.py
+   python3 "scanner_app_v3 test.py"
    ```
 
 2. **Create New Roll**
@@ -262,25 +261,31 @@ done
 ### Project Structure
 ```
 film-scanner/
-├── scanner_app_v2.py         # Main application
-├── Arduino_Film_Scanner/     
-│   └── Arduino_Film_Scanner.ino
-├── docs/
-│   ├── HARDWARE_SETUP.md
-│   └── CALIBRATION_GUIDE.md
+├── scanner_app_v3 test.py    # Main application
+├── arduino/
+│   └── film_scanner/
+│       └── film_scanner.ino  # Arduino firmware
+├── docs/                      # Documentation
+│   ├── hardware-setup.md
+│   ├── api-reference.md
+│   ├── quick-reference.md
+│   ├── calibration-workflow.md
+│   └── github-deploy.md
+├── setup.sh                   # Automated setup script
+├── update.sh                  # Update and flash script
 ├── requirements.txt
+├── .gitignore
 ├── LICENSE
 └── README.md
 ```
 
 ### Testing
 ```bash
-# Run system test
-python3 test_scanner_v2.py
-
 # Manual test with Arduino
 screen /dev/ttyACM0 115200
 # Commands: f, b, F, B, ?, Z
+
+# Full documentation in docs/api-reference.md
 ```
 
 ### Contributing
@@ -291,7 +296,15 @@ screen /dev/ttyACM0 115200
 
 ## Version History
 
-### v2.0 (Current)
+### v3.0 (Current - Testing Branch)
+- Strip-based scanning workflow
+- Multi-strip calibration
+- Per-strip frame tracking
+- Enhanced state persistence
+- Improved camera handling
+- All v2.0 features maintained
+
+### v2.0
 - Auto-advance after capture (not before)
 - Calibration captures both frames
 - Fine adjustments always available
@@ -315,12 +328,23 @@ MIT License - See [LICENSE](LICENSE) file for details
 - Inspired by commercial film scanners
 - Community contributions welcome
 
+## Documentation
+
+Detailed documentation is available in the `docs/` directory:
+
+- **[Hardware Setup Guide](docs/hardware-setup.md)** - Complete assembly instructions, wiring diagrams, and calibration
+- **[Arduino API Reference](docs/api-reference.md)** - Command documentation and serial protocol
+- **[Quick Reference](docs/quick-reference.md)** - Keyboard shortcuts and workflow cheat sheet
+- **[Calibration Workflow](docs/calibration-workflow.md)** - Detailed calibration process and strip scanning
+- **[GitHub Deploy Guide](docs/github-deploy.md)** - Repository setup and deployment instructions
+
 ## Support
 
 For issues or questions:
-1. Check [Troubleshooting](#troubleshooting) section
-2. Review closed issues on GitHub
-3. Open new issue with details
+1. Check the [Troubleshooting](#troubleshooting) section
+2. Review the [documentation](docs/)
+3. Check closed issues on GitHub
+4. Open a new issue with details
 
 ## Future Enhancements
 

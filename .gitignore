@@ -1,41 +1,68 @@
 # Python
 __pycache__/
 *.py[cod]
-*$py.class
 *.so
-.Python
-env/
-venv/
-ENV/
-build/
+*.egg
+*.egg-info
 dist/
-*.egg-info/
+build/
+.Python
+venv/
+env/
+ENV/
 
-# Temporary files
-*.swp
-*.swo
-*~
-.DS_Store
-
-# Scan outputs
+# Scan data
 scans/
 *.cr3
+*.CR3
+*.cr2
+*.CR2
+*.nef
+*.NEF
+*.arw
+*.ARW
+*.dng
+*.DNG
 *.jpg
-*.raw
+*.jpeg
+*.png
+*.tif
+*.tiff
 
-# Debug
-/tmp/
-debug_*.jpg
+# State files
+.scan_state.json
+*.json.backup
 
 # IDE
 .vscode/
 .idea/
-*.sublime-*
+*.code-workspace
 
-# State files
-.scan_state.json
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.directory
+
+# Logs
+*.log
+debug.log
+
+# Temporary files
+/tmp/
+*.tmp
+*.temp
+*.bak
+*.backup
+*.old
 
 # Arduino
 *.hex
-*.eep
 *.elf
+*.bin
+
+# System
+*.pid
+.cache/
