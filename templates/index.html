@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>35mm Film Scanner</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📷 35mm Film Scanner</h1>
+            <div class="connection-status">
+                <span id="arduino-status" class="status-badge disconnected">Arduino</span>
+                <span id="camera-status" class="status-badge disconnected">Camera</span>
+            </div>
+        </header>
+
+        <!-- Status Panel -->
+        <section class="status-panel">
+            <div class="status-grid">
+                <div class="status-item">
+                    <label>Roll:</label>
+                    <span id="roll-name">Not set</span>
+                </div>
+                <div class="status-item">
+                    <label>Strip:</label>
+                    <span id="strip-count">0</span>
+                </div>
+                <div class="status-item">
+                    <label>Frame:</label>
+                    <span id="frame-count">0</span>
+                </div>
+                <div class="status-item">
+                    <label>Position:</label>
+                    <span id="position">0</span>
+                </div>
+                <div class="status-item">
+                    <label>Mode:</label>
+                    <span id="mode">MANUAL</span>
+                </div>
+                <div class="status-item">
+                    <label>Advance:</label>
+                    <span id="frame-advance">Not set</span>
+                </div>
+            </div>
+            <div class="status-message" id="status-msg">Ready</div>
+        </section>
+
+        <!-- Roll Management -->
+        <section class="panel">
+            <h2>Roll Management</h2>
+            <div class="input-group">
+                <input type="text" id="roll-name-input" placeholder="Enter roll name...">
+                <button class="btn btn-primary" onclick="createRoll()">New Roll</button>
+            </div>
+        </section>
+
+        <!-- Calibration Section -->
+        <section class="panel" id="calibration-panel">
+            <h2>Calibration</h2>
+            <p class="help-text">Strip 1: Position frame 1, capture, then position frame 2 and capture to learn frame spacing.</p>
+            <div class="calibration-steps" id="calibration-steps">
+                <button class="btn btn-large btn-warning" onclick="startCalibration()">Start Calibration</button>
+            </div>
+        </section>
+
+        <!-- Strip Management -->
+        <section class="panel" id="strip-panel">
+            <h2>Strip Management</h2>
+            <div class="calibration-steps" id="strip-steps">
+                <button class="btn btn-large btn-success" onclick="startNewStrip()">Start New Strip</button>
+            </div>
+        </section>
+
+        <!-- Motor Controls -->
+        <section class="panel">
+            <h2>Motor Controls</h2>
+            <div class="controls-grid">
+                <button class="btn btn-secondary" onclick="moveMotor('backward', 'fine')">
+                    ⇦ Fine Back
+                </button>
+                <button class="btn btn-secondary" onclick="moveMotor('forward', 'fine')">
+                    Fine Forward ⇨
+                </button>
+                <button class="btn btn-secondary" onclick="moveMotor('backward', 'coarse')">
+                    ⇦⇦ Coarse Back
+                </button>
+                <button class="btn btn-secondary" onclick="moveMotor('forward', 'coarse')">
+                    Coarse Forward ⇨⇨
+                </button>
+                <button class="btn btn-secondary" onclick="backupFrame()">
+                    ↶ Full Frame Back
+                </button>
+                <button class="btn btn-secondary" onclick="advanceFrame()">
+                    Full Frame Forward ↷
+                </button>
+            </div>
+            <div class="control-options">
+                <button class="btn btn-secondary" onclick="toggleStepSize()">
+                    Toggle Step Size: <span id="step-size">FINE</span>
+                </button>
+                <button class="btn btn-secondary" onclick="zeroPosition()">
+                    Zero Position
+                </button>
+            </div>
+        </section>
+
+        <!-- Camera Controls -->
+        <section class="panel">
+            <h2>Camera Controls</h2>
+            <div class="camera-controls">
+                <button class="btn btn-primary btn-large" onclick="autofocus()">
+                    🎯 Autofocus
+                </button>
+                <button class="btn btn-success btn-large btn-capture" onclick="capture()">
+                    📸 CAPTURE
+                </button>
+            </div>
+            <div class="control-options">
+                <button class="btn btn-secondary" onclick="toggleMode()">
+                    Mode: <span id="mode-display">MANUAL</span>
+                </button>
+                <button class="btn btn-secondary" onclick="toggleAutoAdvance()">
+                    Auto-Advance: <span id="auto-advance">ON</span>
+                </button>
+            </div>
+        </section>
+
+        <!-- Connection Panel -->
+        <section class="panel">
+            <h2>System</h2>
+            <button class="btn btn-secondary" onclick="connectArduino()">
+                Reconnect Arduino
+            </button>
+        </section>
+
+        <footer>
+            <p>Access from mobile: http://&lt;computer-ip&gt;:5000</p>
+        </footer>
+    </div>
+
+    <!-- Include Socket.IO and app JavaScript -->
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
+
