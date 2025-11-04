@@ -14,6 +14,8 @@ import os
 from datetime import datetime
 import json
 import threading
+import base64
+import tempfile
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'film-scanner-secret-key'
@@ -52,6 +54,11 @@ class FilmScanner:
         
         # State persistence
         self.state_file = None
+        
+        # Live preview
+        self.preview_active = False
+        self.preview_thread = None
+        self.preview_stop_event = threading.Event()
         
         # Lock for thread safety
         self.lock = threading.Lock()
@@ -243,6 +250,67 @@ class FilmScanner:
             return True
         return False
     
+    def start_preview(self):
+        """Start live preview thread"""
+        if self.preview_active:
+            return True
+        
+        self.preview_active = True
+        self.preview_stop_event.clear()
+        self.preview_thread = threading.Thread(target=self._preview_loop, daemon=True)
+        self.preview_thread.start()
+        return True
+    
+    def stop_preview(self):
+        """Stop live preview thread"""
+        if not self.preview_active:
+            return True
+        
+        self.preview_active = False
+        self.preview_stop_event.set()
+        
+        if self.preview_thread:
+            self.preview_thread.join(timeout=2)
+        
+        return True
+    
+    def _preview_loop(self):
+        """Preview capture loop (runs in thread)"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            preview_file = os.path.join(tmpdir, 'preview.jpg')
+            
+            while not self.preview_stop_event.is_set():
+                try:
+                    # Kill any existing gphoto2 processes
+                    subprocess.run(["killall", "gphoto2"], 
+                                 capture_output=True, timeout=1)
+                    time.sleep(0.2)
+                    
+                    # Capture preview
+                    result = subprocess.run(
+                        ["gphoto2", "--capture-preview", f"--filename={preview_file}"],
+                        capture_output=True, timeout=5
+                    )
+                    
+                    if result.returncode == 0 and os.path.exists(preview_file):
+                        # Read image and encode as base64
+                        with open(preview_file, 'rb') as f:
+                            img_data = f.read()
+                            img_base64 = base64.b64encode(img_data).decode('utf-8')
+                        
+                        # Broadcast to all clients
+                        socketio.emit('preview_frame', {'image': img_base64})
+                        
+                        # Remove the file
+                        os.remove(preview_file)
+                    
+                    # Wait before next capture (adjust for desired frame rate)
+                    time.sleep(1.0)  # 1 frame per second
+                    
+                except Exception as e:
+                    print(f"Preview error: {e}")
+                    time.sleep(2)
+    
     def get_status(self):
         """Get current status as dictionary"""
         return {
@@ -258,7 +326,8 @@ class FilmScanner:
             'camera_connected': self.camera_connected,
             'camera_model': self.camera_model,
             'status_msg': self.status_msg,
-            'arduino_connected': self.arduino is not None
+            'arduino_connected': self.arduino is not None,
+            'preview_active': self.preview_active
         }
     
     def broadcast_status(self):
@@ -496,6 +565,20 @@ def new_strip():
     # Reset strip frame count
     scanner.frames_in_strip = 0
     return jsonify({'success': True})
+
+@app.route('/api/start_preview', methods=['POST'])
+def start_preview():
+    """Start live camera preview"""
+    success = scanner.start_preview()
+    scanner.broadcast_status()
+    return jsonify({'success': success})
+
+@app.route('/api/stop_preview', methods=['POST'])
+def stop_preview():
+    """Stop live camera preview"""
+    success = scanner.stop_preview()
+    scanner.broadcast_status()
+    return jsonify({'success': success})
 
 # WebSocket events
 @socketio.on('connect')

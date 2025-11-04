@@ -13,6 +13,11 @@ let stripState = {
     firstFrameCaptured: false
 };
 
+let previewState = {
+    active: false,
+    inverted: false
+};
+
 // Connect to WebSocket
 socket.on('connect', () => {
     console.log('Connected to server');
@@ -22,6 +27,12 @@ socket.on('connect', () => {
 // Handle status updates
 socket.on('status_update', (status) => {
     updateUI(status);
+});
+
+// Handle preview frames
+socket.on('preview_frame', (data) => {
+    const previewImg = document.getElementById('preview-image');
+    previewImg.src = 'data:image/jpeg;base64,' + data.image;
 });
 
 // Update UI with status
@@ -363,6 +374,56 @@ function cancelNewStrip() {
             Start New Strip
         </button>
     `;
+}
+
+// Live Preview functions
+async function togglePreview() {
+    const btn = document.getElementById('preview-toggle');
+    const invertBtn = document.getElementById('invert-toggle');
+    const previewContainer = document.getElementById('preview-container');
+    
+    if (!previewState.active) {
+        // Start preview
+        btn.classList.add('processing');
+        const result = await apiCall('start_preview');
+        btn.classList.remove('processing');
+        
+        if (result.success) {
+            previewState.active = true;
+            btn.textContent = 'Stop Preview';
+            invertBtn.disabled = false;
+            previewContainer.style.display = 'block';
+        } else {
+            alert('Failed to start preview. Check camera connection.');
+        }
+    } else {
+        // Stop preview
+        btn.classList.add('processing');
+        const result = await apiCall('stop_preview');
+        btn.classList.remove('processing');
+        
+        if (result.success) {
+            previewState.active = false;
+            btn.textContent = 'Start Preview';
+            invertBtn.disabled = true;
+            previewContainer.style.display = 'none';
+        }
+    }
+}
+
+function toggleInvert() {
+    const previewImg = document.getElementById('preview-image');
+    const invertBtn = document.getElementById('invert-toggle');
+    
+    previewState.inverted = !previewState.inverted;
+    
+    if (previewState.inverted) {
+        previewImg.classList.add('inverted');
+        invertBtn.textContent = 'View as Negative';
+    } else {
+        previewImg.classList.remove('inverted');
+        invertBtn.textContent = 'View as Positive';
+    }
 }
 
 // Keyboard shortcuts (for desktop)

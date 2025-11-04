@@ -257,6 +257,32 @@ header h1 {
     line-height: 1.5;
 }
 
+/* Live Preview */
+.preview-controls {
+    display: flex;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+    flex-wrap: wrap;
+}
+
+#preview-container {
+    margin-top: 1rem;
+    border-radius: 0.5rem;
+    overflow: hidden;
+    background: var(--background);
+}
+
+#preview-image {
+    width: 100%;
+    height: auto;
+    display: block;
+    transition: filter 0.2s ease;
+}
+
+#preview-image.inverted {
+    filter: invert(1);
+}
+
 /* Footer */
 footer {
     text-align: center;

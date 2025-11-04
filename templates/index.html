@@ -56,6 +56,22 @@
             </div>
         </section>
 
+        <!-- Live Preview -->
+        <section class="panel">
+            <h2>Live Preview</h2>
+            <div class="preview-controls">
+                <button class="btn btn-secondary" id="preview-toggle" onclick="togglePreview()">
+                    Start Preview
+                </button>
+                <button class="btn btn-secondary" id="invert-toggle" onclick="toggleInvert()" disabled>
+                    View as Positive
+                </button>
+            </div>
+            <div id="preview-container" style="display: none;">
+                <img id="preview-image" src="" alt="Camera Preview">
+            </div>
+        </section>
+
         <!-- Calibration Section -->
         <section class="panel" id="calibration-panel">
             <h2>Calibration</h2>

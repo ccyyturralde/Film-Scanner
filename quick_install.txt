@@ -1,0 +1,75 @@
+═══════════════════════════════════════════════════════════════
+  Film Scanner Web App - Quick Installation Commands
+═══════════════════════════════════════════════════════════════
+
+OPTION 1: If you already have the files on your Pi
+─────────────────────────────────────────────────────────────
+cd /path/to/Film-Scanner
+chmod +x setup_pi.sh
+./setup_pi.sh
+
+
+OPTION 2: Clone from GitHub and install
+─────────────────────────────────────────────────────────────
+git clone https://github.com/yourusername/Film-Scanner.git ~/Scanner-Web
+cd ~/Scanner-Web
+git checkout web-mobile-version
+chmod +x setup_pi.sh
+./setup_pi.sh
+
+
+OPTION 3: Copy from another computer via SCP
+─────────────────────────────────────────────────────────────
+# On your computer (Windows PowerShell):
+scp -r C:\Cursor\Film-Scanner\Film-Scanner pi@raspberrypi.local:~/Scanner-Web
+
+# Then on Pi:
+ssh pi@raspberrypi.local
+cd ~/Scanner-Web
+chmod +x setup_pi.sh
+./setup_pi.sh
+
+
+OPTION 4: Copy via USB drive
+─────────────────────────────────────────────────────────────
+# 1. Copy Film-Scanner folder to USB drive
+# 2. Insert USB into Pi
+# 3. On Pi:
+sudo mount /dev/sda1 /mnt
+cp -r /mnt/Film-Scanner ~/Scanner-Web
+cd ~/Scanner-Web
+chmod +x setup_pi.sh
+./setup_pi.sh
+
+
+OPTION 5: Manual download (if no git)
+─────────────────────────────────────────────────────────────
+# Download zip from GitHub
+# Upload to Pi via web interface or scp
+# Then:
+unzip Film-Scanner.zip
+cd Film-Scanner
+chmod +x setup_pi.sh
+./setup_pi.sh
+
+
+═══════════════════════════════════════════════════════════════
+
+AFTER INSTALLATION:
+─────────────────────────────────────────────────────────────
+The script will display your Pi's IP address.
+
+Access scanner from any device:
+  http://YOUR_PI_IP:5000
+
+Example:
+  http://192.168.1.100:5000
+
+From your phone:
+  1. Connect to same WiFi as Pi
+  2. Open browser
+  3. Go to http://YOUR_PI_IP:5000
+  4. Add to home screen for quick access
+
+═══════════════════════════════════════════════════════════════
+
