@@ -11,6 +11,7 @@ Professional-grade 35mm film scanner using Raspberry Pi, Arduino, and DSLR camer
 - **Smart Calibration**: Learn frame spacing once, apply to entire roll
 - **Resume Capability**: Continue scanning after interruption
 - **Unlimited Frames**: No maximum frame count limitation
+- **🆕 Smart Startup**: Auto-discover Pi IP on first launch with persistent configuration
 
 ## Hardware Requirements
 
@@ -41,19 +42,17 @@ Professional-grade 35mm film scanner using Raspberry Pi, Arduino, and DSLR camer
 
 ```bash
 git clone https://github.com/YOUR_USERNAME/film-scanner.git
-cd film-scanner
+cd film-scanner/Film-Scanner
 ```
 
 ### 2. Install Dependencies
 
 ```bash
-# Run the automated setup script
-bash setup.sh
+# Install requirements
+pip3 install -r requirements.txt
 
-# Or install manually:
-sudo apt update
-sudo apt install -y python3-pip gphoto2 screen
-pip3 install --break-system-packages pyserial
+# Or run the automated setup script
+bash setup.sh
 ```
 
 ### 3. Flash Arduino
@@ -70,9 +69,30 @@ arduino-cli upload -p /dev/ttyACM0 --fqbn arduino:avr:uno arduino/film_scanner/
 
 ### 4. Run Scanner
 
+**Option A: Using the launcher (recommended)**
 ```bash
+# On Linux/Mac/Pi
+./launch_scanner.sh
+
+# On Windows
+launch_scanner.bat
+```
+
+**Option B: Direct launch**
+```bash
+# Web Application (browser interface)
+python3 web_app.py
+
+# CLI Application (terminal interface)
 python3 "scanner_app_v3 test.py"
 ```
+
+On first launch, the **Smart Startup wizard** will guide you through configuration:
+- Auto-discover your Raspberry Pi on the network
+- Or manually enter the Pi's IP address
+- Configuration is saved for future launches
+
+See [SMART_STARTUP_README.md](SMART_STARTUP_README.md) for detailed setup instructions.
 
 ## Usage Guide
 
@@ -330,13 +350,19 @@ MIT License - See [LICENSE](LICENSE) file for details
 
 ## Documentation
 
-Detailed documentation is available in the `docs/` directory:
+Detailed documentation is available in the repository:
 
+### Core Documentation
 - **[Hardware Setup Guide](docs/hardware-setup.md)** - Complete assembly instructions, wiring diagrams, and calibration
 - **[Arduino API Reference](docs/api-reference.md)** - Command documentation and serial protocol
 - **[Quick Reference](docs/quick-reference.md)** - Keyboard shortcuts and workflow cheat sheet
 - **[Calibration Workflow](docs/calibration-workflow.md)** - Detailed calibration process and strip scanning
 - **[GitHub Deploy Guide](docs/github-deploy.md)** - Repository setup and deployment instructions
+
+### 🆕 Smart Startup System
+- **[Smart Startup README](SMART_STARTUP_README.md)** - Feature overview and quick start
+- **[Startup Guide](STARTUP_GUIDE.md)** - Detailed setup and configuration instructions
+- **[Implementation Summary](IMPLEMENTATION_SUMMARY.md)** - Technical details and design decisions
 
 ## Support
 

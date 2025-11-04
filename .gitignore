@@ -33,6 +33,10 @@ scans/
 .scan_state.json
 *.json.backup
 
+# Configuration files (created by smart startup)
+scanner_config.json
+.film_scanner/
+
 # IDE
 .vscode/
 .idea/

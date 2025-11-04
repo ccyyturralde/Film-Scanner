@@ -10,8 +10,10 @@ import serial.tools.list_ports
 import subprocess
 import time
 import os
+import sys
 from datetime import datetime
 import json
+from config_manager import ConfigManager
 
 class FilmScanner:
     def __init__(self):
@@ -707,6 +709,48 @@ class FilmScanner:
             self.draw(stdscr)
 
 def main():
+    # Handle command line arguments
+    import argparse
+    parser = argparse.ArgumentParser(description='Film Scanner CLI Application')
+    parser.add_argument('--reset', action='store_true', help='Reset configuration and run setup')
+    parser.add_argument('--config', action='store_true', help='Show current configuration')
+    args = parser.parse_args()
+    
+    # Initialize configuration manager
+    config_mgr = ConfigManager()
+    
+    # Handle special commands (outside curses)
+    if args.reset:
+        config_mgr.delete_config()
+        print("\n✓ Configuration reset. Restart the application to run setup.\n")
+        sys.exit(0)
+    
+    if args.config:
+        config_mgr.print_config()
+        sys.exit(0)
+    
+    # Get or create configuration (outside curses)
+    print("\n" + "="*60)
+    print("   FILM SCANNER CLI APPLICATION")
+    print("="*60 + "\n")
+    
+    config = config_mgr.get_config()
+    if not config:
+        print("\n❌ Setup failed or cancelled\n")
+        sys.exit(1)
+    
+    # Display configuration
+    print(f"\n📍 Mode: {config.get('mode', 'unknown')}")
+    print(f"📍 Pi IP: {config.get('pi_ip', 'unknown')}")
+    print(f"📍 Port: {config.get('port', 5000)}")
+    
+    print("\n💡 Tip: To reset configuration, run:")
+    print("   python3 \"scanner_app_v3 test.py\" --reset")
+    print("\n" + "="*60)
+    
+    input("\nPress ENTER to start scanner interface...")
+    
+    # Run scanner in curses interface
     scanner = FilmScanner()
     curses.wrapper(scanner.run)
 

@@ -11,11 +11,13 @@ import serial.tools.list_ports
 import subprocess
 import time
 import os
+import sys
 from datetime import datetime
 import json
 import threading
 import base64
 import tempfile
+from config_manager import ConfigManager
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'film-scanner-secret-key'
@@ -593,17 +595,64 @@ def handle_status_request():
     emit('status_update', scanner.get_status())
 
 if __name__ == '__main__':
+    # Handle command line arguments
+    import argparse
+    parser = argparse.ArgumentParser(description='Film Scanner Web Application')
+    parser.add_argument('--reset', action='store_true', help='Reset configuration and run setup')
+    parser.add_argument('--config', action='store_true', help='Show current configuration')
+    args = parser.parse_args()
+    
+    # Initialize configuration manager
+    config_mgr = ConfigManager()
+    
+    # Handle special commands
+    if args.reset:
+        config_mgr.delete_config()
+        print("\n✓ Configuration reset. Restart the application to run setup.\n")
+        sys.exit(0)
+    
+    if args.config:
+        config_mgr.print_config()
+        sys.exit(0)
+    
+    # Get or create configuration
+    print("\n" + "="*60)
+    print("   FILM SCANNER WEB APPLICATION")
+    print("="*60 + "\n")
+    
+    config = config_mgr.get_config()
+    if not config:
+        print("\n❌ Setup failed or cancelled\n")
+        sys.exit(1)
+    
+    # Display configuration
+    print(f"\n📍 Mode: {config.get('mode', 'unknown')}")
+    print(f"📍 Pi IP: {config.get('pi_ip', 'unknown')}")
+    print(f"📍 Port: {config.get('port', 5000)}")
+    
     # Auto-connect to Arduino on startup
-    print("Starting Film Scanner Web App...")
-    print("Searching for Arduino...")
+    print("\n🔌 Searching for Arduino...")
     if scanner.find_arduino():
         print("✓ Arduino connected")
     else:
         print("✗ Arduino not found (you can connect later via the web interface)")
     
-    print("\nStarting web server...")
-    print("Access the scanner at: http://localhost:5000")
-    print("Or from your phone: http://<your-computer-ip>:5000")
+    # Start web server
+    host = '0.0.0.0'
+    port = config.get('port', 5000)
+    pi_ip = config.get('pi_ip', 'localhost')
     
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True)
+    print("\n" + "="*60)
+    print("   WEB SERVER STARTING")
+    print("="*60)
+    print(f"\n🌐 Access the scanner at:")
+    print(f"   • Local:  http://localhost:{port}")
+    print(f"   • Network: http://{pi_ip}:{port}")
+    print(f"\n📱 From your phone/tablet:")
+    print(f"   • http://{pi_ip}:{port}")
+    print("\n💡 Tip: To reset configuration, run:")
+    print("   python3 web_app.py --reset")
+    print("="*60 + "\n")
+    
+    socketio.run(app, host=host, port=port, debug=True)
 
