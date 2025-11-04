@@ -152,10 +152,25 @@ class FilmScanner:
             return False
     
     def capture_image(self):
-        """Capture image to camera SD card"""
+        """Capture image to camera SD card in RAW format"""
         try:
             subprocess.run(["killall", "gphoto2"], capture_output=True, timeout=1)
             time.sleep(0.3)
+            
+            # Set image format to RAW (CR3 for Canon R100)
+            # Try different possible config names for RAW format
+            subprocess.run(
+                ["gphoto2", "--set-config", "imageformat=RAW"],
+                capture_output=True, timeout=5
+            )
+            time.sleep(0.2)
+            
+            # Alternative config name that some Canon cameras use
+            subprocess.run(
+                ["gphoto2", "--set-config", "imagequality=RAW"],
+                capture_output=True, timeout=5
+            )
+            time.sleep(0.2)
             
             # Autofocus
             subprocess.run(
@@ -164,7 +179,7 @@ class FilmScanner:
             )
             time.sleep(1.5)
             
-            # Capture to camera SD card only
+            # Capture to camera SD card only (not downloading to Pi)
             result = subprocess.run(
                 ["gphoto2", "--capture-image"],
                 capture_output=True, timeout=20
@@ -271,12 +286,14 @@ class FilmScanner:
             elif key == curses.KEY_LEFT:
                 cmd = 'B' if self.is_large_step else 'b'
                 self.send(cmd)
+                self.flush_input(stdscr)  # Clear any queued keys
                 stdscr.addstr(14, 0, f"Position: {self.position}     ")
                 stdscr.refresh()
             
             elif key == curses.KEY_RIGHT:
                 cmd = 'F' if self.is_large_step else 'f'
                 self.send(cmd)
+                self.flush_input(stdscr)  # Clear any queued keys
                 stdscr.addstr(14, 0, f"Position: {self.position}     ")
                 stdscr.refresh()
             
@@ -355,6 +372,7 @@ class FilmScanner:
             elif key == curses.KEY_LEFT:
                 cmd = 'B' if self.is_large_step else 'b'
                 self.send(cmd)
+                self.flush_input(stdscr)  # Clear any queued keys
                 stdscr.addstr(13, 0, f"Current position: {self.position}     ")
                 stdscr.addstr(14, 0, f"Distance traveled: {self.position - frame1_pos} steps     ")
                 stdscr.refresh()
@@ -362,6 +380,7 @@ class FilmScanner:
             elif key == curses.KEY_RIGHT:
                 cmd = 'F' if self.is_large_step else 'f'
                 self.send(cmd)
+                self.flush_input(stdscr)  # Clear any queued keys
                 stdscr.addstr(13, 0, f"Current position: {self.position}     ")
                 stdscr.addstr(14, 0, f"Distance traveled: {self.position - frame1_pos} steps     ")
                 stdscr.refresh()
@@ -437,12 +456,14 @@ class FilmScanner:
             elif key == curses.KEY_LEFT:
                 cmd = 'B' if self.is_large_step else 'b'
                 self.send(cmd)
+                self.flush_input(stdscr)  # Clear any queued keys
                 stdscr.addstr(13, 0, f"Position: {self.position}     ")
                 stdscr.refresh()
             
             elif key == curses.KEY_RIGHT:
                 cmd = 'F' if self.is_large_step else 'f'
                 self.send(cmd)
+                self.flush_input(stdscr)  # Clear any queued keys
                 stdscr.addstr(13, 0, f"Position: {self.position}     ")
                 stdscr.refresh()
             
@@ -473,6 +494,13 @@ class FilmScanner:
             self.status_msg = f"Backed up {self.frame_advance} steps"
             return True
         return False
+    
+    def flush_input(self, stdscr):
+        """Flush pending keyboard input to prevent command buildup"""
+        stdscr.nodelay(1)  # Make getch non-blocking temporarily
+        while stdscr.getch() != -1:
+            pass  # Discard all pending keys
+        stdscr.nodelay(0)  # Restore blocking mode
     
     def draw(self, stdscr):
         """Draw main interface"""
@@ -544,7 +572,7 @@ class FilmScanner:
         """Main event loop"""
         curses.curs_set(0)
         stdscr.nodelay(0)
-        stdscr.timeout(100)
+        stdscr.timeout(50)  # Reduced timeout for snappier input
         
         # Find Arduino
         stdscr.addstr(0, 0, "Connecting to Arduino...")
@@ -614,19 +642,21 @@ class FilmScanner:
                 cmd = 'B' if self.is_large_step else 'b'
                 self.send(cmd)
                 self.status_msg = f"← {self.coarse_step if self.is_large_step else self.fine_step} steps"
+                self.flush_input(stdscr)  # Clear any queued keys
             
             elif key == curses.KEY_RIGHT:
                 cmd = 'F' if self.is_large_step else 'f'
                 self.send(cmd)
                 self.status_msg = f"→ {self.coarse_step if self.is_large_step else self.fine_step} steps"
+                self.flush_input(stdscr)  # Clear any queued keys
             
             elif key == curses.KEY_SLEFT:  # Shift+Left
                 if self.backup_frame():
-                    pass
+                    self.flush_input(stdscr)  # Clear any queued keys
             
             elif key == curses.KEY_SRIGHT:  # Shift+Right
                 if self.advance_frame():
-                    pass
+                    self.flush_input(stdscr)  # Clear any queued keys
             
             elif key in [ord('g'), ord('G')]:
                 self.is_large_step = not self.is_large_step
