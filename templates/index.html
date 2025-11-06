@@ -15,6 +15,96 @@
                 <span id="camera-status" class="status-badge disconnected">Camera</span>
             </div>
         </header>
+        
+        <!-- Browser Compatibility Warning -->
+        <div id="browser-warning" class="warning-banner" style="display:none;"></div>
+        
+        <!-- WebUSB Camera Connection Panel -->
+        <section class="panel camera-panel">
+            <h2>📷 Camera Connection</h2>
+            <div class="panel-content">
+                <div class="connection-info">
+                    <p>
+                        <strong>WebUSB Camera Control</strong><br>
+                        Connect your Canon camera directly to your computer for complete control.
+                    </p>
+                    <div class="status-row">
+                        <span>Status:</span>
+                        <span id="webusb-camera-status" class="status-badge disconnected">Disconnected</span>
+                    </div>
+                    <div class="status-row">
+                        <span>Model:</span>
+                        <span id="webusb-camera-model">Not connected</span>
+                    </div>
+                </div>
+                
+                <div class="button-group">
+                    <button id="connect-camera-btn" class="btn btn-primary" onclick="connectCamera()">
+                        📷 Connect Camera
+                    </button>
+                    <button id="disconnect-camera-btn" class="btn btn-secondary" onclick="disconnectCamera()" style="display:none;">
+                        Disconnect
+                    </button>
+                </div>
+                
+                <div class="help-text">
+                    <p>
+                        <strong>First time?</strong><br>
+                        1. Click "Connect Camera"<br>
+                        2. Select your Canon camera from the list<br>
+                        3. Click "Connect"<br>
+                        <br>
+                        <strong>Live View:</strong><br>
+                        For smooth live view, open Canon EOS Utility first, then start live view below to share that window.
+                    </p>
+                </div>
+            </div>
+        </section>
+        
+        <!-- WebUSB Camera Controls (shown when connected) -->
+        <section id="webusb-camera-controls" class="panel" style="display:none;">
+            <h2>📸 Camera Controls</h2>
+            <div class="panel-content">
+                <div class="button-group">
+                    <button class="btn btn-primary" onclick="autofocusWebUSB()">
+                        🎯 Autofocus
+                    </button>
+                    <button class="btn btn-success" onclick="captureWebUSB()">
+                        📸 Capture Image
+                    </button>
+                </div>
+            </div>
+        </section>
+        
+        <!-- Live View Panel -->
+        <section class="panel liveview-panel">
+            <h2>📹 Live View</h2>
+            <div class="panel-content">
+                <p class="help-text">
+                    <strong>Using EOS Utility?</strong><br>
+                    1. Open Canon EOS Utility on your computer<br>
+                    2. Start Remote Live View in EOS Utility<br>
+                    3. Click "Start Live View" below<br>
+                    4. Select the EOS Utility window<br>
+                    <br>
+                    The live view from EOS Utility will appear here (~10 FPS).
+                </p>
+                
+                <div class="button-group">
+                    <button id="start-liveview-btn" class="btn btn-primary" onclick="startLiveView()">
+                        📹 Start Live View
+                    </button>
+                    <button id="stop-liveview-btn" class="btn btn-secondary" onclick="stopLiveView()" style="display:none;">
+                        ⏹️ Stop Live View
+                    </button>
+                </div>
+                
+                <!-- Live View Video Display -->
+                <div id="liveview-panel" class="liveview-display" style="display:none;">
+                    <video id="liveview-video" autoplay muted style="width:100%; max-width:800px; border:2px solid #333;"></video>
+                </div>
+            </div>
+        </section>
 
         <!-- Status Panel -->
         <section class="status-panel">
@@ -169,8 +259,13 @@
         </footer>
     </div>
 
+    <!-- Notification Area -->
+    <div id="notification" style="display:none;"></div>
+    
     <!-- Include Socket.IO and app JavaScript -->
     <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script src="{{ url_for('static', filename='js/camera-webusb.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/liveview-capture.js') }}"></script>
     <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>
 </html>

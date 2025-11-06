@@ -1,107 +1,107 @@
 # Camera Control Options for Film Scanner
 
-## ⭐ NEW: Remote Camera Server (Recommended)
+## ⭐ NEW: WebUSB Camera Control (Recommended)
 
-The Film Scanner now supports **remote camera control** - your camera can be connected to ANY computer on your network, not just the Raspberry Pi!
+The Film Scanner uses **WebUSB** technology to control your camera directly from the web browser - **no apps**, **no servers**, just open the webpage!
 
 ### What You Get:
-- ✅ **Camera on any computer** - Windows, Mac, or Linux
-- ✅ **Excellent live view** - Use Canon EOS Utility (~10 FPS)
-- ✅ **Simple HTTP server** - Just run one Python script
-- ✅ **gphoto2 control** - Reliable autofocus and capture
-- ✅ **Open source** - No proprietary SDKs required
-- ✅ **Flexible setup** - Camera doesn't need to be near Pi
+- ✅ **No apps to install** - Everything in the browser!
+- ✅ **Click "Connect Camera"** - That's it!
+- ✅ **Excellent live view** - Share EOS Utility window (~10 FPS)
+- ✅ **Direct USB control** - Autofocus and capture via PTP
+- ✅ **Open source** - No proprietary SDKs
+- ✅ **Simple** - Plug camera, open webpage, done
 
 ### How It Works:
 ```
-Your Computer (Camera plugged in here)
-├── Camera Server (Python script)
-├── Canon EOS Utility (for live view)
-└── gphoto2 (for control)
-        ↕ HTTP over WiFi
-Raspberry Pi (Motor control + Web interface)
+Your Computer (viewing the webpage)
+├── Browser (Chrome/Edge)
+│   ├── WebUSB API (talks to camera via USB)
+│   └── Screen Capture API (shares EOS Utility window)
+└── Canon Camera (plugged into YOUR computer, not Pi!)
+        ↕ WebSocket to Pi
+Raspberry Pi (Motor control only)
 ```
 
-**See:** [REMOTE_CAMERA_SETUP.md](REMOTE_CAMERA_SETUP.md) for complete setup guide
+**See:** [WEBUSB_CAMERA_GUIDE.md](WEBUSB_CAMERA_GUIDE.md) for complete guide
 
 ---
 
-## Current Status: Two Camera Modes
+## Current Status: Simple Browser-Based Control
 
-This project is **open-source** and **accessible** - no proprietary dependencies required!
+This project is **open-source** and **accessible** - no proprietary dependencies!
 
-### Mode 1: Remote Camera (NEW - Recommended ⭐)
-- ✅ **Camera server on any computer** - Windows/Mac/Linux supported
-- ✅ **Excellent live view** - EOS Utility integration (~10 FPS)
-- ✅ **gphoto2 control** - Autofocus and capture
-- ✅ **Network-based** - Camera anywhere on your network
-
-### Mode 2: Local USB (Traditional)
-- ✅ **Direct Pi connection** - Camera plugged into Raspberry Pi
-- ✅ **gphoto2 control** - Autofocus and capture  
-- ❌ **No live view** - Use camera's screen
-- ✅ **Simple setup** - Just USB cable
+### WebUSB Mode (Current Implementation)
+- ✅ **Browser-only** - No apps to install!
+- ✅ **Direct USB control** - Camera plugged into YOUR computer
+- ✅ **Excellent live view** - Share EOS Utility window (~10 FPS)
+- ✅ **PTP protocol** - Standard camera control
+- ✅ **Works on** - Windows/Mac/Linux (Chrome/Edge)
+- ✅ **One-time authorization** - Browser remembers your camera
 
 ---
 
-## Why Remote Camera Server?
+## Why WebUSB?
 
 **Solves Previous Limitations:**
 
 ❌ **Old Problem:** Canon WiFi/CCAPI required proprietary SDK  
-✅ **New Solution:** Open-source HTTP server, no SDK needed
+✅ **New Solution:** WebUSB uses standard PTP, no SDK needed
 
 ❌ **Old Problem:** gphoto2 live view too slow (1 FPS)  
-✅ **New Solution:** Use EOS Utility on user's computer (~10 FPS)
+✅ **New Solution:** Share EOS Utility window (~10 FPS)
 
 ❌ **Old Problem:** HDMI capture requires extra hardware  
-✅ **New Solution:** Software-only, leverage existing EOS Utility
+✅ **New Solution:** Software-only browser APIs
 
-❌ **Old Problem:** Camera must be near Pi (USB cable length)  
-✅ **New Solution:** Camera anywhere on network
+❌ **Old Problem:** Needed separate server/app  
+✅ **New Solution:** Everything in browser, no apps!
+
+❌ **Old Problem:** Camera must be near Pi  
+✅ **New Solution:** Camera plugged into computer viewing webpage
 
 **Bonus:** Works on Windows/Mac where EOS Utility is available!
 
 ---
 
-## Quick Start: Remote Camera Server
+## Quick Start: WebUSB Camera
 
-### 5-Minute Setup:
+### 2-Minute Setup:
 
-1. **On your computer** (where camera is):
-   ```bash
-   cd Film-Scanner
-   pip3 install Flask Flask-CORS
-   python3 camera_server.py
-   ```
+1. **Plug camera into your computer** via USB
 
-2. **Note the URL** shown (e.g., `http://192.168.1.100:8888`)
+2. **Open webpage** in Chrome or Edge:
+   - Navigate to: `http://scanner.local:5000`
 
-3. **In Film Scanner web interface**:
-   - Enter that URL in Camera Settings
-   - Click "Connect to Remote Camera"
-   - Done!
+3. **Click "Connect Camera"**:
+   - Browser shows device picker
+   - Select your Canon camera
+   - Click "Connect"
 
-4. **(Optional) For best live view**:
-   - Install Canon EOS Utility
-   - Open it before starting camera server
-   - Enjoy ~10 FPS smooth preview
+✓ **Done!** No apps, no servers!
 
-**Full Guide:** [REMOTE_CAMERA_SETUP.md](REMOTE_CAMERA_SETUP.md)
+4. **(Optional) For live view**:
+   - Open Canon EOS Utility
+   - Start Remote Live View
+   - Click "Start Live View" in webpage
+   - Share EOS Utility window
+   - Enjoy ~10 FPS preview
+
+**Full Guide:** [WEBUSB_CAMERA_GUIDE.md](WEBUSB_CAMERA_GUIDE.md)
 
 ---
 
 ## Comparison Table
 
-| Feature | Remote Camera | Local USB |
-|---------|--------------|-----------|
-| Camera location | Any computer on network | Must be on Pi |
-| Live view | ✅ Excellent (~10 FPS via EOS Utility) | ❌ None |
-| Setup | Medium (one-time) | Easy |
-| OS Support | Windows/Mac/Linux | Linux only |
-| Extra software | Python + gphoto2 | gphoto2 only |
-| USB cable limit | No limit (wireless) | ~15 feet |
-| Best for | EOS Utility users, live view needs | Simple setups, direct control |
+| Feature | WebUSB | Old Server | gphoto2 on Pi |
+|---------|--------|------------|---------------|
+| Apps needed | **None!** | Python script | gphoto2 |
+| Setup time | **2 min** | 10 min | 5 min |
+| Camera location | Your computer | Your computer | On Pi |
+| Live view | ✅ Via EOS Utility | ✅ Via server | ❌ None |
+| Browser | Chrome/Edge | Any | Any |
+| Complexity | **Low** | Medium | Low |
+| User experience | **Best** | Good | Basic |
 
 ---
 

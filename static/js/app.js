@@ -1,6 +1,10 @@
 // WebSocket connection
 const socket = io();
 
+// WebUSB Camera instance
+let webusbCamera = null;
+let liveViewCapture = null;
+
 // State variables
 let calibrationState = {
     active: false,
@@ -17,6 +21,27 @@ let previewState = {
     active: false,
     inverted: false
 };
+
+let cameraState = {
+    connected: false,
+    model: 'Unknown',
+    liveViewActive: false
+};
+
+// Initialize on page load
+document.addEventListener('DOMContentLoaded', () => {
+    // Check browser compatibility
+    checkBrowserCompatibility();
+    
+    // Initialize WebUSB camera
+    if (CanonWebUSBCamera.isSupported()) {
+        webusbCamera = new CanonWebUSBCamera();
+        liveViewCapture = new LiveViewCapture();
+    }
+    
+    // Try to reconnect to previously authorized camera
+    tryAutoConnectCamera();
+});
 
 // Connect to WebSocket
 socket.on('connect', () => {
@@ -569,4 +594,323 @@ document.addEventListener('DOMContentLoaded', () => {
         stopMotorHold();
     });
 });
+
+//=============================================================================
+// WebUSB Camera Functions
+//=============================================================================
+
+/**
+ * Check browser compatibility for WebUSB
+ */
+function checkBrowserCompatibility() {
+    const browserWarning = document.getElementById('browser-warning');
+    
+    if (!CanonWebUSBCamera || !CanonWebUSBCamera.isSupported()) {
+        if (browserWarning) {
+            browserWarning.innerHTML = `
+                <strong>⚠️ WebUSB Not Supported</strong><br>
+                This browser doesn't support WebUSB (required for camera control).<br>
+                Please use <strong>Chrome</strong> or <strong>Edge</strong> for best experience.
+            `;
+            browserWarning.style.display = 'block';
+        }
+        return false;
+    }
+    
+    // Check for HTTPS (required for WebUSB except localhost)
+    if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1' && !location.hostname.endsWith('.local')) {
+        if (browserWarning) {
+            browserWarning.innerHTML = `
+                <strong>⚠️ HTTPS Required</strong><br>
+                WebUSB requires a secure connection (HTTPS).<br>
+                Access via <strong>localhost</strong> or use HTTPS.
+            `;
+            browserWarning.style.display = 'block';
+        }
+        return false;
+    }
+    
+    if (browserWarning) {
+        browserWarning.style.display = 'none';
+    }
+    return true;
+}
+
+/**
+ * Try to auto-connect to previously authorized camera
+ */
+async function tryAutoConnectCamera() {
+    if (!webusbCamera) return;
+    
+    try {
+        await webusbCamera.connectToAuthorizedDevice();
+        await webusbCamera.connect();
+        
+        cameraState.connected = true;
+        cameraState.model = webusbCamera.cameraModel;
+        
+        updateCameraUI();
+        showNotification('✓ Camera reconnected automatically', 'success');
+        
+    } catch (error) {
+        // No authorized device or connection failed
+        // This is normal on first use
+        console.log('No authorized camera to auto-connect');
+    }
+}
+
+/**
+ * Connect to camera (user initiates)
+ */
+async function connectCamera() {
+    if (!webusbCamera) {
+        alert('WebUSB not supported in this browser. Please use Chrome or Edge.');
+        return;
+    }
+    
+    const btn = document.getElementById('connect-camera-btn');
+    btn.classList.add('processing');
+    btn.textContent = 'Connecting...';
+    
+    try {
+        // Step 1: Request device selection
+        await webusbCamera.requestDevice();
+        
+        // Step 2: Connect to selected device
+        await webusbCamera.connect();
+        
+        cameraState.connected = true;
+        cameraState.model = webusbCamera.cameraModel;
+        
+        updateCameraUI();
+        showNotification(`✓ Connected to ${cameraState.model}`, 'success');
+        
+    } catch (error) {
+        console.error('Camera connection failed:', error);
+        showNotification('❌ Camera connection failed: ' + error.message, 'error');
+    } finally {
+        btn.classList.remove('processing');
+        updateCameraUI();
+    }
+}
+
+/**
+ * Disconnect camera
+ */
+async function disconnectCamera() {
+    if (!webusbCamera) return;
+    
+    try {
+        await webusbCamera.disconnect();
+        
+        cameraState.connected = false;
+        cameraState.model = 'Unknown';
+        cameraState.liveViewActive = false;
+        
+        updateCameraUI();
+        showNotification('Camera disconnected', 'info');
+        
+    } catch (error) {
+        console.error('Disconnect error:', error);
+    }
+}
+
+/**
+ * Update camera UI elements
+ */
+function updateCameraUI() {
+    const connectBtn = document.getElementById('connect-camera-btn');
+    const disconnectBtn = document.getElementById('disconnect-camera-btn');
+    const cameraStatus = document.getElementById('webusb-camera-status');
+    const cameraModel = document.getElementById('webusb-camera-model');
+    const cameraControls = document.getElementById('webusb-camera-controls');
+    
+    if (connectBtn && cameraState.connected) {
+        connectBtn.style.display = 'none';
+    } else if (connectBtn) {
+        connectBtn.style.display = 'inline-block';
+        connectBtn.textContent = '📷 Connect Camera';
+    }
+    
+    if (disconnectBtn) {
+        disconnectBtn.style.display = cameraState.connected ? 'inline-block' : 'none';
+    }
+    
+    if (cameraStatus) {
+        cameraStatus.className = cameraState.connected ? 'status-badge connected' : 'status-badge disconnected';
+        cameraStatus.textContent = cameraState.connected ? 'Connected' : 'Disconnected';
+    }
+    
+    if (cameraModel) {
+        cameraModel.textContent = cameraState.connected ? cameraState.model : 'Not connected';
+    }
+    
+    if (cameraControls) {
+        cameraControls.style.display = cameraState.connected ? 'block' : 'none';
+    }
+}
+
+/**
+ * Start live view from EOS Utility window
+ */
+async function startLiveView() {
+    if (!liveViewCapture || !LiveViewCapture.isSupported()) {
+        alert('Live view not supported in this browser');
+        return;
+    }
+    
+    const btn = document.getElementById('start-liveview-btn');
+    if (btn) {
+        btn.classList.add('processing');
+        btn.textContent = 'Select Window...';
+    }
+    
+    try {
+        // Request window share (EOS Utility)
+        const success = await liveViewCapture.requestWindowShare();
+        
+        if (!success) {
+            throw new Error('Window share cancelled');
+        }
+        
+        showNotification('✓ Select your EOS Utility window for live view', 'info');
+        
+        // Get video element
+        const videoElement = document.getElementById('liveview-video');
+        
+        // Start capturing frames
+        if (videoElement) {
+            await liveViewCapture.startCapture(videoElement, (blob) => {
+                // Frames are automatically displayed in video element
+            });
+        }
+        
+        cameraState.liveViewActive = true;
+        updateLiveViewUI();
+        
+        showNotification('✓ Live view active', 'success');
+        
+    } catch (error) {
+        console.error('Live view start failed:', error);
+        showNotification('❌ Live view failed: ' + error.message, 'error');
+    } finally {
+        if (btn) {
+            btn.classList.remove('processing');
+        }
+        updateLiveViewUI();
+    }
+}
+
+/**
+ * Stop live view
+ */
+function stopLiveView() {
+    if (!liveViewCapture) return;
+    
+    liveViewCapture.stopCapture();
+    cameraState.liveViewActive = false;
+    updateLiveViewUI();
+    
+    showNotification('Live view stopped', 'info');
+}
+
+/**
+ * Update live view UI
+ */
+function updateLiveViewUI() {
+    const startBtn = document.getElementById('start-liveview-btn');
+    const stopBtn = document.getElementById('stop-liveview-btn');
+    const liveviewPanel = document.getElementById('liveview-panel');
+    
+    if (startBtn) {
+        startBtn.style.display = cameraState.liveViewActive ? 'none' : 'inline-block';
+        if (!cameraState.liveViewActive) {
+            startBtn.textContent = '📹 Start Live View';
+        }
+    }
+    
+    if (stopBtn) {
+        stopBtn.style.display = cameraState.liveViewActive ? 'inline-block' : 'none';
+    }
+    
+    if (liveviewPanel) {
+        liveviewPanel.style.display = cameraState.liveViewActive ? 'block' : 'none';
+    }
+}
+
+/**
+ * Autofocus via WebUSB
+ */
+async function autofocusWebUSB() {
+    if (!cameraState.connected || !webusbCamera) {
+        alert('Camera not connected');
+        return;
+    }
+    
+    const btn = event.target;
+    btn.classList.add('processing');
+    
+    try {
+        const success = await webusbCamera.autofocus();
+        
+        if (success) {
+            showNotification('✓ Autofocus triggered', 'success');
+        } else {
+            showNotification('⚠️ Autofocus may not be supported', 'warning');
+        }
+        
+    } catch (error) {
+        console.error('Autofocus error:', error);
+        showNotification('❌ Autofocus failed', 'error');
+    } finally {
+        btn.classList.remove('processing');
+    }
+}
+
+/**
+ * Capture via WebUSB
+ */
+async function captureWebUSB() {
+    if (!cameraState.connected || !webusbCamera) {
+        alert('Camera not connected');
+        return;
+    }
+    
+    const btn = event.target;
+    btn.classList.add('processing');
+    
+    try {
+        const success = await webusbCamera.capture();
+        
+        if (success) {
+            // Update frame count on server side
+            await apiCall('capture');
+            showNotification('✓ Image captured', 'success');
+        } else {
+            showNotification('❌ Capture failed', 'error');
+        }
+        
+    } catch (error) {
+        console.error('Capture error:', error);
+        showNotification('❌ Capture failed: ' + error.message, 'error');
+    } finally {
+        btn.classList.remove('processing');
+    }
+}
+
+/**
+ * Show notification
+ */
+function showNotification(message, type = 'info') {
+    const notification = document.getElementById('notification');
+    if (!notification) return;
+    
+    notification.textContent = message;
+    notification.className = `notification ${type}`;
+    notification.style.display = 'block';
+    
+    setTimeout(() => {
+        notification.style.display = 'none';
+    }, 5000);
+}
 
