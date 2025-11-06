@@ -1,42 +1,111 @@
 # Camera Control Options for Film Scanner
 
-## Current Status: Simple USB-only Setup
+## ⭐ NEW: Remote Camera Server (Recommended)
 
-This project focuses on being an **open-source**, **accessible** solution for film scanning without proprietary dependencies or complex setup requirements.
+The Film Scanner now supports **remote camera control** - your camera can be connected to ANY computer on your network, not just the Raspberry Pi!
 
-### What's Supported:
-- ✅ **gphoto2 USB Control** - Autofocus and capture via USB
-- ✅ **Simple setup** - No WiFi complexity or proprietary SDKs
-- ✅ **Works with most cameras** - Any camera supported by gphoto2
+### What You Get:
+- ✅ **Camera on any computer** - Windows, Mac, or Linux
+- ✅ **Excellent live view** - Use Canon EOS Utility (~10 FPS)
+- ✅ **Simple HTTP server** - Just run one Python script
+- ✅ **gphoto2 control** - Reliable autofocus and capture
+- ✅ **Open source** - No proprietary SDKs required
+- ✅ **Flexible setup** - Camera doesn't need to be near Pi
 
-### What's Not Available:
-- ❌ **Live view** - Removed due to complexity/reliability issues
-- ❌ **Canon WiFi/CCAPI** - Requires proprietary SDK from Canon
-- ❌ **HDMI capture** - Code removed to simplify codebase
+### How It Works:
+```
+Your Computer (Camera plugged in here)
+├── Camera Server (Python script)
+├── Canon EOS Utility (for live view)
+└── gphoto2 (for control)
+        ↕ HTTP over WiFi
+Raspberry Pi (Motor control + Web interface)
+```
 
----
-
-## Why Keep It Simple?
-
-**Canon WiFi/CCAPI Issues:**
-- Requires applying for Canon's SDK and API kit
-- Adds proprietary dependencies that conflict with open-source principles
-- Complex setup process with multiple tools and configurations
-- Not suitable for an accessible open-source project
-
-**gphoto2 Live View Issues:**
-- Very slow (1 FPS)
-- Unreliable across different camera models
-- Often conflicts with capture functionality
-
-**HDMI Capture Issues:**
-- Requires additional hardware ($20-30)
-- Adds complexity to setup
-- Not all cameras have HDMI output
+**See:** [REMOTE_CAMERA_SETUP.md](REMOTE_CAMERA_SETUP.md) for complete setup guide
 
 ---
 
-## Alternative Solution 1: HDMI Capture Card
+## Current Status: Two Camera Modes
+
+This project is **open-source** and **accessible** - no proprietary dependencies required!
+
+### Mode 1: Remote Camera (NEW - Recommended ⭐)
+- ✅ **Camera server on any computer** - Windows/Mac/Linux supported
+- ✅ **Excellent live view** - EOS Utility integration (~10 FPS)
+- ✅ **gphoto2 control** - Autofocus and capture
+- ✅ **Network-based** - Camera anywhere on your network
+
+### Mode 2: Local USB (Traditional)
+- ✅ **Direct Pi connection** - Camera plugged into Raspberry Pi
+- ✅ **gphoto2 control** - Autofocus and capture  
+- ❌ **No live view** - Use camera's screen
+- ✅ **Simple setup** - Just USB cable
+
+---
+
+## Why Remote Camera Server?
+
+**Solves Previous Limitations:**
+
+❌ **Old Problem:** Canon WiFi/CCAPI required proprietary SDK  
+✅ **New Solution:** Open-source HTTP server, no SDK needed
+
+❌ **Old Problem:** gphoto2 live view too slow (1 FPS)  
+✅ **New Solution:** Use EOS Utility on user's computer (~10 FPS)
+
+❌ **Old Problem:** HDMI capture requires extra hardware  
+✅ **New Solution:** Software-only, leverage existing EOS Utility
+
+❌ **Old Problem:** Camera must be near Pi (USB cable length)  
+✅ **New Solution:** Camera anywhere on network
+
+**Bonus:** Works on Windows/Mac where EOS Utility is available!
+
+---
+
+## Quick Start: Remote Camera Server
+
+### 5-Minute Setup:
+
+1. **On your computer** (where camera is):
+   ```bash
+   cd Film-Scanner
+   pip3 install Flask Flask-CORS
+   python3 camera_server.py
+   ```
+
+2. **Note the URL** shown (e.g., `http://192.168.1.100:8888`)
+
+3. **In Film Scanner web interface**:
+   - Enter that URL in Camera Settings
+   - Click "Connect to Remote Camera"
+   - Done!
+
+4. **(Optional) For best live view**:
+   - Install Canon EOS Utility
+   - Open it before starting camera server
+   - Enjoy ~10 FPS smooth preview
+
+**Full Guide:** [REMOTE_CAMERA_SETUP.md](REMOTE_CAMERA_SETUP.md)
+
+---
+
+## Comparison Table
+
+| Feature | Remote Camera | Local USB |
+|---------|--------------|-----------|
+| Camera location | Any computer on network | Must be on Pi |
+| Live view | ✅ Excellent (~10 FPS via EOS Utility) | ❌ None |
+| Setup | Medium (one-time) | Easy |
+| OS Support | Windows/Mac/Linux | Linux only |
+| Extra software | Python + gphoto2 | gphoto2 only |
+| USB cable limit | No limit (wireless) | ~15 feet |
+| Best for | EOS Utility users, live view needs | Simple setups, direct control |
+
+---
+
+## Alternative: HDMI Capture Card (Not Implemented)
 
 ### What You Need:
 **USB HDMI Capture Card** ($15-30 on Amazon)

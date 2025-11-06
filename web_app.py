@@ -17,6 +17,7 @@ import json
 import threading
 import base64
 import tempfile
+import requests
 from config_manager import ConfigManager
 
 app = Flask(__name__)
@@ -37,6 +38,11 @@ class FilmScanner:
         self.camera_model = "Unknown"
         self.camera_error = None
         self.last_camera_check = 0
+        
+        # Remote camera server configuration
+        self.camera_server_url = None
+        self.use_remote_camera = False
+        self.remote_camera_available = False
         
         # Motor configuration
         self.fine_step = 8
@@ -212,9 +218,59 @@ class FilmScanner:
             self.broadcast_status()
             return False
     
+    def setup_remote_camera(self, server_url):
+        """Setup connection to remote camera server"""
+        if not server_url:
+            return False
+        
+        # Normalize URL
+        if not server_url.startswith('http'):
+            server_url = f'http://{server_url}'
+        if server_url.endswith('/'):
+            server_url = server_url[:-1]
+        
+        self.camera_server_url = server_url
+        
+        # Test connection
+        try:
+            response = requests.get(f'{server_url}/api/status', timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                self.use_remote_camera = True
+                self.remote_camera_available = True
+                self.camera_connected = data.get('camera_connected', False)
+                self.camera_model = data.get('camera_model', 'Remote Camera')
+                print(f"✓ Connected to remote camera server: {server_url}")
+                return True
+        except Exception as e:
+            print(f"✗ Failed to connect to remote camera server: {e}")
+            self.remote_camera_available = False
+            return False
+    
+    def check_remote_camera(self):
+        """Check remote camera server status"""
+        if not self.camera_server_url:
+            return False
+        
+        try:
+            response = requests.get(f'{self.camera_server_url}/api/check-camera', timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                self.camera_connected = data.get('connected', False)
+                self.camera_model = data.get('model', 'Unknown')
+                return self.camera_connected
+        except Exception as e:
+            print(f"✗ Remote camera check failed: {e}")
+            self.camera_connected = False
+            return False
+    
     def check_camera(self):
-        """Check camera connection"""
-        # Check for gphoto2 USB camera
+        """Check camera connection (local or remote)"""
+        # If using remote camera server, check that instead
+        if self.use_remote_camera and self.camera_server_url:
+            return self.check_remote_camera()
+        
+        # Otherwise check for local gphoto2 USB camera
         current_time = time.time()
         if current_time - self.last_camera_check < 5:
             return self.camera_connected
@@ -236,7 +292,6 @@ class FilmScanner:
                     if 'usb' in line.lower():
                         self.camera_model = line.split('usb')[0].strip()
                         self.camera_connected = True
-                        self.camera_type = 'gphoto2'
                         print(f"✓ Camera detected: {self.camera_model}")
                         return True
             
@@ -280,7 +335,27 @@ class FilmScanner:
             pass
     
     def autofocus(self):
-        """Trigger camera autofocus"""
+        """Trigger camera autofocus (local or remote)"""
+        # Use remote camera server if configured
+        if self.use_remote_camera and self.camera_server_url:
+            try:
+                print("📷 Triggering remote autofocus...")
+                response = requests.post(
+                    f'{self.camera_server_url}/api/autofocus',
+                    timeout=15
+                )
+                if response.status_code == 200:
+                    print("✓ Remote autofocus triggered successfully")
+                    time.sleep(2.0)
+                    return True
+                else:
+                    print(f"✗ Remote autofocus failed: {response.json().get('error')}")
+                    return False
+            except Exception as e:
+                print(f"✗ Remote autofocus error: {e}")
+                return False
+        
+        # Otherwise use local gphoto2
         try:
             print("📷 Triggering autofocus...")
             self._kill_gphoto2()
@@ -320,7 +395,56 @@ class FilmScanner:
             return False
     
     def capture_image(self, retry=True):
-        """Capture image to camera SD card with autofocus"""
+        """Capture image to camera SD card with autofocus (local or remote)"""
+        # Use remote camera server if configured
+        if self.use_remote_camera and self.camera_server_url:
+            try:
+                print("📷 Starting remote capture sequence...")
+                
+                # Step 1: Try autofocus
+                print("   [1/2] Attempting autofocus...")
+                try:
+                    af_response = requests.post(
+                        f'{self.camera_server_url}/api/autofocus',
+                        timeout=15
+                    )
+                    if af_response.status_code == 200:
+                        print("   ✓ Autofocus successful")
+                        time.sleep(2.0)
+                    else:
+                        print("   ⚠ Autofocus not available (continuing)")
+                        time.sleep(0.5)
+                except:
+                    print("   ⚠ Autofocus not available (continuing)")
+                    time.sleep(0.5)
+                
+                # Step 2: Capture
+                print("   [2/2] Capturing image...")
+                capture_response = requests.post(
+                    f'{self.camera_server_url}/api/capture',
+                    json={'download': False},
+                    timeout=35
+                )
+                
+                if capture_response.status_code == 200:
+                    # Success!
+                    self.frame_count += 1
+                    self.frames_in_strip += 1
+                    self.frame_positions.append(self.position)
+                    self.save_state()
+                    print(f"✓ Successfully captured frame #{self.frame_count}")
+                    print(f"   (Strip {self.strip_count}, Frame {self.frames_in_strip} in strip)")
+                    return True
+                else:
+                    error_data = capture_response.json()
+                    print(f"✗ Remote capture failed: {error_data.get('error')}")
+                    return False
+            
+            except Exception as e:
+                print(f"✗ Remote capture error: {e}")
+                return False
+        
+        # Otherwise use local gphoto2
         try:
             print("📷 Starting capture sequence...")
             self._kill_gphoto2()
@@ -479,7 +603,10 @@ class FilmScanner:
             'camera_model': self.camera_model,
             'camera_error': self.camera_error,
             'status_msg': self.status_msg,
-            'arduino_connected': self.arduino is not None
+            'arduino_connected': self.arduino is not None,
+            'use_remote_camera': self.use_remote_camera,
+            'remote_camera_available': self.remote_camera_available,
+            'camera_server_url': self.camera_server_url
         }
         
         return status
@@ -774,6 +901,63 @@ def new_strip():
     # Reset strip frame count
     scanner.frames_in_strip = 0
     return jsonify({'success': True})
+
+@app.route('/api/setup_remote_camera', methods=['POST'])
+def setup_remote_camera():
+    """Setup connection to remote camera server"""
+    data = request.json
+    server_url = data.get('server_url')
+    
+    if not server_url:
+        return jsonify({'success': False, 'error': 'No server URL provided'})
+    
+    success = scanner.setup_remote_camera(server_url)
+    
+    return jsonify({
+        'success': success,
+        'camera_connected': scanner.camera_connected,
+        'camera_model': scanner.camera_model,
+        'server_url': scanner.camera_server_url
+    })
+
+@app.route('/api/disconnect_remote_camera', methods=['POST'])
+def disconnect_remote_camera():
+    """Disconnect from remote camera server"""
+    scanner.use_remote_camera = False
+    scanner.camera_server_url = None
+    scanner.remote_camera_available = False
+    scanner.camera_connected = False
+    scanner.status_msg = "Remote camera disconnected"
+    scanner.broadcast_status()
+    
+    return jsonify({'success': True})
+
+@app.route('/api/live_view')
+def live_view():
+    """Proxy live view from remote camera server"""
+    if not scanner.use_remote_camera or not scanner.camera_server_url:
+        return jsonify({'error': 'Remote camera not configured'}), 503
+    
+    try:
+        # Proxy the live view from camera server
+        response = requests.get(
+            f'{scanner.camera_server_url}/api/live-view',
+            timeout=10,
+            stream=True
+        )
+        
+        if response.status_code == 200:
+            return response.content, 200, {
+                'Content-Type': 'image/jpeg',
+                'Cache-Control': 'no-cache, no-store, must-revalidate',
+                'Pragma': 'no-cache',
+                'Expires': '0'
+            }
+        else:
+            return jsonify({'error': 'Failed to get live view'}), response.status_code
+    
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 # WebSocket events
