@@ -11,7 +11,9 @@ Professional-grade 35mm film scanner using Raspberry Pi, Arduino, and DSLR camer
 - **Smart Calibration**: Learn frame spacing once, apply to entire roll
 - **Resume Capability**: Continue scanning after interruption
 - **Unlimited Frames**: No maximum frame count limitation
+- **🆕 Canon R100 WiFi Support**: Smooth 10 FPS live view via Canon Camera Control API
 - **🆕 Smart Startup**: Auto-discover Pi IP on first launch with persistent configuration
+- **Web Interface**: Browser-based control with real-time status updates
 
 ## Hardware Requirements
 
@@ -33,8 +35,10 @@ Professional-grade 35mm film scanner using Raspberry Pi, Arduino, and DSLR camer
 
 - Raspberry Pi OS (Bullseye or Bookworm)
 - Python 3.7+
-- gphoto2 (camera control)
+- gphoto2 (camera control and capture)
 - Arduino IDE or arduino-cli
+- Flask and Flask-SocketIO (web interface)
+- requests and urllib3 (Canon WiFi support)
 
 ## Quick Start
 
@@ -48,8 +52,8 @@ cd film-scanner/Film-Scanner
 ### 2. Install Dependencies
 
 ```bash
-# Install requirements
-pip3 install -r requirements.txt
+# Install Python requirements
+pip3 install -r requirements.txt --break-system-packages
 
 # Or run the automated setup script
 bash setup.sh
@@ -184,15 +188,26 @@ Adjust A4988 potentiometer for ~1A motor current:
 ## Camera Configuration
 
 ### Supported Cameras
-- Canon DSLRs with gphoto2 support
-- Files saved as .CR3 to camera SD card
-- USB tethering required
+
+#### Canon R100 (Recommended)
+- **WiFi Live View**: 10 FPS smooth preview via Canon CCAPI
+- **USB Control**: Autofocus and capture via gphoto2
+- **Dual Connection**: WiFi for live view, USB for control
+- **Setup Guide**: See [CANON_R100_WIFI_SETUP.md](CANON_R100_WIFI_SETUP.md)
+- **Quick Start**: See [CANON_WIFI_QUICKSTART.md](CANON_WIFI_QUICKSTART.md)
+
+#### Other Canon DSLRs
+- USB tethering with gphoto2
+- Files saved to camera SD card
+- Autofocus and capture support
+- No live view (use camera screen)
 
 ### Camera Settings
-- Manual mode recommended
+- Manual mode recommended (M, Av, Tv, or P)
 - Fixed ISO (100-400)
 - Consistent exposure
 - Manual focus or single-shot AF
+- For R100: Enable WiFi and set to Remote Control mode
 
 ## File Management
 
@@ -359,10 +374,21 @@ Detailed documentation is available in the repository:
 - **[Calibration Workflow](docs/calibration-workflow.md)** - Detailed calibration process and strip scanning
 - **[GitHub Deploy Guide](docs/github-deploy.md)** - Repository setup and deployment instructions
 
-### 🆕 Smart Startup System
+### 🆕 Canon R100 WiFi Support
+- **[Canon WiFi Quick Start](CANON_WIFI_QUICKSTART.md)** - 5-minute setup guide ⭐ START HERE
+- **[Canon R100 WiFi Setup](CANON_R100_WIFI_SETUP.md)** - Complete setup guide with troubleshooting
+- **[CCAPI Activation Guide](R100_CCAPI_ACTIVATION_GUIDE.md)** - Enable Canon Camera Control API
+- **[Integration Summary](CANON_WIFI_INTEGRATION_SUMMARY.md)** - Technical details for developers
+- **[Implementation Complete](IMPLEMENTATION_COMPLETE.md)** - Feature status and testing
+
+### Smart Startup System
 - **[Smart Startup README](SMART_STARTUP_README.md)** - Feature overview and quick start
 - **[Startup Guide](STARTUP_GUIDE.md)** - Detailed setup and configuration instructions
 - **[Implementation Summary](IMPLEMENTATION_SUMMARY.md)** - Technical details and design decisions
+
+### Camera Configuration
+- **[Camera Options](CAMERA_OPTIONS.md)** - Camera control methods and alternatives
+- **[Camera Test](TEST_CAMERA.md)** - Camera connection diagnostics
 
 ## Support
 
@@ -372,13 +398,29 @@ For issues or questions:
 3. Check closed issues on GitHub
 4. Open a new issue with details
 
+## Recent Additions
+
+### v2.0 - Canon R100 WiFi Integration ✅
+- Canon Camera Control API (CCAPI) support
+- WiFi live view at 10 FPS
+- Connection monitoring and auto-reconnect
+- Setup wizard for easy pairing
+- Comprehensive documentation
+
+### Web Interface ✅
+- Browser-based control panel
+- Real-time status updates via WebSocket
+- Mobile-friendly design
+- Remote operation from any device on network
+
 ## Future Enhancements
 
-- [ ] Web interface for remote control
+- [ ] Canon WiFi autofocus (currently uses gphoto2)
+- [ ] Canon WiFi capture (currently uses gphoto2)
+- [ ] Multi-camera support
+- [ ] Live histogram and focus peaking
 - [ ] Multi-format support (120, 110 film)
 - [ ] Automatic exposure detection
-- [ ] Batch processing modes
-- [ ] Image preview on Pi display
 - [ ] Cloud backup integration
 
 ---

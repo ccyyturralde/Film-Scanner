@@ -15,7 +15,39 @@
 - Camera must be in specific USB mode (PTP/MTP)
 - Conflicts with camera's own USB mass storage mode
 
-## ⭐ RECOMMENDED SOLUTION: HDMI Capture Card
+---
+
+## ⭐ RECOMMENDED SOLUTION: Canon R100 WiFi
+
+### ✅ NOW IMPLEMENTED!
+
+The Film Scanner now has **full Canon R100 WiFi support** with smooth live view!
+
+### What You Get:
+- **10 FPS Live View** via Canon Camera Control API (CCAPI)
+- **WiFi Connection** with auto-discovery and setup wizard
+- **Connection Monitoring** with automatic disconnect detection
+- **USB Control** for autofocus and capture (gphoto2)
+- **Dual Connection** - WiFi for preview, USB for control
+
+### Quick Start:
+1. **Read**: [CANON_WIFI_QUICKSTART.md](CANON_WIFI_QUICKSTART.md) - 5-minute guide
+2. **Setup**: [CANON_R100_WIFI_SETUP.md](CANON_R100_WIFI_SETUP.md) - Complete guide
+3. **Activate**: [R100_CCAPI_ACTIVATION_GUIDE.md](R100_CCAPI_ACTIVATION_GUIDE.md) - Enable CCAPI
+
+### Benefits:
+- ✅ **Smooth live view** - 10 FPS wireless preview
+- ✅ **No extra hardware** - Uses camera's built-in WiFi ($0 cost)
+- ✅ **Reliable control** - gphoto2 for AF and capture
+- ✅ **Professional workflow** - Live positioning with accurate capture
+- ✅ **Connection monitoring** - Automatic disconnect detection
+- ✅ **Easy setup** - Guided wizard walks you through pairing
+
+**Start here**: See [CANON_WIFI_QUICKSTART.md](CANON_WIFI_QUICKSTART.md)
+
+---
+
+## Alternative Solution 1: HDMI Capture Card
 
 ### What You Need:
 **USB HDMI Capture Card** ($15-30 on Amazon)
@@ -189,37 +221,31 @@ Generally not available for Linux/Pi.
 
 ---
 
-## My Recommendation
+## My Recommendations
 
-**FOR FILM SCANNING: Use HDMI Capture Card**
+### For Canon R100 Users: Use Canon WiFi ⭐
 
-Here's why this is the BEST solution for your use case:
+**This is now the BEST solution for Canon R100 owners:**
 
-1. **You need reliable live view** - Critical for film scanning to see exact frame position
-2. **Camera screen going black is annoying** - HDMI keeps it alive
-3. **Small camera screen** - You mentioned this is an issue
-4. **Works with any camera** - Future-proof if you upgrade
-5. **Professional approach** - This is how studios do tethered shooting
-6. **Cheap** - $20-30 is worth the reliability
+1. **Built-in WiFi** - No extra hardware needed ($0 cost)
+2. **10 FPS live view** - Smooth enough for film positioning
+3. **Easy setup** - Guided wizard walks you through it
+4. **Reliable control** - gphoto2 handles AF and capture
+5. **Professional workflow** - Live view for positioning, accurate capture
 
-### Next Steps If You Go HDMI Route:
+**Start here**: [CANON_WIFI_QUICKSTART.md](CANON_WIFI_QUICKSTART.md)
 
-1. **Order a USB HDMI capture card**
-   - Search Amazon: "USB HDMI Video Capture UVC"
-   - Get one that supports 1080p and UVC (most do)
+### For Other Cameras: HDMI Capture Card
 
-2. **When it arrives, let me know** and I'll:
-   - Update web app to detect video device
-   - Add mjpeg streaming for smooth live preview
-   - Keep gphoto2 for shutter trigger only
-   - Add focus peaking indicators
-   - Add zoom controls for precise framing
+If you don't have a Canon R100 or WiFi-capable Canon camera:
 
-3. **Result**: 
-   - Smooth 30 FPS live preview on webpage
-   - Large, clear view for positioning film
-   - Reliable capture with gphoto2
-   - Camera never sleeps
+1. **You need reliable live view** - Critical for film scanning
+2. **HDMI keeps camera awake** - No screen blackout issues
+3. **Works with any camera** - Future-proof solution
+4. **Professional approach** - Studio-grade tethering
+5. **Affordable** - $20-30 one-time purchase
+
+**Note**: HDMI capture support was removed in v2.0 to focus on Canon WiFi. If you need HDMI capture, use an earlier version or consider the Canon WiFi solution.
 
 ---
 
@@ -245,15 +271,16 @@ This will tell us:
 
 ## Summary Table
 
-| Method | Live View | Capture | AF | Cost | Reliability | Setup |
-|--------|-----------|---------|----|----- |-------------|-------|
-| **HDMI Capture** | ✅ 30 FPS | ✅ | ❌* | $20-30 | ⭐⭐⭐⭐⭐ | Easy |
-| gphoto2 CLI | ⚠️ 1 FPS | ⚠️ | ⚠️ | $0 | ⭐⭐⭐ | Easy |
-| python-gphoto2 | ⚠️ 1 FPS | ✅ | ⚠️ | $0 | ⭐⭐⭐⭐ | Medium |
-| Camera WiFi | ✅ Good | ✅ | ✅ | $0 | ⭐⭐ | Hard |
-| Webcam Mode | ✅ Good | ✅ | ✅ | $0 | ⭐ | Not for Pi |
+| Method | Live View | Capture | AF | Cost | Reliability | Setup | Status |
+|--------|-----------|---------|----|----- |-------------|-------|--------|
+| **Canon R100 WiFi** | ✅ 10 FPS | ✅ | ✅ | $0 | ⭐⭐⭐⭐ | Medium | ✅ Implemented |
+| HDMI Capture | ✅ 30 FPS | ✅ | ⚠️* | $20-30 | ⭐⭐⭐⭐⭐ | Easy | ❌ Removed in v2.0 |
+| gphoto2 USB only | ❌ None | ✅ | ✅ | $0 | ⭐⭐⭐⭐ | Easy | ✅ Available |
+| python-gphoto2 | ❌ None | ✅ | ⚠️ | $0 | ⭐⭐⭐⭐ | Medium | Available |
+| Webcam Mode | ⚠️ Good | ✅ | ✅ | $0 | ⭐ | Hard | Not for Pi |
 
-*AF still done via gphoto2 or camera, but you can see focus clearly
+*AF via gphoto2, capture via gphoto2
+**gphoto2 live view removed in v2.0 (was too slow/unreliable)
 
 ---
 
