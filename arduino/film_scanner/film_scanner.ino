@@ -23,7 +23,7 @@ const int ENABLE_PIN = 4;
 
 int steps_per_frame = 1200;
 int fine_step = 8;
-int coarse_step = 64;
+int coarse_step = 192;  // 3x larger for better coarse control
 int step_delay_us = 800;
 int backlash_steps = 20;
 

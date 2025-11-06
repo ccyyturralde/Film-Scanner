@@ -56,7 +56,6 @@ function updateUI(status) {
     // Mode and auto-advance displays
     document.getElementById('mode-display').textContent = status.mode.toUpperCase();
     document.getElementById('auto-advance').textContent = status.auto_advance ? 'ON' : 'OFF';
-    document.getElementById('step-size').textContent = status.is_large_step ? 'LARGE' : 'FINE';
     
     // Show/hide calibration panel based on strip count
     if (status.strip_count === 0 && status.roll_name) {
@@ -124,13 +123,49 @@ async function createRoll() {
     }
 }
 
+// Motor control with press-and-hold support
+let motorHoldState = {
+    holding: false,
+    interval: null,
+    button: null
+};
+
 async function moveMotor(direction, size) {
-    const btn = event.target;
-    btn.classList.add('processing');
-    
     await apiCall('move', { direction, size });
+}
+
+function startMotorHold(button, direction, size) {
+    if (motorHoldState.holding) return;
     
-    btn.classList.remove('processing');
+    motorHoldState.holding = true;
+    motorHoldState.button = button;
+    button.classList.add('holding');
+    
+    // Immediate first move
+    moveMotor(direction, size);
+    
+    // Continue moving while held
+    motorHoldState.interval = setInterval(() => {
+        if (motorHoldState.holding) {
+            moveMotor(direction, size);
+        }
+    }, 150); // Send new command every 150ms for responsiveness
+}
+
+function stopMotorHold() {
+    if (!motorHoldState.holding) return;
+    
+    motorHoldState.holding = false;
+    
+    if (motorHoldState.interval) {
+        clearInterval(motorHoldState.interval);
+        motorHoldState.interval = null;
+    }
+    
+    if (motorHoldState.button) {
+        motorHoldState.button.classList.remove('holding');
+        motorHoldState.button = null;
+    }
 }
 
 async function advanceFrame() {
@@ -159,10 +194,6 @@ async function backupFrame() {
     }
 }
 
-async function toggleStepSize() {
-    await apiCall('toggle_step_size');
-}
-
 async function toggleMode() {
     await apiCall('toggle_mode');
 }
@@ -186,7 +217,22 @@ async function autofocus() {
     btn.classList.remove('processing');
     
     if (!result.success) {
-        alert('Autofocus failed. Check camera connection.');
+        alert('Autofocus failed. Check console for details.');
+    }
+}
+
+async function testCapture() {
+    const btn = event.target;
+    btn.classList.add('processing');
+    
+    const result = await apiCall('test_capture');
+    
+    btn.classList.remove('processing');
+    
+    if (result.success) {
+        alert('✓ Test capture successful!\n\nCamera is working. Check camera SD card for test image.\n\n(Frame count was NOT incremented)');
+    } else {
+        alert('✗ Test capture failed\n\n' + (result.message || 'Check console for details'));
     }
 }
 
@@ -451,11 +497,6 @@ document.addEventListener('keydown', (e) => {
             e.preventDefault();
             autofocus();
             break;
-        case 'g':
-        case 'G':
-            e.preventDefault();
-            toggleStepSize();
-            break;
         case 'a':
         case 'A':
             e.preventDefault();
@@ -469,13 +510,63 @@ document.addEventListener('keydown', (e) => {
     }
 });
 
-// Request status update every 2 seconds
+// Request status update every 1 second (improved responsiveness)
 setInterval(() => {
     socket.emit('request_status');
-}, 2000);
+}, 1000);
 
 // Initial status request
 window.addEventListener('load', () => {
     socket.emit('request_status');
+});
+
+// Setup motor button press-and-hold functionality
+document.addEventListener('DOMContentLoaded', () => {
+    const motorButtons = document.querySelectorAll('.motor-btn');
+    
+    motorButtons.forEach(button => {
+        const direction = button.dataset.direction;
+        const size = button.dataset.size;
+        
+        // Mouse events (desktop)
+        button.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            startMotorHold(button, direction, size);
+        });
+        
+        button.addEventListener('mouseup', (e) => {
+            e.preventDefault();
+            stopMotorHold();
+        });
+        
+        button.addEventListener('mouseleave', (e) => {
+            stopMotorHold();
+        });
+        
+        // Touch events (mobile)
+        button.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            startMotorHold(button, direction, size);
+        });
+        
+        button.addEventListener('touchend', (e) => {
+            e.preventDefault();
+            stopMotorHold();
+        });
+        
+        button.addEventListener('touchcancel', (e) => {
+            e.preventDefault();
+            stopMotorHold();
+        });
+    });
+    
+    // Global safety: stop on any mouse up anywhere on page
+    document.addEventListener('mouseup', () => {
+        stopMotorHold();
+    });
+    
+    document.addEventListener('touchend', () => {
+        stopMotorHold();
+    });
 });
 

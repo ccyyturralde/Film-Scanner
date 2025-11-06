@@ -18,6 +18,7 @@ import threading
 import base64
 import tempfile
 from config_manager import ConfigManager
+from canon_wifi import CanonWiFiCamera
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'film-scanner-secret-key'
@@ -35,11 +36,16 @@ class FilmScanner:
         self.status_msg = "Ready"
         self.camera_connected = False
         self.camera_model = "Unknown"
+        self.camera_error = None
         self.last_camera_check = 0
+        
+        # Camera type: 'canon_wifi', 'gphoto2', or None
+        self.camera_type = None
+        self.canon_camera = None  # CanonWiFiCamera instance
         
         # Motor configuration
         self.fine_step = 8
-        self.coarse_step = 64
+        self.coarse_step = 192  # 3x larger for better coarse control
         self.step_delay = 800
         
         # Calibration data
@@ -53,15 +59,9 @@ class FilmScanner:
         # Mode control
         self.mode = 'manual'
         self.auto_advance = True
-        self.is_large_step = False
         
         # State persistence
         self.state_file = None
-        
-        # Live preview
-        self.preview_active = False
-        self.preview_thread = None
-        self.preview_stop_event = threading.Event()
         
         # Lock for thread safety
         self.lock = threading.Lock()
@@ -104,6 +104,12 @@ class FilmScanner:
                 if 'Film' in response or 'READY' in response or 'Position' in response:
                     self.arduino = ser
                     self.arduino_port = device
+                    
+                    # Configure coarse step size
+                    time.sleep(0.1)
+                    self.arduino.write(f'l{self.coarse_step}\n'.encode())
+                    time.sleep(0.1)
+                    
                     print(f"✓ Arduino connected on {device}")
                     self.broadcast_status()
                     return True
@@ -211,21 +217,60 @@ class FilmScanner:
             self.broadcast_status()
             return False
     
+    def setup_canon_wifi(self, camera_ip=None):
+        """Setup Canon WiFi camera connection"""
+        if not self.canon_camera:
+            self.canon_camera = CanonWiFiCamera()
+            
+            # Set connection lost callback
+            def on_connection_lost():
+                self.camera_connected = False
+                self.camera_type = None
+                self.status_msg = "❌ Canon WiFi connection lost!"
+                self.broadcast_status()
+            
+            self.canon_camera.connection_lost_callback = on_connection_lost
+        
+        if self.canon_camera.connect(camera_ip):
+            self.camera_connected = True
+            self.camera_type = 'canon_wifi'
+            self.camera_model = self.canon_camera.camera_model
+            self.camera_error = None
+            self.status_msg = f"✓ Connected to {self.camera_model}"
+            self.broadcast_status()
+            return True
+        else:
+            self.camera_connected = False
+            self.camera_type = None
+            self.camera_error = "Failed to connect to Canon camera via WiFi"
+            self.broadcast_status()
+            return False
+    
     def check_camera(self):
         """Check camera connection"""
+        # If using Canon WiFi, check that connection
+        if self.camera_type == 'canon_wifi':
+            if self.canon_camera and self.canon_camera.connected:
+                return True
+            else:
+                self.camera_connected = False
+                self.camera_error = "Canon WiFi connection lost"
+                return False
+        
+        # Otherwise check for gphoto2 USB camera
         current_time = time.time()
         if current_time - self.last_camera_check < 5:
             return self.camera_connected
         
         self.last_camera_check = current_time
+        self.camera_error = None
         
         try:
-            subprocess.run(["killall", "gphoto2"], capture_output=True, timeout=1)
-            time.sleep(0.3)
+            self._kill_gphoto2()
             
             result = subprocess.run(
                 ["gphoto2", "--auto-detect"],
-                capture_output=True, timeout=5, text=True
+                capture_output=True, timeout=10, text=True
             )
             
             if result.returncode == 0 and "usb" in result.stdout.lower():
@@ -234,59 +279,169 @@ class FilmScanner:
                     if 'usb' in line.lower():
                         self.camera_model = line.split('usb')[0].strip()
                         self.camera_connected = True
+                        self.camera_type = 'gphoto2'
+                        print(f"✓ Camera detected: {self.camera_model}")
                         return True
             
             self.camera_connected = False
             self.camera_model = "Not detected"
+            self.camera_error = "No camera found on USB. Check connection and USB mode (PTP)."
+            print(f"✗ {self.camera_error}")
+            if result.stderr:
+                print(f"   Details: {result.stderr.strip()}")
             return False
-        except:
+            
+        except subprocess.TimeoutExpired:
+            self.camera_connected = False
+            self.camera_model = "Check timeout"
+            self.camera_error = "Camera detection timed out"
+            print(f"✗ {self.camera_error}")
+            return False
+            
+        except Exception as e:
             self.camera_connected = False
             self.camera_model = "Check failed"
+            self.camera_error = str(e)
+            print(f"✗ Camera check failed: {e}")
             return False
+    
+    def _kill_gphoto2(self):
+        """Thoroughly kill any gphoto2 processes"""
+        try:
+            # Kill gracefully first
+            subprocess.run(["killall", "gphoto2"], 
+                         capture_output=True, timeout=1)
+            time.sleep(0.1)
+            # Force kill any remaining
+            subprocess.run(["killall", "-9", "gphoto2"], 
+                         capture_output=True, timeout=1)
+            # Also kill gvfs which can interfere
+            subprocess.run(["killall", "gvfs-gphoto2-volume-monitor"], 
+                         capture_output=True, timeout=1)
+            time.sleep(0.5)  # Give system time to release USB
+        except:
+            pass
     
     def autofocus(self):
         """Trigger camera autofocus"""
         try:
-            subprocess.run(["killall", "gphoto2"], capture_output=True, timeout=1)
-            time.sleep(0.3)
-            subprocess.run(
-                ["gphoto2", "--set-config", "autofocus=1"],
-                capture_output=True, timeout=5
-            )
-            time.sleep(1.5)
-            return True
-        except:
-            return False
-    
-    def capture_image(self):
-        """Capture image to camera SD card"""
-        try:
-            subprocess.run(["killall", "gphoto2"], capture_output=True, timeout=1)
-            time.sleep(0.3)
+            print("📷 Triggering autofocus...")
+            self._kill_gphoto2()
             
-            # Autofocus
-            subprocess.run(
-                ["gphoto2", "--set-config", "autofocus=1"],
-                capture_output=True, timeout=5
-            )
-            time.sleep(1.5)
-            
-            # Capture to camera SD card only
             result = subprocess.run(
-                ["gphoto2", "--capture-image"],
-                capture_output=True, timeout=20
+                ["gphoto2", "--set-config", "autofocus=1"],
+                capture_output=True, timeout=10, text=True
             )
             
             if result.returncode == 0:
+                print("✓ Autofocus triggered successfully")
+                time.sleep(2.0)  # Give camera time to focus
+                return True
+            else:
+                print(f"✗ Autofocus failed (return code: {result.returncode})")
+                if result.stderr:
+                    error_msg = result.stderr.strip()
+                    print(f"   Error: {error_msg}")
+                    
+                    # Provide specific guidance based on error
+                    if "not found" in error_msg.lower():
+                        print("   → Camera doesn't have 'autofocus' config option")
+                        print("   → Use manual focus or camera's AF button")
+                    elif "read-only" in error_msg.lower():
+                        print("   → Autofocus setting is read-only on this camera")
+                    elif "PTP" in error_msg or "claim" in error_msg.lower():
+                        print("   → Camera connection issue - check USB mode is PTP")
+                
+                return False
+                
+        except subprocess.TimeoutExpired:
+            print("✗ Autofocus timeout - camera not responding")
+            self._kill_gphoto2()
+            return False
+        except Exception as e:
+            print(f"✗ Autofocus error: {e}")
+            return False
+    
+    def capture_image(self, retry=True):
+        """Capture image to camera SD card with autofocus"""
+        try:
+            print("📷 Starting capture sequence...")
+            self._kill_gphoto2()
+            
+            # Step 1: Try autofocus (non-blocking if fails)
+            print("   [1/2] Attempting autofocus...")
+            af_result = subprocess.run(
+                ["gphoto2", "--set-config", "autofocus=1"],
+                capture_output=True, timeout=10, text=True
+            )
+            
+            if af_result.returncode == 0:
+                print("   ✓ Autofocus successful")
+                time.sleep(2.0)  # Give camera time to focus
+            else:
+                print("   ⚠ Autofocus not available (continuing with current focus)")
+                time.sleep(0.5)
+            
+            # Step 2: Capture image
+            print("   [2/2] Capturing image...")
+            result = subprocess.run(
+                ["gphoto2", "--capture-image"],
+                capture_output=True, timeout=30, text=True
+            )
+            
+            # Check result
+            if result.returncode == 0:
+                # Success!
                 self.frame_count += 1
                 self.frames_in_strip += 1
                 self.frame_positions.append(self.position)
                 self.save_state()
+                print(f"✓ Successfully captured frame #{self.frame_count}")
+                print(f"   (Strip {self.strip_count}, Frame {self.frames_in_strip} in strip)")
                 return True
+                
+            else:
+                # Capture failed - analyze error
+                print(f"✗ Capture failed (return code: {result.returncode})")
+                
+                if result.stderr:
+                    error_msg = result.stderr.strip()
+                    print(f"   Error: {error_msg}")
+                    
+                    # Provide specific guidance
+                    if "PTP" in error_msg:
+                        print("   → Fix: Set camera USB mode to PTP (not Mass Storage)")
+                        print("   → Check camera menu: Settings → USB → PTP")
+                    elif "claim" in error_msg.lower() or "busy" in error_msg.lower():
+                        print("   → Fix: Camera is locked by another process")
+                        print("   → Run: sudo killall gphoto2 gvfs-gphoto2-volume-monitor")
+                    elif "not found" in error_msg.lower() or "detect" in error_msg.lower():
+                        print("   → Fix: Camera not detected - check connection")
+                        print("   → Check USB cable and camera is powered on")
+                    elif "timeout" in error_msg.lower():
+                        print("   → Camera took too long to respond")
+                        print("   → Check camera is not in sleep mode")
+                    elif "card" in error_msg.lower() or "full" in error_msg.lower():
+                        print("   → Check camera has SD card with free space")
+                    
+                    # Retry once on transient errors
+                    if retry and ("busy" in error_msg.lower() or "claim" in error_msg.lower()):
+                        print("   ↻ Retrying after cleaning up processes...")
+                        time.sleep(1)
+                        return self.capture_image(retry=False)
+                
+                return False
             
+        except subprocess.TimeoutExpired:
+            print("✗ Capture timeout - camera not responding (30s)")
+            print("   → Camera may be in sleep mode or disconnected")
+            print("   → Check camera screen is on")
+            self._kill_gphoto2()
             return False
-        except:
-            subprocess.run(["killall", "-9", "gphoto2"], capture_output=True)
+            
+        except Exception as e:
+            print(f"✗ Unexpected capture error: {e}")
+            self._kill_gphoto2()
             return False
     
     def save_state(self):
@@ -352,70 +507,53 @@ class FilmScanner:
                 return False
         return False
     
-    def start_preview(self):
-        """Start live preview thread"""
-        if self.preview_active:
-            return True
+    def start_liveview(self):
+        """Start live view from Canon WiFi camera"""
+        if self.camera_type != 'canon_wifi':
+            print("❌ Live view only available with Canon WiFi camera")
+            self.status_msg = "Live view requires Canon WiFi connection"
+            self.broadcast_status()
+            return False
         
-        self.preview_active = True
-        self.preview_stop_event.clear()
-        self.preview_thread = threading.Thread(target=self._preview_loop, daemon=True)
-        self.preview_thread.start()
-        return True
+        if not self.canon_camera or not self.canon_camera.connected:
+            print("❌ Canon WiFi camera not connected")
+            return False
+        
+        # Define callback to broadcast frames to web clients
+        def frame_callback(jpeg_data):
+            try:
+                img_base64 = base64.b64encode(jpeg_data).decode('utf-8')
+                socketio.emit('preview_frame', {'image': img_base64})
+            except Exception as e:
+                print(f"Frame broadcast error: {e}")
+        
+        # Start Canon live view
+        success = self.canon_camera.start_liveview(callback=frame_callback)
+        
+        if success:
+            self.status_msg = "✓ Live view active"
+        else:
+            self.status_msg = "❌ Live view failed to start"
+        
+        self.broadcast_status()
+        return success
     
-    def stop_preview(self):
-        """Stop live preview thread"""
-        if not self.preview_active:
-            return True
-        
-        self.preview_active = False
-        self.preview_stop_event.set()
-        
-        if self.preview_thread:
-            self.preview_thread.join(timeout=2)
-        
-        return True
-    
-    def _preview_loop(self):
-        """Preview capture loop (runs in thread)"""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            preview_file = os.path.join(tmpdir, 'preview.jpg')
+    def stop_liveview(self):
+        """Stop live view"""
+        if self.camera_type == 'canon_wifi' and self.canon_camera:
+            success = self.canon_camera.stop_liveview()
             
-            while not self.preview_stop_event.is_set():
-                try:
-                    # Kill any existing gphoto2 processes
-                    subprocess.run(["killall", "gphoto2"], 
-                                 capture_output=True, timeout=1)
-                    time.sleep(0.2)
-                    
-                    # Capture preview
-                    result = subprocess.run(
-                        ["gphoto2", "--capture-preview", f"--filename={preview_file}"],
-                        capture_output=True, timeout=5
-                    )
-                    
-                    if result.returncode == 0 and os.path.exists(preview_file):
-                        # Read image and encode as base64
-                        with open(preview_file, 'rb') as f:
-                            img_data = f.read()
-                            img_base64 = base64.b64encode(img_data).decode('utf-8')
-                        
-                        # Broadcast to all clients
-                        socketio.emit('preview_frame', {'image': img_base64})
-                        
-                        # Remove the file
-                        os.remove(preview_file)
-                    
-                    # Wait before next capture (adjust for desired frame rate)
-                    time.sleep(1.0)  # 1 frame per second
-                    
-                except Exception as e:
-                    print(f"Preview error: {e}")
-                    time.sleep(2)
+            if success:
+                self.status_msg = "Live view stopped"
+            
+            self.broadcast_status()
+            return success
+        
+        return True
     
     def get_status(self):
         """Get current status as dictionary"""
-        return {
+        status = {
             'roll_name': self.roll_name,
             'frame_count': self.frame_count,
             'strip_count': self.strip_count,
@@ -424,13 +562,23 @@ class FilmScanner:
             'mode': self.mode,
             'frame_advance': self.frame_advance,
             'auto_advance': self.auto_advance,
-            'is_large_step': self.is_large_step,
             'camera_connected': self.camera_connected,
             'camera_model': self.camera_model,
+            'camera_error': self.camera_error,
+            'camera_type': self.camera_type,
             'status_msg': self.status_msg,
             'arduino_connected': self.arduino is not None,
-            'preview_active': self.preview_active
+            'liveview_active': False
         }
+        
+        # Add Canon WiFi specific status
+        if self.camera_type == 'canon_wifi' and self.canon_camera:
+            canon_status = self.canon_camera.get_status()
+            status['liveview_active'] = canon_status.get('liveview_active', False)
+            status['canon_wifi_ip'] = canon_status.get('camera_ip')
+            status['canon_battery'] = canon_status.get('battery_level')
+        
+        return status
     
     def broadcast_status(self):
         """Broadcast status to all connected clients"""
@@ -528,14 +676,6 @@ def backup_frame():
     scanner.broadcast_status()
     return jsonify({'success': success})
 
-@app.route('/api/toggle_step_size', methods=['POST'])
-def toggle_step_size():
-    """Toggle step size"""
-    scanner.is_large_step = not scanner.is_large_step
-    scanner.status_msg = f"Step size: {'LARGE' if scanner.is_large_step else 'small'}"
-    scanner.broadcast_status()
-    return jsonify({'success': True})
-
 @app.route('/api/toggle_mode', methods=['POST'])
 def toggle_mode():
     """Toggle mode"""
@@ -577,10 +717,63 @@ def autofocus():
     scanner.broadcast_status()
     
     success = scanner.autofocus()
-    scanner.status_msg = "Focused" if success else "Focus failed"
+    scanner.status_msg = "✓ Focused" if success else "⚠ Focus failed (check console)"
     scanner.broadcast_status()
     
     return jsonify({'success': success})
+
+@app.route('/api/test_capture', methods=['POST'])
+def test_capture():
+    """Test camera capture without saving to roll (for debugging)"""
+    if not scanner.check_camera():
+        return jsonify({
+            'success': False, 
+            'message': 'Camera not connected',
+            'error': scanner.camera_error
+        })
+    
+    scanner.status_msg = "Testing capture..."
+    scanner.broadcast_status()
+    
+    print("\n" + "="*60)
+    print("TEST CAPTURE (frame count will NOT be incremented)")
+    print("="*60)
+    
+    # Temporarily save frame count
+    saved_count = scanner.frame_count
+    saved_strip = scanner.frames_in_strip
+    saved_positions = scanner.frame_positions.copy()
+    
+    try:
+        # Try to capture
+        success = scanner.capture_image(retry=False)
+        
+        # Restore frame counts (test doesn't count)
+        scanner.frame_count = saved_count
+        scanner.frames_in_strip = saved_strip
+        scanner.frame_positions = saved_positions
+        
+        if success:
+            scanner.status_msg = "✓ Test capture successful! Camera is working."
+            message = "Camera capture works! Check camera SD card for test image."
+        else:
+            scanner.status_msg = "✗ Test capture failed (check console for details)"
+            message = "Capture failed. Check console output above for specific error."
+        
+        print("="*60)
+        print(f"TEST RESULT: {'SUCCESS' if success else 'FAILED'}")
+        print("="*60 + "\n")
+        
+        scanner.broadcast_status()
+        return jsonify({'success': success, 'message': message})
+        
+    except Exception as e:
+        scanner.frame_count = saved_count
+        scanner.frames_in_strip = saved_strip
+        scanner.frame_positions = saved_positions
+        scanner.status_msg = f"✗ Test error: {str(e)}"
+        scanner.broadcast_status()
+        return jsonify({'success': False, 'message': str(e)})
 
 @app.route('/api/capture', methods=['POST'])
 def capture():
@@ -678,19 +871,61 @@ def new_strip():
     scanner.frames_in_strip = 0
     return jsonify({'success': True})
 
-@app.route('/api/start_preview', methods=['POST'])
-def start_preview():
-    """Start live camera preview"""
-    success = scanner.start_preview()
-    scanner.broadcast_status()
+@app.route('/api/start_liveview', methods=['POST'])
+def start_liveview():
+    """Start live view (Canon WiFi only)"""
+    success = scanner.start_liveview()
     return jsonify({'success': success})
 
-@app.route('/api/stop_preview', methods=['POST'])
-def stop_preview():
-    """Stop live camera preview"""
-    success = scanner.stop_preview()
-    scanner.broadcast_status()
+@app.route('/api/stop_liveview', methods=['POST'])
+def stop_liveview():
+    """Stop live view"""
+    success = scanner.stop_liveview()
     return jsonify({'success': success})
+
+@app.route('/api/setup_canon_wifi', methods=['POST'])
+def setup_canon_wifi():
+    """Setup Canon WiFi camera connection"""
+    data = request.json
+    camera_ip = data.get('camera_ip')  # Optional, will auto-scan if not provided
+    
+    scanner.status_msg = "Connecting to Canon camera..."
+    scanner.broadcast_status()
+    
+    success = scanner.setup_canon_wifi(camera_ip)
+    
+    return jsonify({
+        'success': success,
+        'camera_model': scanner.camera_model if success else None,
+        'camera_ip': scanner.canon_camera.camera_ip if success and scanner.canon_camera else None,
+        'error': scanner.camera_error if not success else None
+    })
+
+@app.route('/api/scan_canon_cameras', methods=['POST'])
+def scan_canon_cameras():
+    """Scan network for Canon cameras"""
+    if not scanner.canon_camera:
+        scanner.canon_camera = CanonWiFiCamera()
+    
+    camera_ip = scanner.canon_camera.scan_for_camera()
+    
+    return jsonify({
+        'success': camera_ip is not None,
+        'camera_ip': camera_ip
+    })
+
+@app.route('/api/disconnect_canon', methods=['POST'])
+def disconnect_canon():
+    """Disconnect Canon WiFi camera"""
+    if scanner.canon_camera:
+        scanner.canon_camera.disconnect()
+    
+    scanner.camera_connected = False
+    scanner.camera_type = None
+    scanner.status_msg = "Canon camera disconnected"
+    scanner.broadcast_status()
+    
+    return jsonify({'success': True})
 
 # WebSocket events
 @socketio.on('connect')
@@ -746,6 +981,12 @@ if __name__ == '__main__':
         print("✓ Arduino connected")
     else:
         print("✗ Arduino not found (you can connect later via the web interface)")
+    
+    # Check for Canon WiFi camera configuration
+    print("\n📷 Camera Setup")
+    print("  • Canon R100 WiFi: Use web interface to setup")
+    print("  • USB Camera: gphoto2 will be used for autofocus and capture")
+    print("  • Live view: Canon WiFi ONLY (gphoto2 live view removed)")
     
     # Start web server
     host = '0.0.0.0'

@@ -246,6 +246,41 @@ class ConfigManager:
         port = input("\nWeb server port (default: 5000): ").strip()
         config['port'] = int(port) if port else 5000
         
+        # Camera setup
+        print("\n" + "-"*60)
+        print("Camera Configuration (Optional)")
+        print("-"*60)
+        print("\nDo you want to configure a Canon R100 WiFi camera now?")
+        print("(You can also do this later via the web interface)")
+        
+        setup_camera = input("\nSetup Canon R100 WiFi? (y/n, default: n): ").strip().lower()
+        
+        if setup_camera == 'y':
+            print("\n📷 Canon R100 WiFi Setup")
+            print("-" * 60)
+            
+            # Import Canon WiFi module
+            try:
+                from canon_wifi import CanonWiFiCamera
+                
+                canon_camera = CanonWiFiCamera()
+                camera_ip = canon_camera.setup_wizard()
+                
+                if camera_ip:
+                    config['canon_wifi_enabled'] = True
+                    config['canon_wifi_ip'] = camera_ip
+                    config['camera_type'] = 'canon_wifi'
+                    print("\n✓ Canon WiFi camera configured!")
+                else:
+                    config['canon_wifi_enabled'] = False
+                    print("\n⚠ Canon WiFi setup skipped")
+            except ImportError:
+                print("⚠ Canon WiFi module not available")
+                config['canon_wifi_enabled'] = False
+        else:
+            config['canon_wifi_enabled'] = False
+            config['camera_type'] = 'gphoto2'  # Default to USB camera
+        
         # Save configuration
         if self.save_config(config):
             print("\n" + "="*60)
@@ -286,7 +321,10 @@ class ConfigManager:
         print(f"Pi IP: {config.get('pi_ip', 'unknown')}")
         print(f"Hostname: {config.get('hostname', 'unknown')}")
         print(f"Port: {config.get('port', 5000)}")
-        print(f"Config file: {self.config_file}")
+        print(f"\nCamera Type: {config.get('camera_type', 'not configured')}")
+        if config.get('canon_wifi_enabled'):
+            print(f"Canon WiFi IP: {config.get('canon_wifi_ip', 'not set')}")
+        print(f"\nConfig file: {self.config_file}")
         print("="*60 + "\n")
 
 

@@ -360,6 +360,23 @@ footer {
     animation: dots 1.5s infinite;
 }
 
+/* Holding State for Press-and-Hold */
+.btn.holding {
+    background: var(--primary) !important;
+    transform: scale(0.95);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.4);
+    animation: pulse-hold 1s infinite;
+}
+
+@keyframes pulse-hold {
+    0%, 100% {
+        box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.4);
+    }
+    50% {
+        box-shadow: 0 0 0 6px rgba(37, 99, 235, 0.2);
+    }
+}
+
 @keyframes dots {
     0%, 20% { content: '.'; }
     40% { content: '..'; }

@@ -93,16 +93,24 @@
         <section class="panel">
             <h2>Motor Controls</h2>
             <div class="controls-grid">
-                <button class="btn btn-secondary" onclick="moveMotor('backward', 'fine')">
+                <button class="btn btn-secondary motor-btn" 
+                        data-direction="backward" 
+                        data-size="fine">
                     ⇦ Fine Back
                 </button>
-                <button class="btn btn-secondary" onclick="moveMotor('forward', 'fine')">
+                <button class="btn btn-secondary motor-btn" 
+                        data-direction="forward" 
+                        data-size="fine">
                     Fine Forward ⇨
                 </button>
-                <button class="btn btn-secondary" onclick="moveMotor('backward', 'coarse')">
+                <button class="btn btn-secondary motor-btn" 
+                        data-direction="backward" 
+                        data-size="coarse">
                     ⇦⇦ Coarse Back
                 </button>
-                <button class="btn btn-secondary" onclick="moveMotor('forward', 'coarse')">
+                <button class="btn btn-secondary motor-btn" 
+                        data-direction="forward" 
+                        data-size="coarse">
                     Coarse Forward ⇨⇨
                 </button>
                 <button class="btn btn-secondary" onclick="backupFrame()">
@@ -113,9 +121,6 @@
                 </button>
             </div>
             <div class="control-options">
-                <button class="btn btn-secondary" onclick="toggleStepSize()">
-                    Toggle Step Size: <span id="step-size">FINE</span>
-                </button>
                 <button class="btn btn-secondary" onclick="zeroPosition()">
                     Zero Position
                 </button>
@@ -146,9 +151,17 @@
         <!-- Connection Panel -->
         <section class="panel">
             <h2>System</h2>
-            <button class="btn btn-secondary" onclick="connectArduino()">
-                Reconnect Arduino
-            </button>
+            <div class="control-options">
+                <button class="btn btn-secondary" onclick="connectArduino()">
+                    Reconnect Arduino
+                </button>
+                <button class="btn btn-warning" onclick="testCapture()">
+                    🧪 Test Camera Capture
+                </button>
+            </div>
+            <div class="help-text">
+                Test Capture: Takes a test photo without affecting frame count. Good for checking if camera capture works.
+            </div>
         </section>
 
         <footer>
