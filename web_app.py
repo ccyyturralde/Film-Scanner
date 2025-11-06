@@ -26,6 +26,7 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 class FilmScanner:
     def __init__(self):
         self.arduino = None
+        self.arduino_port = None
         self.roll_name = ""
         self.roll_folder = ""
         self.frame_count = 0
@@ -67,6 +68,14 @@ class FilmScanner:
     
     def find_arduino(self):
         """Find Arduino on available ports"""
+        # Close existing connection if any
+        if self.arduino:
+            try:
+                self.arduino.close()
+            except:
+                pass
+            self.arduino = None
+        
         ports = list(serial.tools.list_ports.comports())
         
         pi_ports = ['/dev/ttyACM0', '/dev/ttyUSB0', '/dev/serial0', '/dev/ttyAMA0']
@@ -82,42 +91,125 @@ class FilmScanner:
             
             try:
                 ser = serial.Serial(device, 115200, timeout=3)
-                time.sleep(2)
+                time.sleep(2.5)  # Give Arduino time to reset after connection
+                
+                # Clear any startup messages
+                ser.reset_input_buffer()
+                time.sleep(0.1)
                 
                 ser.write(b'?\n')
-                time.sleep(0.2)
-                response = ser.read(100).decode('ascii', errors='ignore')
+                time.sleep(0.3)
+                response = ser.read(200).decode('ascii', errors='ignore')
                 
-                if 'Film' in response or 'READY' in response:
+                if 'Film' in response or 'READY' in response or 'Position' in response:
                     self.arduino = ser
+                    self.arduino_port = device
+                    print(f"✓ Arduino connected on {device}")
                     self.broadcast_status()
                     return True
                 
                 ser.close()
-            except:
+            except Exception as e:
+                print(f"✗ Failed to connect to {device}: {e}")
                 continue
         
+        self.arduino = None
+        self.arduino_port = None
         return False
     
-    def send(self, cmd):
-        """Send command to Arduino"""
-        if self.arduino:
+    def verify_connection(self):
+        """Verify Arduino connection is alive"""
+        if not self.arduino:
+            return False
+        
+        try:
+            # Try to read any available data without blocking
+            self.arduino.timeout = 0.1
+            self.arduino.reset_input_buffer()
+            self.arduino.write(b'?\n')
+            time.sleep(0.2)
+            response = self.arduino.read(100).decode('ascii', errors='ignore')
+            
+            # Check if we got a valid response
+            if response and ('Position' in response or 'READY' in response or 'Film' in response):
+                return True
+            
+            # No valid response, connection may be dead
+            return False
+        except Exception as e:
+            print(f"✗ Connection verification failed: {e}")
+            return False
+    
+    def ensure_connection(self):
+        """Ensure Arduino is connected, reconnect if needed"""
+        if not self.arduino or not self.verify_connection():
+            print("🔌 Attempting to reconnect to Arduino...")
+            if self.find_arduino():
+                print("✓ Reconnected to Arduino")
+                return True
+            else:
+                print("✗ Failed to reconnect to Arduino")
+                self.arduino = None
+                self.arduino_port = None
+                return False
+        return True
+    
+    def send(self, cmd, retry=True):
+        """Send command to Arduino with error handling and retry"""
+        if not self.ensure_connection():
+            print(f"✗ Cannot send command '{cmd}': No Arduino connection")
+            self.broadcast_status()
+            return False
+        
+        try:
+            # Send command
+            self.arduino.reset_input_buffer()
             self.arduino.write(f"{cmd}\n".encode())
             time.sleep(0.1)
             
             # Update position for movement commands
-            if cmd in ['f', 'F', 'b', 'B'] or cmd.startswith('H'):
-                time.sleep(0.2)
+            if cmd in ['f', 'F', 'b', 'B'] or cmd.startswith('H') or cmd.startswith('Z'):
+                time.sleep(0.3)  # Give motor time to move
+                
+                # Query position
                 self.arduino.write(b'?\n')
-                time.sleep(0.1)
-                response = self.arduino.read(100).decode('ascii', errors='ignore')
+                time.sleep(0.2)
+                response = self.arduino.read(200).decode('ascii', errors='ignore')
                 
                 for line in response.split('\n'):
                     if 'Position' in line:
                         try:
-                            self.position = int(line.split(':')[1].strip())
-                        except:
+                            pos_str = line.split(':')[1].strip().split()[0]
+                            self.position = int(pos_str)
+                        except Exception as e:
+                            print(f"✗ Failed to parse position: {e}")
                             pass
+            
+            return True
+            
+        except serial.SerialException as e:
+            print(f"✗ Serial error sending '{cmd}': {e}")
+            
+            # Mark connection as bad
+            try:
+                self.arduino.close()
+            except:
+                pass
+            self.arduino = None
+            
+            # Try to reconnect and retry command once
+            if retry:
+                print("🔄 Retrying command after reconnection...")
+                if self.ensure_connection():
+                    return self.send(cmd, retry=False)
+            
+            self.broadcast_status()
+            return False
+            
+        except Exception as e:
+            print(f"✗ Unexpected error sending '{cmd}': {e}")
+            self.broadcast_status()
+            return False
     
     def check_camera(self):
         """Check camera connection"""
@@ -239,17 +331,25 @@ class FilmScanner:
     def advance_frame(self):
         """Advance one full frame forward using calibrated distance"""
         if self.frame_advance:
-            self.send(f'H{self.frame_advance}')
-            self.status_msg = f"Advanced {self.frame_advance} steps"
-            return True
+            success = self.send(f'H{self.frame_advance}')
+            if success:
+                self.status_msg = f"Advanced {self.frame_advance} steps"
+                return True
+            else:
+                self.status_msg = "❌ Advance failed - Check Arduino"
+                return False
         return False
     
     def backup_frame(self):
         """Backup one full frame using calibrated distance"""
         if self.frame_advance:
-            self.send(f'H-{self.frame_advance}')
-            self.status_msg = f"Backed up {self.frame_advance} steps"
-            return True
+            success = self.send(f'H-{self.frame_advance}')
+            if success:
+                self.status_msg = f"Backed up {self.frame_advance} steps"
+                return True
+            else:
+                self.status_msg = "❌ Backup failed - Check Arduino"
+                return False
         return False
     
     def start_preview(self):
@@ -403,11 +503,16 @@ def move():
     else:
         cmd = 'B' if size == 'coarse' else 'b'
     
-    scanner.send(cmd)
-    scanner.status_msg = f"{'→' if direction == 'forward' else '←'} {scanner.coarse_step if size == 'coarse' else scanner.fine_step} steps"
+    success = scanner.send(cmd)
+    
+    if success:
+        scanner.status_msg = f"{'→' if direction == 'forward' else '←'} {scanner.coarse_step if size == 'coarse' else scanner.fine_step} steps"
+    else:
+        scanner.status_msg = "❌ Motor move failed - Check Arduino connection"
+    
     scanner.broadcast_status()
     
-    return jsonify({'success': True})
+    return jsonify({'success': success})
 
 @app.route('/api/advance_frame', methods=['POST'])
 def advance_frame():
@@ -455,11 +560,15 @@ def toggle_auto_advance():
 @app.route('/api/zero_position', methods=['POST'])
 def zero_position():
     """Zero position"""
-    scanner.send('Z')
-    scanner.frame_positions = []
-    scanner.status_msg = "Position zeroed"
+    success = scanner.send('Z')
+    if success:
+        scanner.frame_positions = []
+        scanner.position = 0
+        scanner.status_msg = "Position zeroed"
+    else:
+        scanner.status_msg = "❌ Zero failed - Check Arduino"
     scanner.broadcast_status()
-    return jsonify({'success': True})
+    return jsonify({'success': success})
 
 @app.route('/api/autofocus', methods=['POST'])
 def autofocus():
@@ -485,7 +594,8 @@ def capture():
     # Auto-advance before capture (for frames 2+)
     if scanner.mode == 'calibrated' and scanner.auto_advance and scanner.frames_in_strip > 0:
         if scanner.frame_advance:
-            scanner.send(f'H{scanner.frame_advance}')
+            if not scanner.send(f'H{scanner.frame_advance}'):
+                return jsonify({'success': False, 'message': 'Auto-advance failed - Check Arduino'})
             time.sleep(0.5)
     
     scanner.status_msg = "Capturing..."
@@ -654,5 +764,6 @@ if __name__ == '__main__':
     print("   python3 web_app.py --reset")
     print("="*60 + "\n")
     
-    socketio.run(app, host=host, port=port, debug=True)
+    # Run without debug mode to prevent reloads that disrupt Arduino connection
+    socketio.run(app, host=host, port=port, debug=False, allow_unsafe_werkzeug=True)
 
