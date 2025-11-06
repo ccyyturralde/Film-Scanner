@@ -18,7 +18,6 @@ import threading
 import base64
 import tempfile
 from config_manager import ConfigManager
-from canon_wifi import CanonWiFiCamera
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'film-scanner-secret-key'
@@ -38,10 +37,6 @@ class FilmScanner:
         self.camera_model = "Unknown"
         self.camera_error = None
         self.last_camera_check = 0
-        
-        # Camera type: 'canon_wifi', 'gphoto2', or None
-        self.camera_type = None
-        self.canon_camera = None  # CanonWiFiCamera instance
         
         # Motor configuration
         self.fine_step = 8
@@ -217,47 +212,9 @@ class FilmScanner:
             self.broadcast_status()
             return False
     
-    def setup_canon_wifi(self, camera_ip=None):
-        """Setup Canon WiFi camera connection"""
-        if not self.canon_camera:
-            self.canon_camera = CanonWiFiCamera()
-            
-            # Set connection lost callback
-            def on_connection_lost():
-                self.camera_connected = False
-                self.camera_type = None
-                self.status_msg = "❌ Canon WiFi connection lost!"
-                self.broadcast_status()
-            
-            self.canon_camera.connection_lost_callback = on_connection_lost
-        
-        if self.canon_camera.connect(camera_ip):
-            self.camera_connected = True
-            self.camera_type = 'canon_wifi'
-            self.camera_model = self.canon_camera.camera_model
-            self.camera_error = None
-            self.status_msg = f"✓ Connected to {self.camera_model}"
-            self.broadcast_status()
-            return True
-        else:
-            self.camera_connected = False
-            self.camera_type = None
-            self.camera_error = "Failed to connect to Canon camera via WiFi"
-            self.broadcast_status()
-            return False
-    
     def check_camera(self):
         """Check camera connection"""
-        # If using Canon WiFi, check that connection
-        if self.camera_type == 'canon_wifi':
-            if self.canon_camera and self.canon_camera.connected:
-                return True
-            else:
-                self.camera_connected = False
-                self.camera_error = "Canon WiFi connection lost"
-                return False
-        
-        # Otherwise check for gphoto2 USB camera
+        # Check for gphoto2 USB camera
         current_time = time.time()
         if current_time - self.last_camera_check < 5:
             return self.camera_connected
@@ -507,50 +464,6 @@ class FilmScanner:
                 return False
         return False
     
-    def start_liveview(self):
-        """Start live view from Canon WiFi camera"""
-        if self.camera_type != 'canon_wifi':
-            print("❌ Live view only available with Canon WiFi camera")
-            self.status_msg = "Live view requires Canon WiFi connection"
-            self.broadcast_status()
-            return False
-        
-        if not self.canon_camera or not self.canon_camera.connected:
-            print("❌ Canon WiFi camera not connected")
-            return False
-        
-        # Define callback to broadcast frames to web clients
-        def frame_callback(jpeg_data):
-            try:
-                img_base64 = base64.b64encode(jpeg_data).decode('utf-8')
-                socketio.emit('preview_frame', {'image': img_base64})
-            except Exception as e:
-                print(f"Frame broadcast error: {e}")
-        
-        # Start Canon live view
-        success = self.canon_camera.start_liveview(callback=frame_callback)
-        
-        if success:
-            self.status_msg = "✓ Live view active"
-        else:
-            self.status_msg = "❌ Live view failed to start"
-        
-        self.broadcast_status()
-        return success
-    
-    def stop_liveview(self):
-        """Stop live view"""
-        if self.camera_type == 'canon_wifi' and self.canon_camera:
-            success = self.canon_camera.stop_liveview()
-            
-            if success:
-                self.status_msg = "Live view stopped"
-            
-            self.broadcast_status()
-            return success
-        
-        return True
-    
     def get_status(self):
         """Get current status as dictionary"""
         status = {
@@ -565,18 +478,9 @@ class FilmScanner:
             'camera_connected': self.camera_connected,
             'camera_model': self.camera_model,
             'camera_error': self.camera_error,
-            'camera_type': self.camera_type,
             'status_msg': self.status_msg,
-            'arduino_connected': self.arduino is not None,
-            'liveview_active': False
+            'arduino_connected': self.arduino is not None
         }
-        
-        # Add Canon WiFi specific status
-        if self.camera_type == 'canon_wifi' and self.canon_camera:
-            canon_status = self.canon_camera.get_status()
-            status['liveview_active'] = canon_status.get('liveview_active', False)
-            status['canon_wifi_ip'] = canon_status.get('camera_ip')
-            status['canon_battery'] = canon_status.get('battery_level')
         
         return status
     
@@ -871,61 +775,6 @@ def new_strip():
     scanner.frames_in_strip = 0
     return jsonify({'success': True})
 
-@app.route('/api/start_liveview', methods=['POST'])
-def start_liveview():
-    """Start live view (Canon WiFi only)"""
-    success = scanner.start_liveview()
-    return jsonify({'success': success})
-
-@app.route('/api/stop_liveview', methods=['POST'])
-def stop_liveview():
-    """Stop live view"""
-    success = scanner.stop_liveview()
-    return jsonify({'success': success})
-
-@app.route('/api/setup_canon_wifi', methods=['POST'])
-def setup_canon_wifi():
-    """Setup Canon WiFi camera connection"""
-    data = request.json
-    camera_ip = data.get('camera_ip')  # Optional, will auto-scan if not provided
-    
-    scanner.status_msg = "Connecting to Canon camera..."
-    scanner.broadcast_status()
-    
-    success = scanner.setup_canon_wifi(camera_ip)
-    
-    return jsonify({
-        'success': success,
-        'camera_model': scanner.camera_model if success else None,
-        'camera_ip': scanner.canon_camera.camera_ip if success and scanner.canon_camera else None,
-        'error': scanner.camera_error if not success else None
-    })
-
-@app.route('/api/scan_canon_cameras', methods=['POST'])
-def scan_canon_cameras():
-    """Scan network for Canon cameras"""
-    if not scanner.canon_camera:
-        scanner.canon_camera = CanonWiFiCamera()
-    
-    camera_ip = scanner.canon_camera.scan_for_camera()
-    
-    return jsonify({
-        'success': camera_ip is not None,
-        'camera_ip': camera_ip
-    })
-
-@app.route('/api/disconnect_canon', methods=['POST'])
-def disconnect_canon():
-    """Disconnect Canon WiFi camera"""
-    if scanner.canon_camera:
-        scanner.canon_camera.disconnect()
-    
-    scanner.camera_connected = False
-    scanner.camera_type = None
-    scanner.status_msg = "Canon camera disconnected"
-    scanner.broadcast_status()
-    
-    return jsonify({'success': True})
 
 # WebSocket events
 @socketio.on('connect')
@@ -982,11 +831,10 @@ if __name__ == '__main__':
     else:
         print("✗ Arduino not found (you can connect later via the web interface)")
     
-    # Check for Canon WiFi camera configuration
+    # Check for camera
     print("\n📷 Camera Setup")
-    print("  • Canon R100 WiFi: Use web interface to setup")
     print("  • USB Camera: gphoto2 will be used for autofocus and capture")
-    print("  • Live view: Canon WiFi ONLY (gphoto2 live view removed)")
+    print("  • Live view: Not available (Canon WiFi support removed)")
     
     # Start web server
     host = '0.0.0.0'

@@ -1,49 +1,38 @@
 # Camera Control Options for Film Scanner
 
-## Current Issue: gphoto2 Limitations
+## Current Status: Simple USB-only Setup
 
-**Problems you're experiencing:**
-- Capture fails
-- Autofocus doesn't work
-- Preview doesn't show live view
-- Camera screen goes black
+This project focuses on being an **open-source**, **accessible** solution for film scanning without proprietary dependencies or complex setup requirements.
 
-**Why gphoto2 can be problematic:**
-- Camera-specific support varies wildly
-- Some camera models don't expose all features via USB
-- Preview mode is slow and unreliable (1 FPS)
-- Camera must be in specific USB mode (PTP/MTP)
-- Conflicts with camera's own USB mass storage mode
+### What's Supported:
+- ✅ **gphoto2 USB Control** - Autofocus and capture via USB
+- ✅ **Simple setup** - No WiFi complexity or proprietary SDKs
+- ✅ **Works with most cameras** - Any camera supported by gphoto2
+
+### What's Not Available:
+- ❌ **Live view** - Removed due to complexity/reliability issues
+- ❌ **Canon WiFi/CCAPI** - Requires proprietary SDK from Canon
+- ❌ **HDMI capture** - Code removed to simplify codebase
 
 ---
 
-## ⭐ RECOMMENDED SOLUTION: Canon R100 WiFi
+## Why Keep It Simple?
 
-### ✅ NOW IMPLEMENTED!
+**Canon WiFi/CCAPI Issues:**
+- Requires applying for Canon's SDK and API kit
+- Adds proprietary dependencies that conflict with open-source principles
+- Complex setup process with multiple tools and configurations
+- Not suitable for an accessible open-source project
 
-The Film Scanner now has **full Canon R100 WiFi support** with smooth live view!
+**gphoto2 Live View Issues:**
+- Very slow (1 FPS)
+- Unreliable across different camera models
+- Often conflicts with capture functionality
 
-### What You Get:
-- **10 FPS Live View** via Canon Camera Control API (CCAPI)
-- **WiFi Connection** with auto-discovery and setup wizard
-- **Connection Monitoring** with automatic disconnect detection
-- **USB Control** for autofocus and capture (gphoto2)
-- **Dual Connection** - WiFi for preview, USB for control
-
-### Quick Start:
-1. **Read**: [CANON_WIFI_QUICKSTART.md](CANON_WIFI_QUICKSTART.md) - 5-minute guide
-2. **Setup**: [CANON_R100_WIFI_SETUP.md](CANON_R100_WIFI_SETUP.md) - Complete guide
-3. **Activate**: [R100_CCAPI_ACTIVATION_GUIDE.md](R100_CCAPI_ACTIVATION_GUIDE.md) - Enable CCAPI
-
-### Benefits:
-- ✅ **Smooth live view** - 10 FPS wireless preview
-- ✅ **No extra hardware** - Uses camera's built-in WiFi ($0 cost)
-- ✅ **Reliable control** - gphoto2 for AF and capture
-- ✅ **Professional workflow** - Live positioning with accurate capture
-- ✅ **Connection monitoring** - Automatic disconnect detection
-- ✅ **Easy setup** - Guided wizard walks you through pairing
-
-**Start here**: See [CANON_WIFI_QUICKSTART.md](CANON_WIFI_QUICKSTART.md)
+**HDMI Capture Issues:**
+- Requires additional hardware ($20-30)
+- Adds complexity to setup
+- Not all cameras have HDMI output
 
 ---
 
@@ -221,31 +210,33 @@ Generally not available for Linux/Pi.
 
 ---
 
-## My Recommendations
+## Recommended Approach
 
-### For Canon R100 Users: Use Canon WiFi ⭐
+### USB-Only with gphoto2
 
-**This is now the BEST solution for Canon R100 owners:**
+**This is the current supported solution:**
 
-1. **Built-in WiFi** - No extra hardware needed ($0 cost)
-2. **10 FPS live view** - Smooth enough for film positioning
-3. **Easy setup** - Guided wizard walks you through it
-4. **Reliable control** - gphoto2 handles AF and capture
-5. **Professional workflow** - Live view for positioning, accurate capture
+1. **Simple setup** - Just plug in USB cable
+2. **Open source** - No proprietary dependencies
+3. **Works with most cameras** - Any camera supported by gphoto2
+4. **Reliable capture** - gphoto2 handles AF and capture
+5. **No extra hardware** - $0 cost
 
-**Start here**: [CANON_WIFI_QUICKSTART.md](CANON_WIFI_QUICKSTART.md)
+**Limitations:**
+- No live view (use camera's screen for framing)
+- Requires camera to support remote control via USB
+- Camera must be in PTP mode
 
-### For Other Cameras: HDMI Capture Card
+### Optional: HDMI Capture Card (Future)
 
-If you don't have a Canon R100 or WiFi-capable Canon camera:
+If you need live view and are willing to add hardware:
 
-1. **You need reliable live view** - Critical for film scanning
-2. **HDMI keeps camera awake** - No screen blackout issues
-3. **Works with any camera** - Future-proof solution
-4. **Professional approach** - Studio-grade tethering
-5. **Affordable** - $20-30 one-time purchase
+1. **True live view** - See what camera sees in real-time
+2. **30 FPS smooth** - Professional monitoring
+3. **Works with any camera** - Just needs HDMI output
+4. **Affordable** - $20-30 one-time purchase
 
-**Note**: HDMI capture support was removed in v2.0 to focus on Canon WiFi. If you need HDMI capture, use an earlier version or consider the Canon WiFi solution.
+**Note**: HDMI capture support not currently in the codebase but could be added as a future enhancement if there's community interest.
 
 ---
 
@@ -273,23 +264,24 @@ This will tell us:
 
 | Method | Live View | Capture | AF | Cost | Reliability | Setup | Status |
 |--------|-----------|---------|----|----- |-------------|-------|--------|
-| **Canon R100 WiFi** | ✅ 10 FPS | ✅ | ✅ | $0 | ⭐⭐⭐⭐ | Medium | ✅ Implemented |
-| HDMI Capture | ✅ 30 FPS | ✅ | ⚠️* | $20-30 | ⭐⭐⭐⭐⭐ | Easy | ❌ Removed in v2.0 |
-| gphoto2 USB only | ❌ None | ✅ | ✅ | $0 | ⭐⭐⭐⭐ | Easy | ✅ Available |
-| python-gphoto2 | ❌ None | ✅ | ⚠️ | $0 | ⭐⭐⭐⭐ | Medium | Available |
-| Webcam Mode | ⚠️ Good | ✅ | ✅ | $0 | ⭐ | Hard | Not for Pi |
+| **gphoto2 USB** | ❌ None | ✅ | ✅ | $0 | ⭐⭐⭐⭐ | Easy | ✅ Current |
+| HDMI Capture | ✅ 30 FPS | ✅ | ⚠️* | $20-30 | ⭐⭐⭐⭐⭐ | Medium | ⚠️ Future |
+| python-gphoto2 | ❌ None | ✅ | ⚠️ | $0 | ⭐⭐⭐⭐ | Medium | ⚠️ Alternative |
 
 *AF via gphoto2, capture via gphoto2
-**gphoto2 live view removed in v2.0 (was too slow/unreliable)
 
 ---
 
-## What I Can Do Right Now
+## Philosophy
 
-1. **Create gphoto2 debugging fixes** - Based on diagnostic output
-2. **Add HDMI capture support** - Ready for when you get the card
-3. **Implement python-gphoto2** - More reliable than CLI
-4. **Add manual focus aids** - Focus peaking, zoom, etc.
+This project aims to be:
+- ✅ **Open source** - No proprietary dependencies
+- ✅ **Accessible** - Simple setup without complex requirements
+- ✅ **Reliable** - Focus on what works consistently
+- ✅ **Community-driven** - Built for and by the community
 
-Let me know which direction you want to go!
+We avoid:
+- ❌ Proprietary SDKs requiring applications/approvals
+- ❌ Overly complex WiFi/network configurations
+- ❌ Dependencies that limit accessibility
 
