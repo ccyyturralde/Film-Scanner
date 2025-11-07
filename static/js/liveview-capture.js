@@ -143,3 +143,4 @@ class LiveViewCapture {
 // Make available globally
 window.LiveViewCapture = LiveViewCapture;
 
+

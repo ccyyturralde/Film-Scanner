@@ -412,3 +412,4 @@ class CanonWebUSBCamera {
 // Make available globally
 window.CanonWebUSBCamera = CanonWebUSBCamera;
 
+
