@@ -1,0 +1,20 @@
+# Film Scanner Desktop Application Requirements
+# Python 3.9+ recommended for Windows
+
+# GUI Framework
+PySide6>=6.6.0           # Qt6 for modern, responsive GUI
+
+# Serial Communication
+pyserial>=3.5            # Arduino communication
+
+# Camera Control (optional - can use EOS Utility instead)
+# gphoto2 is Linux-only, so we'll use direct EOS Utility integration on Windows
+
+# Utilities
+python-dotenv>=1.0.0     # Configuration management
+psutil>=5.9.0            # Process management for EOS Utility
+pillow>=10.0.0           # Image preview (if needed)
+
+# Development
+pyinstaller>=6.0.0       # For creating .exe standalone app
+
