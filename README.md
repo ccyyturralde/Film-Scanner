@@ -75,22 +75,12 @@ arduino-cli upload -p /dev/ttyACM0 --fqbn arduino:avr:uno arduino/film_scanner/
 
 ### 4. Run Scanner
 
-**Option A: Using the launcher (recommended)**
 ```bash
-# On Linux/Mac/Pi
+# Using the launcher (recommended)
 ./launch_scanner.sh
 
-# On Windows
-launch_scanner.bat
-```
-
-**Option B: Direct launch**
-```bash
-# Web Application (browser interface)
+# Or direct launch
 python3 web_app.py
-
-# CLI Application (terminal interface)
-python3 "scanner_app_v3 test.py"
 ```
 
 On first launch, the **Smart Startup wizard** will guide you through configuration:
@@ -106,32 +96,35 @@ See [SMART_STARTUP_README.md](SMART_STARTUP_README.md) for detailed setup instru
 
 1. **Start Application**
    ```bash
-   python3 "scanner_app_v3 test.py"
+   python3 web_app.py
    ```
+   Access from browser: `http://<pi-ip>:5000`
 
 2. **Create New Roll**
-   - Press `N` and enter roll name
+   - Enter roll name in web interface
    - Metadata saved to `~/scans/YYYY-MM-DD/roll_name/`
 
-3. **Load Film**
-   - Insert film leader into transport
+3. **Load Film Strip**
+   - Insert film strip (5-6 frames) into transport
    - Ensure film is properly tensioned
 
-4. **Position First Frame**
-   - Use arrow keys for precise alignment
-   - `G` toggles between small/large steps
+4. **Calibrate (First Strip Only)**
+   - Position Frame 1 using motor controls
+   - Click "Capture Frame 1"
+   - Position Frame 2 using motor controls
+   - Click "Capture Frame 2"
+   - System learns frame spacing
 
-5. **Calibrate Frame Spacing**
-   - Press `C` to start calibration
-   - Press `SPACE` to capture frame 1
-   - Advance to frame 2 using arrows
-   - Press `SPACE` to capture frame 2
-   - System learns frame-to-frame distance
+5. **Scan Remaining Frames**
+   - Click "CAPTURE" for each frame
+   - System auto-advances between frames
+   - Make fine adjustments with motor controls if needed
 
-6. **Scan Remaining Frames**
-   - Press `SPACE` for each frame
-   - System captures then auto-advances
-   - Make fine adjustments with arrows if needed
+6. **New Strips**
+   - Click "Start New Strip"
+   - Position first frame
+   - Click "Capture First Frame of Strip"
+   - Continue with "CAPTURE" for remaining frames
 
 ### Control Reference
 

@@ -3,11 +3,8 @@
 ## 🚀 Starting the Scanner
 
 ```bash
-# On Raspberry Pi or Linux
+# On Raspberry Pi
 ./launch_scanner.sh
-
-# On Windows
-launch_scanner.bat
 
 # Or directly
 python3 web_app.py

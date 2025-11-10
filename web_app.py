@@ -157,7 +157,8 @@ class FilmScanner:
     
     def send(self, cmd, retry=True, update_position=True):
         """Send command to Arduino with error handling and retry - optimized for responsiveness"""
-        if not self.ensure_connection():
+        # Quick check - don't verify connection on every command (causes disconnects)
+        if not self.arduino:
             print(f"✗ Cannot send command '{cmd}': No Arduino connection")
             self.broadcast_status()
             return False
@@ -204,7 +205,9 @@ class FilmScanner:
             # Try to reconnect and retry command once
             if retry:
                 print("🔄 Retrying command after reconnection...")
-                if self.ensure_connection():
+                time.sleep(0.5)  # Give port time to release
+                if self.find_arduino():
+                    print("✓ Reconnected, retrying command...")
                     return self.send(cmd, retry=False, update_position=update_position)
             
             self.broadcast_status()
@@ -780,7 +783,7 @@ def new_strip():
 
 @app.route('/api/get_preview', methods=['POST'])
 def get_preview():
-    """Get camera preview image"""
+    """Get camera preview image - optimized for Canon cameras"""
     if not scanner.check_camera():
         return jsonify({
             'success': False,
@@ -794,17 +797,32 @@ def get_preview():
     try:
         print("\n📷 Capturing preview image...")
         scanner._kill_gphoto2()
+        time.sleep(0.3)  # Let gphoto2 fully release
         
         # Capture preview to temp file
+        # Use --force-overwrite to handle Canon camera quirks
         with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
             tmp_path = tmp.name
         
+        # For Canon cameras, use --force-overwrite and longer timeout
         result = subprocess.run(
-            ["gphoto2", "--capture-preview", "--filename", tmp_path],
-            capture_output=True, timeout=15, text=True
+            ["gphoto2", "--capture-preview", "--force-overwrite", "--filename", tmp_path],
+            capture_output=True, timeout=20, text=True
         )
         
         if result.returncode == 0 and os.path.exists(tmp_path):
+            # Check file size (Canon sometimes creates empty or corrupt files)
+            file_size = os.path.getsize(tmp_path)
+            print(f"   Preview file size: {file_size} bytes")
+            
+            if file_size < 1000:
+                # File too small, likely corrupt
+                os.unlink(tmp_path)
+                print(f"✗ Preview file too small ({file_size} bytes) - likely corrupt")
+                scanner.status_msg = "✗ Preview failed (corrupt file)"
+                scanner.broadcast_status()
+                return jsonify({'success': False, 'message': 'Preview file corrupt or too small'})
+            
             # Read and encode image
             with open(tmp_path, 'rb') as f:
                 image_data = base64.b64encode(f.read()).decode('utf-8')
@@ -815,7 +833,7 @@ def get_preview():
             scanner.status_msg = "✓ Preview captured"
             scanner.broadcast_status()
             
-            print("✓ Preview captured successfully")
+            print(f"✓ Preview captured successfully ({file_size} bytes)")
             return jsonify({'success': True, 'image': image_data})
         else:
             # Clean up temp file if it exists
@@ -830,7 +848,7 @@ def get_preview():
             return jsonify({'success': False, 'message': error_msg})
             
     except subprocess.TimeoutExpired:
-        print("✗ Preview timeout")
+        print("✗ Preview timeout (20s)")
         scanner._kill_gphoto2()
         scanner.status_msg = "✗ Preview timeout"
         scanner.broadcast_status()
@@ -929,8 +947,9 @@ if __name__ == '__main__':
     
     # Check for camera
     print("\n📷 Camera Setup")
-    print("  • USB Camera: gphoto2 will be used for autofocus and capture")
-    print("  • Live view: Not available (Canon WiFi support removed)")
+    print("  • USB Camera: gphoto2 for capture and preview")
+    print("  • Autofocus: Automatic during capture")
+    print("  • Preview: On-demand via web interface")
     
     # Start web server
     host = '0.0.0.0'
@@ -940,10 +959,7 @@ if __name__ == '__main__':
     print("\n" + "="*60)
     print("   WEB SERVER STARTING")
     print("="*60)
-    print(f"\n🌐 Access the scanner at:")
-    print(f"   • Local:  http://localhost:{port}")
-    print(f"   • Network: http://{pi_ip}:{port}")
-    print(f"\n📱 From your phone/tablet:")
+    print(f"\n🌐 Access the scanner from your device:")
     print(f"   • http://{pi_ip}:{port}")
     print("\n💡 Tip: To reset configuration, run:")
     print("   python3 web_app.py --reset")
