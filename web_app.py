@@ -345,17 +345,40 @@ class FilmScanner:
             print("   Running: gphoto2 --capture-image")
             print("   (Waiting for camera... may take 30-40s for long exposures)")
             result = subprocess.run(
-                ["gphoto2", "--capture-image"]
+                ["gphoto2", "--capture-image"],
+                capture_output=True,
+                text=True
                 # NO timeout parameter - let gphoto2 wait as long as needed!
             )
             
             print(f"   Return code: {result.returncode}")
             
+            # Print output for debugging
+            if result.stdout:
+                print(f"   stdout: {result.stdout.strip()}")
+            if result.stderr:
+                print(f"   stderr: {result.stderr.strip()}")
+            
             # Give camera a moment to finish writing
             time.sleep(0.5)
             
-            # Check result
+            # Check result - gphoto2 returns 0 on success OR if image is on camera SD
+            # Some cameras return non-zero but still capture successfully
+            # Check if output indicates success
+            success = False
             if result.returncode == 0:
+                success = True
+            elif result.stdout and ("New file is" in result.stdout or "Saving file as" in result.stdout):
+                # Image was saved even if return code is non-zero
+                print("   ⚠ Non-zero return code but image was captured successfully")
+                success = True
+            elif result.stderr and "error" not in result.stderr.lower():
+                # No actual error in stderr, might be a warning
+                print("   ⚠ Non-zero return code but no error detected, assuming success")
+                success = True
+            
+            # Check result
+            if success:
                 # Success!
                 self.frame_count += 1
                 self.frames_in_strip += 1
@@ -367,33 +390,37 @@ class FilmScanner:
                 
             else:
                 # Capture failed - analyze error
-                print(f"✗ Capture failed (return code: {result.returncode})")
+                print(f"✗ Capture failed")
+                print(f"   Return code: {result.returncode}")
+                
+                if result.stdout:
+                    print(f"   Output: {result.stdout.strip()}")
                 
                 if result.stderr:
                     error_msg = result.stderr.strip()
                     print(f"   Error: {error_msg}")
                     
-                    # Provide specific guidance
-                    if "PTP" in error_msg:
-                        print("   → Fix: Set camera USB mode to PTP (not Mass Storage)")
-                        print("   → Check camera menu: Settings → USB → PTP")
-                    elif "claim" in error_msg.lower() or "busy" in error_msg.lower():
-                        print("   → Fix: Camera is locked by another process")
-                        print("   → Run: sudo killall gphoto2 gvfs-gphoto2-volume-monitor")
-                    elif "not found" in error_msg.lower() or "detect" in error_msg.lower():
-                        print("   → Fix: Camera not detected - check connection")
-                        print("   → Check USB cable and camera is powered on")
-                    elif "timeout" in error_msg.lower():
-                        print("   → Camera took too long to respond")
-                        print("   → Check camera is not in sleep mode")
-                    elif "card" in error_msg.lower() or "full" in error_msg.lower():
-                        print("   → Check camera has SD card with free space")
-                    
-                    # Retry once on transient errors
-                    if retry and ("busy" in error_msg.lower() or "claim" in error_msg.lower()):
-                        print("   ↻ Retrying after cleaning up processes...")
-                        time.sleep(1)
-                        return self.capture_image(retry=False)
+                    # Check for actual errors vs warnings
+                    if "error" in error_msg.lower():
+                        # Provide specific guidance for actual errors
+                        if "PTP" in error_msg:
+                            print("   → Fix: Set camera USB mode to PTP (not Mass Storage)")
+                        elif "claim" in error_msg.lower() or "busy" in error_msg.lower():
+                            print("   → Fix: Camera is locked by another process")
+                            print("   → Run: sudo killall gphoto2 gvfs-gphoto2-volume-monitor")
+                        elif "not found" in error_msg.lower() or "detect" in error_msg.lower():
+                            print("   → Fix: Camera not detected - check connection")
+                        elif "card" in error_msg.lower() or "full" in error_msg.lower():
+                            print("   → Check camera has SD card with free space")
+                        
+                        # Retry once on transient errors
+                        if retry and ("busy" in error_msg.lower() or "claim" in error_msg.lower()):
+                            print("   ↻ Retrying after cleaning up processes...")
+                            time.sleep(1)
+                            return self.capture_image(retry=False)
+                    else:
+                        # Might just be a warning
+                        print("   → This might be just a warning, check if image was captured on camera")
                 
                 return False
             
