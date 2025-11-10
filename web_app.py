@@ -45,6 +45,7 @@ class FilmScanner:
         self.camera_model = "Unknown"
         self.camera_error = None
         self.last_camera_check = 0
+        self.viewfinder_enabled = False
         
         # Motor configuration
         self.fine_step = 8
@@ -333,6 +334,63 @@ class FilmScanner:
             print(f"✗ Autofocus error: {e}")
             return False
     
+    def enable_viewfinder(self):
+        """Enable camera viewfinder for live preview (Canon R100 requirement)"""
+        try:
+            print("📷 Enabling viewfinder for live preview...")
+            self._kill_gphoto2()
+            
+            result = subprocess.run(
+                ["gphoto2", "--set-config", "viewfinder=1"],
+                capture_output=True, timeout=10, text=True
+            )
+            
+            if result.returncode == 0:
+                self.viewfinder_enabled = True
+                print("✓ Viewfinder enabled")
+                time.sleep(0.5)  # Give camera time to enter live view
+                return True
+            else:
+                print(f"✗ Failed to enable viewfinder (return code: {result.returncode})")
+                if result.stderr:
+                    print(f"   Error: {result.stderr.strip()}")
+                return False
+                
+        except subprocess.TimeoutExpired:
+            print("✗ Viewfinder enable timeout")
+            self._kill_gphoto2()
+            return False
+        except Exception as e:
+            print(f"✗ Viewfinder enable error: {e}")
+            return False
+    
+    def disable_viewfinder(self):
+        """Disable camera viewfinder to save battery"""
+        try:
+            print("📷 Disabling viewfinder...")
+            self._kill_gphoto2()
+            
+            result = subprocess.run(
+                ["gphoto2", "--set-config", "viewfinder=0"],
+                capture_output=True, timeout=10, text=True
+            )
+            
+            if result.returncode == 0:
+                self.viewfinder_enabled = False
+                print("✓ Viewfinder disabled")
+                return True
+            else:
+                print(f"✗ Failed to disable viewfinder (return code: {result.returncode})")
+                return False
+                
+        except subprocess.TimeoutExpired:
+            print("✗ Viewfinder disable timeout")
+            self._kill_gphoto2()
+            return False
+        except Exception as e:
+            print(f"✗ Viewfinder disable error: {e}")
+            return False
+    
     def capture_image(self, retry=True):
         """Capture image to camera SD card - works with long exposures"""
         try:
@@ -513,6 +571,7 @@ class FilmScanner:
             'camera_connected': self.camera_connected,
             'camera_model': self.camera_model,
             'camera_error': self.camera_error,
+            'viewfinder_enabled': self.viewfinder_enabled,
             'status_msg': self.status_msg,
             'arduino_connected': self.arduino is not None
         }
@@ -812,7 +871,7 @@ def new_strip():
 
 @app.route('/api/get_preview', methods=['POST'])
 def get_preview():
-    """Get camera live preview - Canon R100 compatible"""
+    """Get camera live preview - Canon R100 with viewfinder enabled"""
     if not scanner.check_camera():
         return jsonify({
             'success': False,
@@ -830,85 +889,75 @@ def get_preview():
     try:
         print("\n📷 Capturing live preview from camera...")
         scanner._kill_gphoto2()
-        time.sleep(1.0)
+        time.sleep(0.5)
+        
+        # CRITICAL: Enable viewfinder first (Canon R100 requirement)
+        if not scanner.viewfinder_enabled:
+            print("   Enabling viewfinder for live preview...")
+            if not scanner.enable_viewfinder():
+                print("✗ Failed to enable viewfinder")
+                scanner.status_msg = "✗ Cannot enable viewfinder"
+                scanner.broadcast_status()
+                return jsonify({
+                    'success': False,
+                    'message': 'Failed to enable viewfinder. Camera may not support it.'
+                })
         
         # Change to temp directory
         os.chdir(temp_dir)
         print(f"   Working directory: {temp_dir}")
         
-        # Try live preview first (R100 DOES support it via EOS Utility protocol)
-        print("   Running: gphoto2 --capture-preview")
+        # Capture preview with viewfinder enabled
+        print("   Running: gphoto2 --capture-preview --force-overwrite")
         result = subprocess.run(
-            ["gphoto2", "--capture-preview"]
-            # NO timeout - let gphoto2 handle it
+            ["gphoto2", "--capture-preview", "--force-overwrite"],
+            capture_output=True,
+            timeout=10,
+            text=True
         )
-        
-        print(f"   Return code: {result.returncode}")
         
         # Restore directory
         os.chdir(original_dir)
         
-        time.sleep(0.5)
+        print(f"   Return code: {result.returncode}")
+        if result.stdout:
+            print(f"   stdout: {result.stdout.strip()}")
+        if result.stderr:
+            print(f"   stderr: {result.stderr.strip()}")
+        
+        time.sleep(0.2)
         
         # Check what files were created
         files = os.listdir(temp_dir)
         print(f"   Files in directory: {files}")
         
-        # Look for preview JPG files
-        preview_files = [f for f in files if f.lower().endswith(('.jpg', '.jpeg'))]
+        # Look for preview.jpg (default name for --capture-preview)
+        preview_path = os.path.join(temp_dir, "preview.jpg")
         
-        if not preview_files:
-            print("⚠ No preview JPG found, falling back to last captured image...")
+        if not os.path.exists(preview_path):
+            # Look for any JPG files
+            preview_files = [f for f in files if f.lower().endswith(('.jpg', '.jpeg'))]
             
-            # Fallback: Download last image from camera
-            os.chdir(temp_dir)
-            print("   Running: gphoto2 --get-file 1 (last image)")
-            result2 = subprocess.run(
-                ["gphoto2", "--get-file", "1"]
-                # NO timeout
-            )
-            os.chdir(original_dir)
-            print(f"   Return code: {result2.returncode}")
-            
-            time.sleep(0.5)
-            files = os.listdir(temp_dir)
-            print(f"   Files after fallback: {files}")
-            
-            # Look for CR3/CR2/JPG files
-            image_files = [f for f in files if f.lower().endswith(('.cr3', '.cr2', '.jpg', '.jpeg'))]
-            
-            if not image_files:
-                print("✗ No image available")
-                scanner.status_msg = "✗ No preview available"
+            if not preview_files:
+                print("✗ No preview file created")
+                print("   → Viewfinder may need to be enabled manually on camera")
+                print("   → Check camera is in PTP mode")
+                print("   → Try: gphoto2 --get-config viewfinder")
+                scanner.status_msg = "✗ No preview file"
                 scanner.broadcast_status()
                 return jsonify({
                     'success': False,
-                    'message': 'No preview available. Capture a frame first.'
+                    'message': 'No preview file created. Check camera settings.'
                 })
             
-            preview_files = image_files
-        
-        # Use the first preview file found
-        image_path = os.path.join(temp_dir, preview_files[0])
-        print(f"   Using: {preview_files[0]}")
-        
-        # If it's a RAW file, extract thumbnail
-        if preview_files[0].lower().endswith(('.cr3', '.cr2')):
-            print("   Extracting thumbnail from RAW...")
-            os.chdir(temp_dir)
-            thumb_result = subprocess.run(
-                ["gphoto2", "--get-thumbnail", "1", "--filename", "thumb.jpg"]
-            )
-            os.chdir(original_dir)
-            
-            thumb_path = os.path.join(temp_dir, "thumb.jpg")
-            if thumb_result.returncode == 0 and os.path.exists(thumb_path):
-                image_path = thumb_path
-                print(f"   ✓ Using thumbnail: {os.path.getsize(thumb_path)} bytes")
+            preview_path = os.path.join(temp_dir, preview_files[0])
+            print(f"   Using: {preview_files[0]}")
+        else:
+            print(f"   Found: preview.jpg")
         
         # Read the image
-        file_size = os.path.getsize(image_path)
-        print(f"   Final image: {os.path.basename(image_path)} ({file_size} bytes)")
+        file_size = os.path.getsize(preview_path)
+        print(f"   Image size: {file_size} bytes")
         
         # Check minimum size
         if file_size < 1000:
@@ -921,7 +970,7 @@ def get_preview():
         if PIL_AVAILABLE:
             try:
                 print("   Converting negative to positive...")
-                img = Image.open(image_path)
+                img = Image.open(preview_path)
                 
                 # Convert to RGB if needed
                 if img.mode != 'RGB':
@@ -940,19 +989,29 @@ def get_preview():
                 
             except Exception as e:
                 print(f"   ⚠ Conversion failed: {e}, using original")
-                with open(image_path, 'rb') as f:
+                with open(preview_path, 'rb') as f:
                     image_data = base64.b64encode(f.read()).decode('utf-8')
         else:
             # No PIL, just encode original
             print("   (PIL not available, showing as negative)")
-            with open(image_path, 'rb') as f:
+            with open(preview_path, 'rb') as f:
                 image_data = base64.b64encode(f.read()).decode('utf-8')
         
-        scanner.status_msg = "✓ Preview ready"
+        scanner.status_msg = "✓ Live preview ready"
         scanner.broadcast_status()
         
-        print(f"✓ Preview ready")
+        print(f"✓ Live preview successful")
         return jsonify({'success': True, 'image': image_data})
+        
+    except subprocess.TimeoutExpired:
+        try:
+            os.chdir(original_dir)
+        except:
+            pass
+        print("✗ Preview timeout")
+        scanner.status_msg = "✗ Preview timeout"
+        scanner.broadcast_status()
+        return jsonify({'success': False, 'message': 'Preview capture timeout'})
         
     except Exception as e:
         try:
@@ -974,6 +1033,49 @@ def get_preview():
             shutil.rmtree(temp_dir, ignore_errors=True)
         except:
             pass
+
+@app.route('/api/start_preview_session', methods=['POST'])
+def start_preview_session():
+    """Start live preview session (enables viewfinder for continuous preview)"""
+    if not scanner.check_camera():
+        return jsonify({
+            'success': False,
+            'message': 'Camera not connected',
+            'error': scanner.camera_error
+        })
+    
+    if scanner.viewfinder_enabled:
+        return jsonify({'success': True, 'message': 'Preview session already active'})
+    
+    scanner.status_msg = "Starting preview session..."
+    scanner.broadcast_status()
+    
+    if scanner.enable_viewfinder():
+        scanner.status_msg = "✓ Preview session active"
+        scanner.broadcast_status()
+        return jsonify({'success': True})
+    else:
+        scanner.status_msg = "✗ Failed to start preview"
+        scanner.broadcast_status()
+        return jsonify({'success': False, 'message': 'Failed to enable viewfinder'})
+
+@app.route('/api/stop_preview_session', methods=['POST'])
+def stop_preview_session():
+    """Stop live preview session (disables viewfinder to save battery)"""
+    if not scanner.viewfinder_enabled:
+        return jsonify({'success': True, 'message': 'No preview session active'})
+    
+    scanner.status_msg = "Stopping preview session..."
+    scanner.broadcast_status()
+    
+    if scanner.disable_viewfinder():
+        scanner.status_msg = "✓ Preview session stopped"
+        scanner.broadcast_status()
+        return jsonify({'success': True})
+    else:
+        scanner.status_msg = "✗ Failed to stop preview"
+        scanner.broadcast_status()
+        return jsonify({'success': False, 'message': 'Failed to disable viewfinder'})
 
 @app.route('/api/update_step_sizes', methods=['POST'])
 def update_step_sizes():
