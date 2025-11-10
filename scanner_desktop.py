@@ -24,22 +24,17 @@ import cv2
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QLineEdit, QTextEdit, QGroupBox, QSpinBox,
-    QCheckBox, QFileDialog, QStatusBar, QGridLayout, QMessageBox, QSplitter
+    QCheckBox, QFileDialog, QStatusBar, QGridLayout, QMessageBox, QSplitter,
+    QComboBox
 )
-from PySide6.QtCore import Qt, QTimer, Signal, Slot, QThread
+from PySide6.QtCore import Qt, QTimer, Signal, Slot, QThread, QUrl, QObject
 from PySide6.QtGui import QKeySequence, QShortcut, QFont, QAction, QImage, QPixmap
+from PySide6.QtMultimedia import QMediaDevices, QCamera, QImageCapture, QMediaCaptureSession
+from PySide6.QtMultimediaWidgets import QVideoWidget
 
 import serial
 import serial.tools.list_ports
-import subprocess
 import time
-
-try:
-    import gphoto2 as gp
-    GPHOTO2_AVAILABLE = True
-except ImportError:
-    GPHOTO2_AVAILABLE = False
-    print("Warning: gphoto2 not available. Camera control will be limited.")
 
 
 class ArduinoController(QThread):
@@ -148,194 +143,155 @@ class ArduinoController(QThread):
         self.connection_status.emit(False)
 
 
-class CameraController(QThread):
+class CameraController(QObject):
     """
-    Direct camera control with live view support
+    Qt-based camera control using native Windows APIs
+    Works with any USB camera (DSLR in video mode, webcam, etc.)
     """
-    frame_ready = Signal(np.ndarray)
     status_message = Signal(str)
     camera_connected = Signal(bool)
+    image_captured = Signal(str)  # Emits path to captured image
     
     def __init__(self):
         super().__init__()
         self.camera = None
-        self.context = None
-        self.running = False
-        self.capturing_live_view = False
+        self.image_capture = None
+        self.capture_session = None
+        self.video_sink = None
+        self.available_cameras = []
+        self.current_save_path = None
         
-        if GPHOTO2_AVAILABLE:
-            self.init_gphoto2()
+        # Discover available cameras
+        self.discover_cameras()
     
-    def init_gphoto2(self):
-        """Initialize gphoto2 camera"""
-        try:
-            self.context = gp.Context()
-            self.camera = gp.Camera()
-            self.camera.init(self.context)
-            self.camera_connected.emit(True)
-            self.status_message.emit("Camera connected via gphoto2")
+    def discover_cameras(self):
+        """Find available cameras"""
+        self.available_cameras = QMediaDevices.videoInputs()
+        
+        if self.available_cameras:
+            self.status_message.emit(f"Found {len(self.available_cameras)} camera(s)")
             return True
+        else:
+            self.status_message.emit("No cameras detected")
+            return False
+    
+    def init_camera(self, camera_index=0):
+        """Initialize camera by index"""
+        if not self.available_cameras:
+            self.discover_cameras()
+        
+        if camera_index >= len(self.available_cameras):
+            self.status_message.emit("Invalid camera index")
+            self.camera_connected.emit(False)
+            return False
+        
+        try:
+            # Create camera
+            camera_device = self.available_cameras[camera_index]
+            self.camera = QCamera(camera_device)
+            
+            # Create image capture
+            self.image_capture = QImageCapture(self.camera)
+            self.image_capture.imageCaptured.connect(self.on_image_captured)
+            self.image_capture.imageSaved.connect(self.on_image_saved)
+            self.image_capture.errorOccurred.connect(self.on_capture_error)
+            
+            # Create capture session
+            self.capture_session = QMediaCaptureSession()
+            self.capture_session.setCamera(self.camera)
+            self.capture_session.setImageCapture(self.image_capture)
+            
+            camera_name = camera_device.description()
+            self.status_message.emit(f"Camera initialized: {camera_name}")
+            self.camera_connected.emit(True)
+            return True
+            
         except Exception as e:
-            self.status_message.emit(f"Camera connection failed: {str(e)}")
+            self.status_message.emit(f"Camera init error: {str(e)}")
             self.camera_connected.emit(False)
             return False
     
-    def start_live_view(self):
-        """Start live view capture"""
-        if not self.camera:
-            self.status_message.emit("No camera connected")
-            return False
-        
-        self.capturing_live_view = True
-        self.running = True
-        self.start()
-        return True
+    def set_video_output(self, video_widget):
+        """Set video output widget for live view"""
+        if self.capture_session:
+            self.capture_session.setVideoOutput(video_widget)
     
-    def stop_live_view(self):
-        """Stop live view capture"""
-        self.capturing_live_view = False
-        self.running = False
-    
-    def run(self):
-        """Background thread for live view"""
-        while self.running and self.capturing_live_view:
+    def start_camera(self):
+        """Start camera (for live view)"""
+        if self.camera:
             try:
-                if GPHOTO2_AVAILABLE and self.camera:
-                    # Capture preview frame
-                    camera_file = self.camera.capture_preview(self.context)
-                    file_data = camera_file.get_data_and_size()
-                    
-                    # Convert to numpy array
-                    image = np.frombuffer(file_data, dtype=np.uint8)
-                    frame = cv2.imdecode(image, cv2.IMREAD_COLOR)
-                    
-                    if frame is not None:
-                        self.frame_ready.emit(frame)
-                
-                time.sleep(0.033)  # ~30 fps
+                self.camera.start()
+                self.status_message.emit("Live view started")
+                return True
             except Exception as e:
-                print(f"Live view error: {e}")
-                time.sleep(0.1)
-    
-    def autofocus(self) -> bool:
-        """Trigger camera autofocus"""
-        if not self.camera:
-            return False
-        
-        try:
-            if GPHOTO2_AVAILABLE:
-                # Set autofocus
-                config = self.camera.get_config(self.context)
-                af_widget = config.get_child_by_name('autofocusdrive')
-                af_widget.set_value(1)
-                self.camera.set_config(config, self.context)
-                time.sleep(1)  # Wait for AF to complete
-                self.status_message.emit("Autofocus complete")
-                return True
-        except Exception as e:
-            self.status_message.emit(f"Autofocus error: {str(e)}")
-            # Try alternative method
-            try:
-                # Some cameras use different config names
-                config = self.camera.get_config(self.context)
-                af_widget = config.get_child_by_name('manualfocusdrive')
-                # Trigger AF by setting to 0 (neutral position)
-                af_widget.set_value(0)
-                self.camera.set_config(config, self.context)
-                return True
-            except:
-                pass
-        
+                self.status_message.emit(f"Start error: {str(e)}")
+                return False
         return False
     
+    def stop_camera(self):
+        """Stop camera"""
+        if self.camera:
+            self.camera.stop()
+            self.status_message.emit("Live view stopped")
+    
     def capture_image(self, save_path: str) -> bool:
-        """Capture and save image"""
-        if not self.camera:
-            self.status_message.emit("No camera connected")
+        """Capture image to file"""
+        if not self.camera or not self.image_capture:
+            self.status_message.emit("No camera initialized")
+            return False
+        
+        if not self.camera.isActive():
+            self.status_message.emit("Camera not active - start live view first")
             return False
         
         try:
-            if GPHOTO2_AVAILABLE:
-                # Pause live view during capture
-                was_capturing = self.capturing_live_view
-                if was_capturing:
-                    self.capturing_live_view = False
-                    time.sleep(0.1)
-                
-                # Capture image
-                file_path = self.camera.capture(gp.GP_CAPTURE_IMAGE, self.context)
-                
-                # Download image
-                camera_file = self.camera.file_get(
-                    file_path.folder, file_path.name, gp.GP_FILE_TYPE_NORMAL, self.context
-                )
-                camera_file.save(save_path)
-                
-                # Resume live view
-                if was_capturing:
-                    self.capturing_live_view = True
-                
-                self.status_message.emit(f"Image captured: {save_path}")
-                return True
+            self.current_save_path = save_path
+            # Capture to file
+            self.image_capture.captureToFile(save_path)
+            return True
         except Exception as e:
             self.status_message.emit(f"Capture error: {str(e)}")
             return False
     
+    @Slot(int, QImage)
+    def on_image_captured(self, id, preview):
+        """Called when image is captured (before saved)"""
+        self.status_message.emit("Image captured, saving...")
+    
+    @Slot(int, str)
+    def on_image_saved(self, id, fileName):
+        """Called when image is saved to disk"""
+        self.status_message.emit(f"Image saved: {fileName}")
+        self.image_captured.emit(fileName)
+    
+    @Slot(int, QImageCapture.Error, str)
+    def on_capture_error(self, id, error, errorString):
+        """Handle capture errors"""
+        self.status_message.emit(f"Capture error: {errorString}")
+    
+    def get_available_cameras(self):
+        """Return list of camera descriptions"""
+        return [cam.description() for cam in self.available_cameras]
+    
     def disconnect(self):
-        """Disconnect camera"""
-        self.running = False
-        self.capturing_live_view = False
-        
+        """Clean disconnect"""
         if self.camera:
-            try:
-                self.camera.exit(self.context)
-            except:
-                pass
-        
+            self.stop_camera()
         self.camera_connected.emit(False)
 
 
-class LiveViewWidget(QLabel):
+class LiveViewWidget(QVideoWidget):
     """
-    Widget for displaying camera live view with color inversion option
+    Video widget for displaying camera live view with color inversion option
+    Note: Color inversion will be applied post-processing when needed
     """
     
     def __init__(self):
         super().__init__()
         self.setMinimumSize(640, 480)
-        self.setAlignment(Qt.AlignCenter)
         self.setStyleSheet("background-color: black; border: 2px solid #555;")
-        self.setText("Live View\n(Camera will appear here)")
-        self.invert_colors = False
-    
-    def update_frame(self, frame: np.ndarray):
-        """Update display with new frame"""
-        try:
-            # Apply color inversion if enabled
-            if self.invert_colors:
-                frame = cv2.bitwise_not(frame)
-            
-            # Convert BGR to RGB
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            
-            # Convert to QImage
-            h, w, ch = rgb_frame.shape
-            bytes_per_line = ch * w
-            qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
-            
-            # Scale to fit widget while maintaining aspect ratio
-            pixmap = QPixmap.fromImage(qt_image)
-            scaled_pixmap = pixmap.scaled(
-                self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
-            )
-            
-            self.setPixmap(scaled_pixmap)
-        except Exception as e:
-            print(f"Frame update error: {e}")
-    
-    def toggle_invert(self, enabled: bool):
-        """Toggle color inversion"""
-        self.invert_colors = enabled
+        # Color inversion would need to be done with video filters
+        # For now we'll focus on getting the live view working
 
 
 class FilmScannerApp(QMainWindow):
@@ -379,12 +335,13 @@ class FilmScannerApp(QMainWindow):
         self.arduino.connection_status.connect(self.on_arduino_connection)
         
         # Connect Camera signals
-        self.camera.frame_ready.connect(self.on_frame_ready)
         self.camera.status_message.connect(self.show_status)
         self.camera.camera_connected.connect(self.on_camera_connection)
+        self.camera.image_captured.connect(self.on_image_captured)
         
-        # Auto-connect to Arduino
+        # Auto-connect to Arduino and Camera
         QTimer.singleShot(500, self.connect_arduino)
+        QTimer.singleShot(800, self.init_camera)
     
     def init_ui(self):
         """Initialize the user interface"""
@@ -407,16 +364,34 @@ class FilmScannerApp(QMainWindow):
         left_layout.addWidget(self.live_view)
         
         # Live view controls
-        lv_controls = QHBoxLayout()
+        lv_controls = QVBoxLayout()
         
+        # Camera selection
+        cam_select_layout = QHBoxLayout()
+        cam_select_layout.addWidget(QLabel("Camera:"))
+        self.combo_camera = QComboBox()
+        self.combo_camera.addItem("No cameras detected")
+        cam_select_layout.addWidget(self.combo_camera)
+        
+        self.btn_refresh_cameras = QPushButton("🔄")
+        self.btn_refresh_cameras.setMaximumWidth(40)
+        self.btn_refresh_cameras.setToolTip("Refresh camera list")
+        self.btn_refresh_cameras.clicked.connect(self.refresh_cameras)
+        cam_select_layout.addWidget(self.btn_refresh_cameras)
+        lv_controls.addLayout(cam_select_layout)
+        
+        # Live view toggle
+        lv_button_layout = QHBoxLayout()
         self.btn_toggle_liveview = QPushButton("Start Live View")
         self.btn_toggle_liveview.setCheckable(True)
         self.btn_toggle_liveview.clicked.connect(self.toggle_live_view)
-        lv_controls.addWidget(self.btn_toggle_liveview)
+        lv_button_layout.addWidget(self.btn_toggle_liveview)
         
-        self.chk_invert_colors = QCheckBox("Invert Colors (Show Positive)")
-        self.chk_invert_colors.stateChanged.connect(self.toggle_invert_colors)
-        lv_controls.addWidget(self.chk_invert_colors)
+        # Note about color inversion
+        info_label = QLabel("ℹ️ Use camera settings to adjust preview")
+        info_label.setStyleSheet("color: #888; font-size: 10px;")
+        lv_button_layout.addWidget(info_label)
+        lv_controls.addLayout(lv_button_layout)
         
         left_layout.addLayout(lv_controls)
         
@@ -688,30 +663,59 @@ class FilmScannerApp(QMainWindow):
             self.lbl_camera_status.setText("Disconnected ✗")
             self.lbl_camera_status.setStyleSheet("color: red; font-weight: bold;")
     
-    @Slot(np.ndarray)
-    def on_frame_ready(self, frame: np.ndarray):
-        """Update live view with new frame"""
-        self.live_view.update_frame(frame)
+    def init_camera(self):
+        """Initialize camera on startup"""
+        cameras = self.camera.get_available_cameras()
+        if cameras:
+            self.combo_camera.clear()
+            self.combo_camera.addItems(cameras)
+            # Auto-select first camera
+            if self.camera.init_camera(0):
+                self.camera.set_video_output(self.live_view)
+                self.log(f"Camera ready: {cameras[0]}")
+        else:
+            self.log("No cameras detected - connect camera and click refresh")
+    
+    def refresh_cameras(self):
+        """Refresh camera list"""
+        self.camera.discover_cameras()
+        cameras = self.camera.get_available_cameras()
+        self.combo_camera.clear()
+        if cameras:
+            self.combo_camera.addItems(cameras)
+            self.log(f"Found {len(cameras)} camera(s)")
+        else:
+            self.combo_camera.addItem("No cameras detected")
+            self.log("No cameras found")
     
     def toggle_live_view(self):
         """Toggle live view on/off"""
         if self.btn_toggle_liveview.isChecked():
-            if self.camera.start_live_view():
+            # Initialize camera if not already done
+            if not self.camera.camera:
+                selected_index = self.combo_camera.currentIndex()
+                if not self.camera.init_camera(selected_index):
+                    self.btn_toggle_liveview.setChecked(False)
+                    self.log("Failed to initialize camera")
+                    return
+                self.camera.set_video_output(self.live_view)
+            
+            if self.camera.start_camera():
                 self.btn_toggle_liveview.setText("Stop Live View")
                 self.log("Live view started")
             else:
                 self.btn_toggle_liveview.setChecked(False)
                 self.log("Failed to start live view")
         else:
-            self.camera.stop_live_view()
+            self.camera.stop_camera()
             self.btn_toggle_liveview.setText("Start Live View")
             self.log("Live view stopped")
     
-    def toggle_invert_colors(self, state):
-        """Toggle color inversion for film positive preview"""
-        enabled = (state == Qt.Checked)
-        self.live_view.toggle_invert(enabled)
-        self.log(f"Color inversion: {'ON' if enabled else 'OFF'}")
+    @Slot(str)
+    def on_image_captured(self, file_path):
+        """Called when camera captures an image"""
+        self.log(f"Image saved: {Path(file_path).name}")
+        # Auto-advance is handled in capture_frame method
     
     def log(self, message: str):
         """Add message to log"""
@@ -948,7 +952,7 @@ class FilmScannerApp(QMainWindow):
         self.log(f"🎞️ Strip {self.strip_count} ready - Position frame 1 and press SPACE")
     
     def capture_frame(self):
-        """Capture current frame: Autofocus -> Capture -> Advance (all in one!)"""
+        """Capture current frame: Capture -> Advance (simplified workflow)"""
         if self.is_capturing:
             self.log("Capture already in progress...")
             return
@@ -965,21 +969,20 @@ class FilmScannerApp(QMainWindow):
             if reply != QMessageBox.Yes:
                 return
         
+        # Check if camera is active
+        if not self.camera.camera or not self.camera.camera.isActive():
+            QMessageBox.warning(self, "Camera Not Active", 
+                              "Please start live view first!\n\n"
+                              "Click 'Start Live View' button.")
+            return
+        
         # If starting a new strip, increment strip count
         if self.frames_in_strip == 0 and self.strip_count == 0:
             self.strip_count = 1
         
         self.is_capturing = True
         
-        # Step 1: Autofocus
-        self.log("🎯 Autofocusing...")
-        self.statusBar.showMessage("Autofocusing...", 3000)
-        
-        if self.camera.camera:
-            if not self.camera.autofocus():
-                self.log("⚠️ Autofocus failed (continuing anyway)")
-        
-        # Step 2: Capture image
+        # Capture image
         self.log("📷 Capturing image...")
         self.statusBar.showMessage("Capturing...", 3000)
         
@@ -987,12 +990,10 @@ class FilmScannerApp(QMainWindow):
         frame_filename = f"{self.roll_name}_frame_{self.frame_count + 1:04d}.jpg"
         save_path = str(self.roll_folder / frame_filename)
         
-        capture_success = False
-        if self.camera.camera:
-            capture_success = self.camera.capture_image(save_path)
+        capture_success = self.camera.capture_image(save_path)
         
         if not capture_success:
-            self.log("⚠️ Capture failed - no camera or capture error")
+            self.log("⚠️ Capture failed - check camera connection")
             self.is_capturing = False
             return
         
@@ -1014,7 +1015,7 @@ class FilmScannerApp(QMainWindow):
             remaining = self.frames_per_strip - self.frames_in_strip
             self.log(f"✓ Frame {self.frames_in_strip} captured (Strip {self.strip_count}, {remaining} remaining)")
         
-        # Step 3: Auto-advance if enabled AND not at end of strip
+        # Auto-advance if enabled AND not at end of strip
         if self.auto_advance and self.frame_advance and not strip_complete:
             self.log(f"⏩ Auto-advancing {self.frame_advance} steps...")
             self.statusBar.showMessage("Advancing to next frame...", 3000)

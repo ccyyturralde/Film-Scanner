@@ -4,18 +4,19 @@ A modern, integrated film scanning application with live view and single-button 
 
 ## Key Features
 
-### 🎥 Live View with Color Inversion
+### 🎥 Live View Preview
 - Real-time camera preview directly in the app
-- **Invert colors** to view film negatives as positives
-- No need for external camera software
+- **Native Windows support** - works with any USB camera
+- No SDK or driver hassles
+- No external camera software needed
 
 ### ⚡ One-Button Scanning
 Press **SPACE** and the app automatically:
-1. **Autofocus** the camera
-2. **Capture** the image  
-3. **Advance** to next frame
+1. **Capture** the image from live view
+2. **Advance** to next frame
 
 All in one action - no switching between apps!
+(Manual focus recommended for best quality)
 
 ### 🎯 Smart Frame Spacing
 - Calibrate once by capturing two frames
@@ -28,19 +29,20 @@ All in one action - no switching between apps!
 1. **Install dependencies**: See [SETUP_GUIDE.md](SETUP_GUIDE.md)
 2. **Connect camera and Arduino**
 3. **Run**: `python scanner_desktop.py`
-4. **Create new roll** (N key)
-5. **Start live view** and enable color inversion
-6. **Calibrate** first strip (C key)
-7. **Press SPACE** to scan each frame!
+4. **Select your camera** from dropdown
+5. **Start live view** to see what you're scanning
+6. **Create new roll** (N key)
+7. **Calibrate** first strip (C key)
+8. **Press SPACE** to scan each frame!
 
 ## System Requirements
 
 - Python 3.9+
-- PySide6 (Qt6)
-- OpenCV
-- gphoto2 with libgphoto2
-- Canon camera with USB support
+- PySide6 (Qt6 with Multimedia)
+- OpenCV, NumPy
+- Any USB camera (Canon, Nikon, Sony, webcam)
 - Arduino with stepper motor control
+- **Windows, Mac, or Linux**
 
 ## Interface
 
@@ -57,7 +59,7 @@ All in one action - no switching between apps!
 
 ## Keyboard Shortcuts
 
-- **SPACE**: Autofocus + Capture + Advance
+- **SPACE**: Capture + Advance
 - **Arrow Keys**: Fine positioning
 - **C**: Calibrate frame spacing
 - **S**: Start new strip
@@ -70,14 +72,16 @@ All in one action - no switching between apps!
 
 ## What's New
 
-### Version 2.0 - Integrated Camera Control
+### Version 2.0 - Native Windows Camera Control
 
-- ✅ Removed dependency on EOS Utility
+- ✅ **Qt-based camera framework** - works natively on Windows!
+- ✅ No SDK registration or complex setup required
 - ✅ Built-in live view with real-time preview
-- ✅ Color inversion for viewing film positives
-- ✅ Single-button operation: autofocus → capture → advance
-- ✅ Direct camera control via gphoto2
+- ✅ Works with any USB camera (Canon, Nikon, Sony, etc.)
+- ✅ Single-button operation: capture → advance
 - ✅ Improved UI with split-panel layout
+- ✅ Camera selection dropdown
+- ✅ Cross-platform support (Windows/Mac/Linux)
 
 ### Previous Features Retained
 

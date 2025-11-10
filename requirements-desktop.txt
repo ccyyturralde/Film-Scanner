@@ -7,9 +7,9 @@ PySide6>=6.6.0           # Qt6 for modern, responsive GUI
 # Serial Communication
 pyserial>=3.5            # Arduino communication
 
-# Camera Control
-gphoto2>=2.3.0           # Direct camera control (works on Windows with libgphoto2)
-opencv-python>=4.8.0     # Live view and image processing
+# Camera Control (using Qt's built-in camera framework)
+# Qt6 Multimedia is included with PySide6
+opencv-python>=4.8.0     # Image processing for color inversion
 numpy>=1.24.0            # Image array manipulation
 
 # Utilities

@@ -10,33 +10,26 @@ First, install the required Python packages:
 pip install -r requirements-desktop.txt
 ```
 
-### 2. Install libgphoto2 (for Camera Control)
+### 2. No Additional Camera Libraries Needed!
 
-For Windows, you need to install libgphoto2. Here are the options:
+The app uses **Qt's built-in camera framework** which works natively on Windows with any USB camera. No additional installations required!
 
-#### Option A: Using MSYS2 (Recommended)
-1. Download and install MSYS2 from https://www.msys2.org/
-2. Open MSYS2 terminal and run:
-   ```bash
-   pacman -S mingw-w64-x86_64-libgphoto2
-   ```
-3. Add MSYS2 bin directory to your PATH:
-   - Add `C:\msys64\mingw64\bin` to your system PATH
-
-#### Option B: Pre-built Windows Binaries
-1. Download libgphoto2 Windows binaries from: http://www.gphoto.org/proj/libgphoto2/support.php
-2. Extract and add to your PATH
+**What this means:**
+- ✅ Works with Canon, Nikon, Sony, any brand
+- ✅ No SDK registration needed
+- ✅ No complex driver installation
+- ✅ Native Windows support
 
 ### 3. Camera Setup
 
-1. **Connect your Canon camera via USB**
-2. **Set camera to PC/PTP mode** (check camera menu)
-3. **Disable Canon software** that auto-launches when connecting camera
-4. **Test camera detection**:
-   ```bash
-   gphoto2 --auto-detect
-   ```
-   You should see your camera listed.
+1. **Connect your DSLR via USB**
+2. **Enable "PC Connection" or "USB Video" mode** on your camera:
+   - Canon: Set to "Movie" mode or enable "USB Video Out"
+   - Nikon: Enable "USB Video Mode"
+   - Sony: Set to "PC Remote" or "MTP"
+3. **The app will detect your camera** automatically
+   - If not detected, click the 🔄 refresh button
+   - Try different USB ports/cables if needed
 
 ### 4. Arduino Setup
 
@@ -58,10 +51,10 @@ python scanner_desktop.py
    - Arduino status should show "Connected ✓"
    - Camera status should show "Connected ✓"
 
-2. **Start Live View**
+2. **Select Camera**
+   - Choose your camera from the dropdown
    - Click "Start Live View" button
-   - Enable "Invert Colors (Show Positive)" to see film as positive image
-   - This lets you preview exactly what you're scanning
+   - You'll see real-time preview from your camera
 
 3. **Create New Roll**
    - Enter roll name (e.g., "Kodak-Portra400-001")
@@ -78,10 +71,10 @@ python scanner_desktop.py
 5. **Scan Remaining Frames**
    - Press SPACE for each frame
    - The app will automatically:
-     - **Autofocus** the camera
-     - **Capture** the image
+     - **Capture** the image from live view
      - **Advance** to next frame
    - All in ONE button press!
+   - **Note**: Focus manually using your camera or live view before capturing
 
 6. **New Strips**
    - When strip is complete, press S for next strip
@@ -90,7 +83,7 @@ python scanner_desktop.py
 
 ## Keyboard Shortcuts
 
-- **SPACE**: Autofocus → Capture → Advance (all in one!)
+- **SPACE**: Capture → Advance (all in one!)
 - **← / →**: Fine adjustment (left/right)
 - **Shift+← / →**: Full frame back/forward
 - **C**: Calibrate frame spacing
@@ -100,17 +93,18 @@ python scanner_desktop.py
 
 ## Features
 
-### Live View with Color Inversion
+### Live View Preview
 - Real-time camera preview directly in the app
-- Toggle "Invert Colors" to see film negatives as positives
+- Works with any USB camera on Windows
 - Perfect for composing and focusing
+- **Tip**: Adjust camera settings (exposure, white balance) using your camera's controls
 
 ### Single-Button Scanning
 - Press SPACE once and the app handles:
-  1. Autofocus
-  2. Capture
-  3. Advance to next frame
+  1. Capture from live view
+  2. Advance to next frame
 - No need to switch between apps or click multiple buttons
+- Focus manually for best results
 
 ### Automatic Frame Spacing
 - Calibrate once per session
@@ -120,20 +114,22 @@ python scanner_desktop.py
 ## Troubleshooting
 
 ### Camera Not Detected
-- Make sure camera is in PC/PTP mode
-- Close any Canon software (EOS Utility, etc.)
-- Try unplugging and reconnecting the camera
-- Run `gphoto2 --auto-detect` to test
+- Make sure camera is in USB Video/PC Connection mode
+- Try different USB port or cable
+- Click the 🔄 refresh button
+- Restart the app
+- Check Windows Camera app to see if camera works there
 
 ### Live View Not Working
-- Some cameras require special settings
-- Check camera manual for "PC Live View" settings
-- Ensure camera is not in locked/standby mode
+- Ensure camera is in the correct USB mode (not just charging mode)
+- Some cameras need to be in "Movie" mode
+- Try restarting both camera and app
+- Check camera battery level
 
-### Autofocus Fails
-- Some cameras don't support autofocus via gphoto2
-- You can still focus manually through live view
-- The app will capture even if autofocus fails
+### Image Quality Issues
+- Camera captures at whatever resolution/quality it's set to in USB mode
+- For best quality: Use camera's own shutter button and monitor for new files
+- Or: Use a higher-end camera with better USB video quality
 
 ### Arduino Not Found
 - Check USB connection
@@ -141,8 +137,12 @@ python scanner_desktop.py
 - Try a different USB port
 - Check Device Manager for COM port
 
-### gphoto2 Import Error
-If you see "gphoto2 not available", the app will still run but camera features will be disabled. Make sure to install libgphoto2 (see step 2 above).
+### Alternative: External Camera Control
+If you prefer higher quality images:
+1. Keep live view running for positioning
+2. Trigger capture on your camera directly
+3. App will detect and auto-advance
+4. Or simply press SPACE to manually advance after each shot
 
 ## File Output
 
