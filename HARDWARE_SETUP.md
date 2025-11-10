@@ -5,10 +5,9 @@
 ### Required Components
 
 #### Electronics
-- **Raspberry Pi 4** (2GB minimum, 4GB recommended)
-  - MicroSD card (16GB+)
-  - Power supply (5V 3A)
-  - Case with cooling
+- **Windows/Mac/Linux PC** with USB ports
+  - Python 3.9+ installed
+  - See [SETUP_GUIDE.md](SETUP_GUIDE.md) for software requirements
 
 - **Arduino Uno or Nano**
   - USB cable (Type A to B for Uno, Mini-B for Nano)
@@ -63,27 +62,27 @@ A4988 2A ──── Motor Red    ┐
 A4988 2B ──── Motor Green  ├─ Coil B
                             ┘
 
-RASPBERRY PI
-============
+COMPUTER
+========
 USB Port 1 ────── Arduino USB
-USB Port 2 ────── Camera USB
+USB Port 2 ────── Camera USB (Canon DSLR)
 ```
 
 ### Step-by-Step Assembly
 
-#### 1. Prepare the Raspberry Pi
+#### 1. Prepare Your Computer
 
+See [SETUP_GUIDE.md](SETUP_GUIDE.md) for complete software installation instructions.
+
+**Quick summary:**
 ```bash
-# Flash Raspberry Pi OS
-# Use Raspberry Pi Imager
-# Enable SSH during setup
+# Install Python dependencies
+pip install -r requirements-desktop.txt
 
-# After boot, update system
-sudo apt update && sudo apt upgrade -y
-
-# Install required software
-sudo apt install -y git python3-pip gphoto2 screen
-pip3 install --break-system-packages pyserial
+# Install libgphoto2 (for camera control)
+# On Windows: Use MSYS2
+# On Mac: brew install libgphoto2
+# On Linux: sudo apt install libgphoto2-dev
 ```
 
 #### 2. Assemble Motor Driver
@@ -209,18 +208,16 @@ Side View:
 
 #### Motor Configuration
 
-Edit in `scanner_app_v2.py`:
+These values are configured via the Arduino and calibrated through the desktop app:
 
 ```python
+# In scanner_desktop.py (reference only - calibrated via UI):
 # Steps per movement
 self.fine_step = 8       # Fine adjustment
 self.coarse_step = 64    # Coarse movement
 
-# Typical frame advance (35mm)
-self.default_advance = 1200  # Adjust for your setup
-
-# Step timing (microseconds)
-self.step_delay = 800    # Increase if motor stalls
+# Frame advance is learned during calibration (C key)
+# Step timing is set in Arduino firmware (default: 800μs)
 ```
 
 #### Calculating Steps per Frame
@@ -323,7 +320,7 @@ screen /dev/ttyACM0 115200
 gphoto2 --capture-image
 
 # 4. Run scanner app
-python3 scanner_app_v2.py
+python scanner_desktop.py
 ```
 
-If all tests pass, your hardware is ready for scanning!
+If all tests pass, your hardware is ready for scanning! See [SETUP_GUIDE.md](SETUP_GUIDE.md) for complete usage instructions.

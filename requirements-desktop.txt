@@ -7,13 +7,14 @@ PySide6>=6.6.0           # Qt6 for modern, responsive GUI
 # Serial Communication
 pyserial>=3.5            # Arduino communication
 
-# Camera Control (optional - can use EOS Utility instead)
-# gphoto2 is Linux-only, so we'll use direct EOS Utility integration on Windows
+# Camera Control
+gphoto2>=2.3.0           # Direct camera control (works on Windows with libgphoto2)
+opencv-python>=4.8.0     # Live view and image processing
+numpy>=1.24.0            # Image array manipulation
 
 # Utilities
 python-dotenv>=1.0.0     # Configuration management
-psutil>=5.9.0            # Process management for EOS Utility
-pillow>=10.0.0           # Image preview (if needed)
+pillow>=10.0.0           # Image processing
 
 # Development
 pyinstaller>=6.0.0       # For creating .exe standalone app

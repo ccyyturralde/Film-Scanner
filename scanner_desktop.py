@@ -6,7 +6,8 @@ Modern Qt-based GUI for Windows/Mac/Linux
 Features:
 - Responsive GUI with Qt6
 - Fast Arduino serial communication
-- EOS Utility integration for camera preview
+- Integrated live view with color inversion for film positives
+- Direct camera control (autofocus, capture)
 - Keyboard shortcuts for rapid operation
 - Session management and state persistence
 """
@@ -17,20 +18,28 @@ import os
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
+import numpy as np
+import cv2
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QLineEdit, QTextEdit, QGroupBox, QSpinBox,
-    QCheckBox, QFileDialog, QStatusBar, QGridLayout, QMessageBox
+    QCheckBox, QFileDialog, QStatusBar, QGridLayout, QMessageBox, QSplitter
 )
 from PySide6.QtCore import Qt, QTimer, Signal, Slot, QThread
-from PySide6.QtGui import QKeySequence, QShortcut, QFont, QAction
+from PySide6.QtGui import QKeySequence, QShortcut, QFont, QAction, QImage, QPixmap
 
 import serial
 import serial.tools.list_ports
 import subprocess
 import time
-import psutil
+
+try:
+    import gphoto2 as gp
+    GPHOTO2_AVAILABLE = True
+except ImportError:
+    GPHOTO2_AVAILABLE = False
+    print("Warning: gphoto2 not available. Camera control will be limited.")
 
 
 class ArduinoController(QThread):
@@ -139,64 +148,194 @@ class ArduinoController(QThread):
         self.connection_status.emit(False)
 
 
-class CameraController:
+class CameraController(QThread):
     """
-    Camera control with EOS Utility integration
+    Direct camera control with live view support
+    """
+    frame_ready = Signal(np.ndarray)
+    status_message = Signal(str)
+    camera_connected = Signal(bool)
+    
+    def __init__(self):
+        super().__init__()
+        self.camera = None
+        self.context = None
+        self.running = False
+        self.capturing_live_view = False
+        
+        if GPHOTO2_AVAILABLE:
+            self.init_gphoto2()
+    
+    def init_gphoto2(self):
+        """Initialize gphoto2 camera"""
+        try:
+            self.context = gp.Context()
+            self.camera = gp.Camera()
+            self.camera.init(self.context)
+            self.camera_connected.emit(True)
+            self.status_message.emit("Camera connected via gphoto2")
+            return True
+        except Exception as e:
+            self.status_message.emit(f"Camera connection failed: {str(e)}")
+            self.camera_connected.emit(False)
+            return False
+    
+    def start_live_view(self):
+        """Start live view capture"""
+        if not self.camera:
+            self.status_message.emit("No camera connected")
+            return False
+        
+        self.capturing_live_view = True
+        self.running = True
+        self.start()
+        return True
+    
+    def stop_live_view(self):
+        """Stop live view capture"""
+        self.capturing_live_view = False
+        self.running = False
+    
+    def run(self):
+        """Background thread for live view"""
+        while self.running and self.capturing_live_view:
+            try:
+                if GPHOTO2_AVAILABLE and self.camera:
+                    # Capture preview frame
+                    camera_file = self.camera.capture_preview(self.context)
+                    file_data = camera_file.get_data_and_size()
+                    
+                    # Convert to numpy array
+                    image = np.frombuffer(file_data, dtype=np.uint8)
+                    frame = cv2.imdecode(image, cv2.IMREAD_COLOR)
+                    
+                    if frame is not None:
+                        self.frame_ready.emit(frame)
+                
+                time.sleep(0.033)  # ~30 fps
+            except Exception as e:
+                print(f"Live view error: {e}")
+                time.sleep(0.1)
+    
+    def autofocus(self) -> bool:
+        """Trigger camera autofocus"""
+        if not self.camera:
+            return False
+        
+        try:
+            if GPHOTO2_AVAILABLE:
+                # Set autofocus
+                config = self.camera.get_config(self.context)
+                af_widget = config.get_child_by_name('autofocusdrive')
+                af_widget.set_value(1)
+                self.camera.set_config(config, self.context)
+                time.sleep(1)  # Wait for AF to complete
+                self.status_message.emit("Autofocus complete")
+                return True
+        except Exception as e:
+            self.status_message.emit(f"Autofocus error: {str(e)}")
+            # Try alternative method
+            try:
+                # Some cameras use different config names
+                config = self.camera.get_config(self.context)
+                af_widget = config.get_child_by_name('manualfocusdrive')
+                # Trigger AF by setting to 0 (neutral position)
+                af_widget.set_value(0)
+                self.camera.set_config(config, self.context)
+                return True
+            except:
+                pass
+        
+        return False
+    
+    def capture_image(self, save_path: str) -> bool:
+        """Capture and save image"""
+        if not self.camera:
+            self.status_message.emit("No camera connected")
+            return False
+        
+        try:
+            if GPHOTO2_AVAILABLE:
+                # Pause live view during capture
+                was_capturing = self.capturing_live_view
+                if was_capturing:
+                    self.capturing_live_view = False
+                    time.sleep(0.1)
+                
+                # Capture image
+                file_path = self.camera.capture(gp.GP_CAPTURE_IMAGE, self.context)
+                
+                # Download image
+                camera_file = self.camera.file_get(
+                    file_path.folder, file_path.name, gp.GP_FILE_TYPE_NORMAL, self.context
+                )
+                camera_file.save(save_path)
+                
+                # Resume live view
+                if was_capturing:
+                    self.capturing_live_view = True
+                
+                self.status_message.emit(f"Image captured: {save_path}")
+                return True
+        except Exception as e:
+            self.status_message.emit(f"Capture error: {str(e)}")
+            return False
+    
+    def disconnect(self):
+        """Disconnect camera"""
+        self.running = False
+        self.capturing_live_view = False
+        
+        if self.camera:
+            try:
+                self.camera.exit(self.context)
+            except:
+                pass
+        
+        self.camera_connected.emit(False)
+
+
+class LiveViewWidget(QLabel):
+    """
+    Widget for displaying camera live view with color inversion option
     """
     
     def __init__(self):
-        self.eos_utility_path = self.find_eos_utility()
-        self.eos_process: Optional[subprocess.Popen] = None
+        super().__init__()
+        self.setMinimumSize(640, 480)
+        self.setAlignment(Qt.AlignCenter)
+        self.setStyleSheet("background-color: black; border: 2px solid #555;")
+        self.setText("Live View\n(Camera will appear here)")
+        self.invert_colors = False
     
-    def find_eos_utility(self) -> Optional[str]:
-        """Locate EOS Utility on Windows"""
-        # Common installation paths for Canon EOS Utility
-        common_paths = [
-            r"C:\Program Files\Canon\EOS Utility\EOS Utility 3\EOS Utility 3.exe",
-            r"C:\Program Files (x86)\Canon\EOS Utility\EOS Utility 3\EOS Utility 3.exe",
-            r"C:\Program Files\Canon\EOS Utility\EOSUtility2.exe",
-            r"C:\Program Files (x86)\Canon\EOS Utility\EOSUtility2.exe",
-        ]
-        
-        for path in common_paths:
-            if os.path.exists(path):
-                return path
-        
-        return None
-    
-    def is_eos_utility_running(self) -> bool:
-        """Check if EOS Utility is running"""
-        for proc in psutil.process_iter(['name']):
-            try:
-                if 'eos' in proc.info['name'].lower():
-                    return True
-            except:
-                continue
-        return False
-    
-    def launch_eos_utility(self) -> bool:
-        """Launch EOS Utility for camera preview"""
-        if not self.eos_utility_path:
-            return False
-        
-        if self.is_eos_utility_running():
-            return True  # Already running
-        
+    def update_frame(self, frame: np.ndarray):
+        """Update display with new frame"""
         try:
-            self.eos_process = subprocess.Popen([self.eos_utility_path])
-            return True
+            # Apply color inversion if enabled
+            if self.invert_colors:
+                frame = cv2.bitwise_not(frame)
+            
+            # Convert BGR to RGB
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+            # Convert to QImage
+            h, w, ch = rgb_frame.shape
+            bytes_per_line = ch * w
+            qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
+            
+            # Scale to fit widget while maintaining aspect ratio
+            pixmap = QPixmap.fromImage(qt_image)
+            scaled_pixmap = pixmap.scaled(
+                self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+            )
+            
+            self.setPixmap(scaled_pixmap)
         except Exception as e:
-            print(f"Error launching EOS Utility: {e}")
-            return False
+            print(f"Frame update error: {e}")
     
-    def close_eos_utility(self):
-        """Close EOS Utility"""
-        if self.eos_process:
-            try:
-                self.eos_process.terminate()
-                self.eos_process = None
-            except:
-                pass
+    def toggle_invert(self, enabled: bool):
+        """Toggle color inversion"""
+        self.invert_colors = enabled
 
 
 class FilmScannerApp(QMainWindow):
@@ -220,6 +359,8 @@ class FilmScannerApp(QMainWindow):
         self.frame_advance = None
         self.state_file = None
         self.calibration_complete = False
+        self.roll_folder = None
+        self.is_capturing = False  # Flag to prevent multiple simultaneous captures
         
         # Settings
         self.fine_step = 8
@@ -237,18 +378,53 @@ class FilmScannerApp(QMainWindow):
         self.arduino.status_message.connect(self.show_status)
         self.arduino.connection_status.connect(self.on_arduino_connection)
         
+        # Connect Camera signals
+        self.camera.frame_ready.connect(self.on_frame_ready)
+        self.camera.status_message.connect(self.show_status)
+        self.camera.camera_connected.connect(self.on_camera_connection)
+        
         # Auto-connect to Arduino
         QTimer.singleShot(500, self.connect_arduino)
     
     def init_ui(self):
         """Initialize the user interface"""
         self.setWindowTitle("Film Scanner - Desktop Edition")
-        self.setMinimumSize(800, 600)
+        self.setMinimumSize(1200, 800)
         
-        # Central widget
+        # Central widget with splitter
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout(central_widget)
+        main_layout = QHBoxLayout(central_widget)
+        
+        # Create splitter for live view and controls
+        splitter = QSplitter(Qt.Horizontal)
+        
+        # Left side: Live View
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        
+        self.live_view = LiveViewWidget()
+        left_layout.addWidget(self.live_view)
+        
+        # Live view controls
+        lv_controls = QHBoxLayout()
+        
+        self.btn_toggle_liveview = QPushButton("Start Live View")
+        self.btn_toggle_liveview.setCheckable(True)
+        self.btn_toggle_liveview.clicked.connect(self.toggle_live_view)
+        lv_controls.addWidget(self.btn_toggle_liveview)
+        
+        self.chk_invert_colors = QCheckBox("Invert Colors (Show Positive)")
+        self.chk_invert_colors.stateChanged.connect(self.toggle_invert_colors)
+        lv_controls.addWidget(self.chk_invert_colors)
+        
+        left_layout.addLayout(lv_controls)
+        
+        splitter.addWidget(left_panel)
+        
+        # Right side: Controls
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
         
         # Top: Status Display
         status_group = QGroupBox("Status")
@@ -256,28 +432,33 @@ class FilmScannerApp(QMainWindow):
         
         self.lbl_connection = QLabel("Arduino: Disconnected")
         self.lbl_connection.setStyleSheet("color: red; font-weight: bold;")
-        status_layout.addWidget(QLabel("Connection:"), 0, 0)
+        status_layout.addWidget(QLabel("Arduino:"), 0, 0)
         status_layout.addWidget(self.lbl_connection, 0, 1)
         
+        self.lbl_camera_status = QLabel("Camera: Disconnected")
+        self.lbl_camera_status.setStyleSheet("color: red; font-weight: bold;")
+        status_layout.addWidget(QLabel("Camera:"), 1, 0)
+        status_layout.addWidget(self.lbl_camera_status, 1, 1)
+        
         self.lbl_roll = QLabel("None")
-        status_layout.addWidget(QLabel("Roll:"), 1, 0)
-        status_layout.addWidget(self.lbl_roll, 1, 1)
+        status_layout.addWidget(QLabel("Roll:"), 2, 0)
+        status_layout.addWidget(self.lbl_roll, 2, 1)
         
         self.lbl_frame_count = QLabel("0")
-        status_layout.addWidget(QLabel("Total Frames:"), 2, 0)
-        status_layout.addWidget(self.lbl_frame_count, 2, 1)
+        status_layout.addWidget(QLabel("Total Frames:"), 3, 0)
+        status_layout.addWidget(self.lbl_frame_count, 3, 1)
         
         self.lbl_strip_info = QLabel("Strip 0, Frame 0")
-        status_layout.addWidget(QLabel("Current:"), 3, 0)
-        status_layout.addWidget(self.lbl_strip_info, 3, 1)
+        status_layout.addWidget(QLabel("Current:"), 4, 0)
+        status_layout.addWidget(self.lbl_strip_info, 4, 1)
         
         self.lbl_position = QLabel("0 steps")
-        status_layout.addWidget(QLabel("Position:"), 4, 0)
-        status_layout.addWidget(self.lbl_position, 4, 1)
+        status_layout.addWidget(QLabel("Position:"), 5, 0)
+        status_layout.addWidget(self.lbl_position, 5, 1)
         
         self.lbl_frame_advance = QLabel("Not calibrated")
-        status_layout.addWidget(QLabel("Frame Spacing:"), 5, 0)
-        status_layout.addWidget(self.lbl_frame_advance, 5, 1)
+        status_layout.addWidget(QLabel("Frame Spacing:"), 6, 0)
+        status_layout.addWidget(self.lbl_frame_advance, 6, 1)
         
         # Strip configuration
         strip_config_layout = QHBoxLayout()
@@ -289,10 +470,10 @@ class FilmScannerApp(QMainWindow):
         self.spin_frames_per_strip.valueChanged.connect(self.update_frames_per_strip)
         strip_config_layout.addWidget(self.spin_frames_per_strip)
         strip_config_layout.addStretch()
-        status_layout.addLayout(strip_config_layout, 6, 0, 1, 2)
+        status_layout.addLayout(strip_config_layout, 7, 0, 1, 2)
         
         status_group.setLayout(status_layout)
-        main_layout.addWidget(status_group)
+        right_layout.addWidget(status_group)
         
         # Middle: Motor Controls
         motor_group = QGroupBox("Motor Control")
@@ -348,7 +529,7 @@ class FilmScannerApp(QMainWindow):
         motor_layout.addLayout(control_layout)
         
         motor_group.setLayout(motor_layout)
-        main_layout.addWidget(motor_group)
+        right_layout.addWidget(motor_group)
         
         # Bottom: Session Controls
         session_group = QGroupBox("Session Control")
@@ -385,22 +566,18 @@ class FilmScannerApp(QMainWindow):
         
         session_layout.addLayout(action_layout)
         
-        # Camera control
-        camera_layout = QHBoxLayout()
-        
-        self.btn_eos_utility = QPushButton("Launch EOS Utility")
-        self.btn_eos_utility.clicked.connect(self.launch_camera_preview)
-        camera_layout.addWidget(self.btn_eos_utility)
+        # Auto-advance control
+        advance_layout = QHBoxLayout()
         
         self.chk_auto_advance = QCheckBox("Auto-advance after capture")
         self.chk_auto_advance.setChecked(True)
         self.chk_auto_advance.stateChanged.connect(self.toggle_auto_advance)
-        camera_layout.addWidget(self.chk_auto_advance)
+        advance_layout.addWidget(self.chk_auto_advance)
         
-        session_layout.addLayout(camera_layout)
+        session_layout.addLayout(advance_layout)
         
         session_group.setLayout(session_layout)
-        main_layout.addWidget(session_group)
+        right_layout.addWidget(session_group)
         
         # Log area
         log_group = QGroupBox("Activity Log")
@@ -412,7 +589,17 @@ class FilmScannerApp(QMainWindow):
         log_layout.addWidget(self.txt_log)
         
         log_group.setLayout(log_layout)
-        main_layout.addWidget(log_group)
+        right_layout.addWidget(log_group)
+        
+        # Add right panel to splitter
+        splitter.addWidget(right_panel)
+        
+        # Set splitter proportions (60% live view, 40% controls)
+        splitter.setStretchFactor(0, 6)
+        splitter.setStretchFactor(1, 4)
+        
+        # Add splitter to main layout
+        main_layout.addWidget(splitter)
         
         # Status bar
         self.statusBar = QStatusBar()
@@ -485,11 +672,46 @@ class FilmScannerApp(QMainWindow):
     def on_arduino_connection(self, connected: bool):
         """Update connection status"""
         if connected:
-            self.lbl_connection.setText("Arduino: Connected ✓")
+            self.lbl_connection.setText("Connected ✓")
             self.lbl_connection.setStyleSheet("color: green; font-weight: bold;")
         else:
-            self.lbl_connection.setText("Arduino: Disconnected ✗")
+            self.lbl_connection.setText("Disconnected ✗")
             self.lbl_connection.setStyleSheet("color: red; font-weight: bold;")
+    
+    @Slot(bool)
+    def on_camera_connection(self, connected: bool):
+        """Update camera connection status"""
+        if connected:
+            self.lbl_camera_status.setText("Connected ✓")
+            self.lbl_camera_status.setStyleSheet("color: green; font-weight: bold;")
+        else:
+            self.lbl_camera_status.setText("Disconnected ✗")
+            self.lbl_camera_status.setStyleSheet("color: red; font-weight: bold;")
+    
+    @Slot(np.ndarray)
+    def on_frame_ready(self, frame: np.ndarray):
+        """Update live view with new frame"""
+        self.live_view.update_frame(frame)
+    
+    def toggle_live_view(self):
+        """Toggle live view on/off"""
+        if self.btn_toggle_liveview.isChecked():
+            if self.camera.start_live_view():
+                self.btn_toggle_liveview.setText("Stop Live View")
+                self.log("Live view started")
+            else:
+                self.btn_toggle_liveview.setChecked(False)
+                self.log("Failed to start live view")
+        else:
+            self.camera.stop_live_view()
+            self.btn_toggle_liveview.setText("Start Live View")
+            self.log("Live view stopped")
+    
+    def toggle_invert_colors(self, state):
+        """Toggle color inversion for film positive preview"""
+        enabled = (state == Qt.Checked)
+        self.live_view.toggle_invert(enabled)
+        self.log(f"Color inversion: {'ON' if enabled else 'OFF'}")
     
     def log(self, message: str):
         """Add message to log"""
@@ -726,7 +948,11 @@ class FilmScannerApp(QMainWindow):
         self.log(f"🎞️ Strip {self.strip_count} ready - Position frame 1 and press SPACE")
     
     def capture_frame(self):
-        """Capture current frame"""
+        """Capture current frame: Autofocus -> Capture -> Advance (all in one!)"""
+        if self.is_capturing:
+            self.log("Capture already in progress...")
+            return
+        
         if not self.roll_name:
             QMessageBox.warning(self, "No Roll", "Please create a new roll first (N key)")
             return
@@ -743,7 +969,34 @@ class FilmScannerApp(QMainWindow):
         if self.frames_in_strip == 0 and self.strip_count == 0:
             self.strip_count = 1
         
-        # Capture frame
+        self.is_capturing = True
+        
+        # Step 1: Autofocus
+        self.log("🎯 Autofocusing...")
+        self.statusBar.showMessage("Autofocusing...", 3000)
+        
+        if self.camera.camera:
+            if not self.camera.autofocus():
+                self.log("⚠️ Autofocus failed (continuing anyway)")
+        
+        # Step 2: Capture image
+        self.log("📷 Capturing image...")
+        self.statusBar.showMessage("Capturing...", 3000)
+        
+        # Generate filename
+        frame_filename = f"{self.roll_name}_frame_{self.frame_count + 1:04d}.jpg"
+        save_path = str(self.roll_folder / frame_filename)
+        
+        capture_success = False
+        if self.camera.camera:
+            capture_success = self.camera.capture_image(save_path)
+        
+        if not capture_success:
+            self.log("⚠️ Capture failed - no camera or capture error")
+            self.is_capturing = False
+            return
+        
+        # Update counts
         self.frame_count += 1
         self.frames_in_strip += 1
         
@@ -761,26 +1014,14 @@ class FilmScannerApp(QMainWindow):
             remaining = self.frames_per_strip - self.frames_in_strip
             self.log(f"✓ Frame {self.frames_in_strip} captured (Strip {self.strip_count}, {remaining} remaining)")
         
-        # Auto-advance if enabled AND not at end of strip
+        # Step 3: Auto-advance if enabled AND not at end of strip
         if self.auto_advance and self.frame_advance and not strip_complete:
-            self.log(f"   Auto-advancing {self.frame_advance} steps...")
+            self.log(f"⏩ Auto-advancing {self.frame_advance} steps...")
+            self.statusBar.showMessage("Advancing to next frame...", 3000)
             QTimer.singleShot(500, self.advance_frame)
+        
+        self.is_capturing = False
     
-    def launch_camera_preview(self):
-        """Launch EOS Utility for camera preview"""
-        if self.camera.launch_eos_utility():
-            self.log("EOS Utility launched")
-            QMessageBox.information(self, "Camera Preview",
-                                  "EOS Utility launched.\n\n"
-                                  "Use EOS Utility for:\n"
-                                  "- Live view preview\n"
-                                  "- Camera settings\n"
-                                  "- Manual focus\n\n"
-                                  "Return here to capture frames.")
-        else:
-            QMessageBox.warning(self, "EOS Utility Not Found",
-                              "Could not find EOS Utility.\n\n"
-                              "Please install Canon EOS Utility 3 or ensure it's in the default location.")
     
     def update_display(self):
         """Update all display elements"""
@@ -884,7 +1125,7 @@ class FilmScannerApp(QMainWindow):
     def closeEvent(self, event):
         """Handle window close"""
         self.arduino.disconnect()
-        self.camera.close_eos_utility()
+        self.camera.disconnect()
         event.accept()
 
 
