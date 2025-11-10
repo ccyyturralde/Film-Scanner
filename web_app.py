@@ -278,19 +278,25 @@ class FilmScanner:
             return False
     
     def _kill_gphoto2(self):
-        """Thoroughly kill any gphoto2 processes"""
+        """Thoroughly kill any gphoto2 processes and wait for USB release"""
         try:
             # Kill gracefully first
             subprocess.run(["killall", "gphoto2"], 
                          capture_output=True, timeout=1)
-            time.sleep(0.1)
+            time.sleep(0.2)
             # Force kill any remaining
             subprocess.run(["killall", "-9", "gphoto2"], 
                          capture_output=True, timeout=1)
+            time.sleep(0.2)
             # Also kill gvfs which can interfere
             subprocess.run(["killall", "gvfs-gphoto2-volume-monitor"], 
                          capture_output=True, timeout=1)
-            time.sleep(0.5)  # Give system time to release USB
+            time.sleep(0.3)
+            # Kill any PTP processes that might be hanging
+            subprocess.run(["killall", "-9", "PTPCamera"], 
+                         capture_output=True, timeout=1)
+            time.sleep(0.3)
+            # Total wait: 1 second for USB to fully release
         except:
             pass
     
@@ -434,8 +440,10 @@ class FilmScanner:
         try:
             print("📷 Capturing image...")
             
-            # Simple: just run gphoto2 --capture-image (like SSH)
-            # No unnecessary process killing or delays
+            # MUST kill any existing gphoto2 processes first (prevents -9 errors)
+            self._kill_gphoto2()
+            time.sleep(1.0)  # Give USB time to release (needs full second)
+            
             print("   Running: gphoto2 --capture-image")
             
             result = subprocess.run(
@@ -891,7 +899,7 @@ def get_preview():
         
         # CRITICAL: Enable viewfinder first (Canon R100 requirement)
         # Per r100-liveview-testing.md: viewfinder MUST be enabled for --capture-preview to work
-        print("   Step 1: Enabling viewfinder...")
+        print("   Step 1: Checking/enabling viewfinder...")
         if not scanner.enable_viewfinder():
             print("✗ Failed to enable viewfinder")
             scanner.status_msg = "✗ Cannot enable viewfinder"
@@ -999,9 +1007,14 @@ def get_preview():
         scanner.broadcast_status()
         
         print(f"✓ Live preview successful")
+        
+        # Clean up any lingering gphoto2 processes after preview
+        scanner._kill_gphoto2()
+        
         return jsonify({'success': True, 'image': image_data})
         
     except subprocess.TimeoutExpired:
+        scanner._kill_gphoto2()  # Clean up on timeout
         try:
             os.chdir(original_dir)
         except:
@@ -1016,6 +1029,7 @@ def get_preview():
             os.chdir(original_dir)
         except:
             pass
+        scanner._kill_gphoto2()  # Clean up on error
         print(f"✗ Preview error: {e}")
         traceback.print_exc()
         scanner.status_msg = f"✗ Error"
@@ -1110,6 +1124,11 @@ if __name__ == '__main__':
     print(f"\n📍 Mode: {config.get('mode', 'unknown')}")
     print(f"📍 Pi IP: {config.get('pi_ip', 'unknown')}")
     print(f"📍 Port: {config.get('port', 5000)}")
+    
+    # Clean up any existing gphoto2 processes from previous runs
+    print("\n🧹 Cleaning up any existing gphoto2 processes...")
+    scanner._kill_gphoto2()
+    print("✓ Process cleanup complete")
     
     # Auto-connect to Arduino on startup
     print("\n🔌 Searching for Arduino...")
