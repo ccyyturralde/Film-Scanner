@@ -56,19 +56,22 @@
             </div>
         </section>
 
-        <!-- Live Preview -->
+        <!-- Camera Preview -->
         <section class="panel">
-            <h2>Live Preview</h2>
+            <h2>Camera Preview</h2>
             <div class="preview-controls">
-                <button class="btn btn-secondary" id="preview-toggle" onclick="togglePreview()">
-                    Start Preview
-                </button>
-                <button class="btn btn-secondary" id="invert-toggle" onclick="toggleInvert()" disabled>
-                    View as Positive
+                <button class="btn btn-primary btn-large" id="preview-btn" onclick="capturePreview()">
+                    📷 Get Preview
                 </button>
             </div>
             <div id="preview-container" style="display: none;">
                 <img id="preview-image" src="" alt="Camera Preview">
+                <div class="preview-info">
+                    <span id="preview-timestamp"></span>
+                    <button class="btn btn-small btn-secondary" onclick="toggleInvert()">
+                        <span id="invert-text">Invert</span>
+                    </button>
+                </div>
             </div>
         </section>
 
@@ -131,9 +134,6 @@
         <section class="panel">
             <h2>Camera Controls</h2>
             <div class="camera-controls">
-                <button class="btn btn-primary btn-large" onclick="autofocus()">
-                    🎯 Autofocus
-                </button>
                 <button class="btn btn-success btn-large btn-capture" onclick="capture()">
                     📸 CAPTURE
                 </button>
@@ -148,19 +148,55 @@
             </div>
         </section>
 
-        <!-- Connection Panel -->
+        <!-- Settings Panel -->
         <section class="panel">
-            <h2>System</h2>
-            <div class="control-options">
-                <button class="btn btn-secondary" onclick="connectArduino()">
-                    Reconnect Arduino
-                </button>
-                <button class="btn btn-warning" onclick="testCapture()">
-                    🧪 Test Camera Capture
+            <h2>⚙️ Settings</h2>
+            
+            <div class="settings-section">
+                <h3>Motor Step Sizes</h3>
+                <div class="setting-group">
+                    <label for="fine-step-input">Fine Step:</label>
+                    <input type="number" id="fine-step-input" min="1" max="100" value="8">
+                    <span class="setting-unit">steps</span>
+                </div>
+                <div class="setting-group">
+                    <label for="coarse-step-input">Coarse Step:</label>
+                    <input type="number" id="coarse-step-input" min="1" max="500" value="192">
+                    <span class="setting-unit">steps</span>
+                </div>
+                <button class="btn btn-primary" onclick="updateStepSizes()">
+                    Apply Step Sizes
                 </button>
             </div>
-            <div class="help-text">
-                Test Capture: Takes a test photo without affecting frame count. Good for checking if camera capture works.
+
+            <div class="settings-section">
+                <h3>Auto-Refresh Preview</h3>
+                <div class="setting-group">
+                    <label>
+                        <input type="checkbox" id="auto-refresh-toggle" onchange="toggleAutoRefresh()">
+                        Enable Auto-Refresh
+                    </label>
+                </div>
+                <div class="setting-group">
+                    <label for="refresh-interval">Interval:</label>
+                    <input type="range" id="refresh-interval" min="100" max="5000" step="100" value="1000">
+                    <span id="refresh-interval-display">1000 ms</span>
+                </div>
+            </div>
+
+            <div class="settings-section">
+                <h3>System</h3>
+                <div class="control-options">
+                    <button class="btn btn-secondary" onclick="connectArduino()">
+                        Reconnect Arduino
+                    </button>
+                    <button class="btn btn-warning" onclick="testCapture()">
+                        🧪 Test Camera Capture
+                    </button>
+                </div>
+                <div class="help-text">
+                    Test Capture: Takes a test photo without affecting frame count.
+                </div>
             </div>
         </section>
 

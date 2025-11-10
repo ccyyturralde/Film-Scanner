@@ -11,9 +11,11 @@ Professional-grade 35mm film scanner using Raspberry Pi, Arduino, and DSLR camer
 - **Smart Calibration**: Learn frame spacing once, apply to entire roll
 - **Resume Capability**: Continue scanning after interruption
 - **Unlimited Frames**: No maximum frame count limitation
-- **🆕 Canon R100 WiFi Support**: Smooth 10 FPS live view via Canon Camera Control API
+- **🆕 On-Demand Camera Preview**: Get preview images with optional auto-refresh
+- **🆕 Customizable Settings**: Adjust motor step sizes and preview intervals
 - **🆕 Smart Startup**: Auto-discover Pi IP on first launch with persistent configuration
-- **Web Interface**: Browser-based control with real-time status updates
+- **Web Interface**: Mobile-friendly browser control with real-time status updates
+- **Optimized Performance**: Fast, responsive controls with minimal lag
 
 ## Hardware Requirements
 
@@ -135,17 +137,22 @@ See [SMART_STARTUP_README.md](SMART_STARTUP_README.md) for detailed setup instru
 
 | Key | Action | Description |
 |-----|--------|-------------|
-| **← →** | Fine adjust | Small movements (8/64 steps) |
-| **Shift+← →** | Frame jump | Full frame forward/backward |
-| **G** | Step size | Toggle small/LARGE steps |
+| **← →** | Fine adjust | Small movements (default: 8 steps) |
+| **Shift+← →** | Coarse adjust | Larger movements (default: 192 steps) |
 | **SPACE** | Capture | Capture frame + auto-advance |
-| **F** | Focus | Trigger autofocus |
-| **C** | Calibrate | Learn frame spacing |
+| **P** | Preview | Get camera preview |
 | **A** | Auto-advance | Toggle ON/OFF |
 | **M** | Mode | Manual/Calibrated |
-| **N** | New roll | Start new roll |
-| **Z** | Zero | Reset position |
-| **Q** | Quit | Exit application |
+
+### Web Interface Features
+
+- **Motor Control**: Press-and-hold buttons for continuous movement
+- **Camera Preview**: On-demand preview with auto-refresh option
+- **Settings Panel**: 
+  - Adjust fine and coarse step sizes
+  - Configure auto-refresh interval (100ms - 5000ms)
+  - Reconnect Arduino and test camera
+- **Mobile Optimized**: Touch-friendly controls with haptic feedback
 
 ## Operating Modes
 
@@ -206,8 +213,8 @@ Adjust A4988 potentiometer for ~1A motor current:
 - Manual mode recommended (M, Av, Tv, or P)
 - Fixed ISO (100-400)
 - Consistent exposure
-- Manual focus or single-shot AF
-- For R100: Enable WiFi and set to Remote Control mode
+- Manual focus recommended (autofocus happens during capture automatically)
+- USB PTP mode enabled for gphoto2 control
 
 ## File Management
 
@@ -339,14 +346,14 @@ screen /dev/ttyACM0 115200
 - Improved camera handling
 - All v2.0 features maintained
 
-### v2.0
-- Auto-advance after capture (not before)
-- Calibration captures both frames
-- Fine adjustments always available
-- Shift+arrows for frame jumps
-- Autofocus button
-- Direct SD card capture
-- Camera status indicator
+### v2.1 (Current)
+- On-demand camera preview with auto-refresh
+- Customizable motor step sizes via settings
+- Optimized motor control for zero lag
+- Removed autofocus button (handled automatically during capture)
+- Enhanced mobile responsiveness
+- Press-and-hold motor buttons
+- All v2.0 features maintained
 
 ### v1.0
 - Initial release
@@ -400,27 +407,27 @@ For issues or questions:
 
 ## Recent Additions
 
-### v2.0 - Canon R100 WiFi Integration ✅
-- Canon Camera Control API (CCAPI) support
-- WiFi live view at 10 FPS
-- Connection monitoring and auto-reconnect
-- Setup wizard for easy pairing
-- Comprehensive documentation
+### v2.1 - Enhanced Web Interface ✅
+- On-demand camera preview system
+- Auto-refresh preview with configurable intervals
+- Customizable motor step sizes
+- Optimized for zero-lag operation
+- Enhanced mobile responsiveness
 
 ### Web Interface ✅
 - Browser-based control panel
 - Real-time status updates via WebSocket
-- Mobile-friendly design
+- Mobile-optimized touch controls
+- Settings panel for customization
 - Remote operation from any device on network
 
 ## Future Enhancements
 
-- [ ] Canon WiFi autofocus (currently uses gphoto2)
-- [ ] Canon WiFi capture (currently uses gphoto2)
-- [ ] Multi-camera support
-- [ ] Live histogram and focus peaking
+- [ ] Focus peaking in preview images
+- [ ] Live histogram overlay
 - [ ] Multi-format support (120, 110 film)
 - [ ] Automatic exposure detection
+- [ ] Batch export to computer
 - [ ] Cloud backup integration
 
 ---

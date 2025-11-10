@@ -155,26 +155,29 @@ class FilmScanner:
                 return False
         return True
     
-    def send(self, cmd, retry=True):
-        """Send command to Arduino with error handling and retry"""
+    def send(self, cmd, retry=True, update_position=True):
+        """Send command to Arduino with error handling and retry - optimized for responsiveness"""
         if not self.ensure_connection():
             print(f"✗ Cannot send command '{cmd}': No Arduino connection")
             self.broadcast_status()
             return False
         
         try:
-            # Send command
+            # Clear buffer and send command
             self.arduino.reset_input_buffer()
             self.arduino.write(f"{cmd}\n".encode())
-            time.sleep(0.1)
             
-            # Update position for movement commands
-            if cmd in ['f', 'F', 'b', 'B'] or cmd.startswith('H') or cmd.startswith('Z'):
-                time.sleep(0.3)  # Give motor time to move
+            # Minimal delay for command processing
+            time.sleep(0.05)
+            
+            # Only update position for movement commands if requested
+            if update_position and (cmd in ['f', 'F', 'b', 'B'] or cmd.startswith('H') or cmd.startswith('Z')):
+                # Reduced wait time for better responsiveness
+                time.sleep(0.15)  # Shorter wait for motor to start moving
                 
-                # Query position
+                # Query position without blocking
                 self.arduino.write(b'?\n')
-                time.sleep(0.2)
+                time.sleep(0.1)
                 response = self.arduino.read(200).decode('ascii', errors='ignore')
                 
                 for line in response.split('\n'):
@@ -183,7 +186,7 @@ class FilmScanner:
                             pos_str = line.split(':')[1].strip().split()[0]
                             self.position = int(pos_str)
                         except Exception as e:
-                            print(f"✗ Failed to parse position: {e}")
+                            # Silently ignore parsing errors for responsiveness
                             pass
             
             return True
@@ -202,7 +205,7 @@ class FilmScanner:
             if retry:
                 print("🔄 Retrying command after reconnection...")
                 if self.ensure_connection():
-                    return self.send(cmd, retry=False)
+                    return self.send(cmd, retry=False, update_position=update_position)
             
             self.broadcast_status()
             return False
@@ -545,7 +548,7 @@ def new_roll():
 
 @app.route('/api/move', methods=['POST'])
 def move():
-    """Move motor"""
+    """Move motor - optimized for quick response"""
     data = request.json
     direction = data.get('direction', 'forward')
     size = data.get('size', 'fine')
@@ -555,16 +558,25 @@ def move():
     else:
         cmd = 'B' if size == 'coarse' else 'b'
     
-    success = scanner.send(cmd)
+    # Send command without waiting for position update (for speed)
+    success = scanner.send(cmd, update_position=False)
     
     if success:
-        scanner.status_msg = f"{'→' if direction == 'forward' else '←'} {scanner.coarse_step if size == 'coarse' else scanner.fine_step} steps"
+        # Update position estimate locally for immediate feedback
+        step = scanner.coarse_step if size == 'coarse' else scanner.fine_step
+        if direction == 'forward':
+            scanner.position += step
+        else:
+            scanner.position -= step
+        
+        scanner.status_msg = f"{'→' if direction == 'forward' else '←'} {step} steps"
     else:
         scanner.status_msg = "❌ Motor move failed - Check Arduino connection"
     
-    scanner.broadcast_status()
+    # Don't broadcast status on every move to reduce lag
+    # Status will be updated by periodic polling
     
-    return jsonify({'success': success})
+    return jsonify({'success': success, 'position': scanner.position})
 
 @app.route('/api/advance_frame', methods=['POST'])
 def advance_frame():
@@ -614,17 +626,8 @@ def zero_position():
     scanner.broadcast_status()
     return jsonify({'success': success})
 
-@app.route('/api/autofocus', methods=['POST'])
-def autofocus():
-    """Trigger autofocus"""
-    scanner.status_msg = "Focusing..."
-    scanner.broadcast_status()
-    
-    success = scanner.autofocus()
-    scanner.status_msg = "✓ Focused" if success else "⚠ Focus failed (check console)"
-    scanner.broadcast_status()
-    
-    return jsonify({'success': success})
+# Autofocus button removed - autofocus is now only used internally during capture
+# The autofocus() method is kept for internal use in capture_image()
 
 @app.route('/api/test_capture', methods=['POST'])
 def test_capture():
@@ -774,6 +777,99 @@ def new_strip():
     # Reset strip frame count
     scanner.frames_in_strip = 0
     return jsonify({'success': True})
+
+@app.route('/api/get_preview', methods=['POST'])
+def get_preview():
+    """Get camera preview image"""
+    if not scanner.check_camera():
+        return jsonify({
+            'success': False,
+            'message': 'Camera not connected',
+            'error': scanner.camera_error
+        })
+    
+    scanner.status_msg = "Getting preview..."
+    scanner.broadcast_status()
+    
+    try:
+        print("\n📷 Capturing preview image...")
+        scanner._kill_gphoto2()
+        
+        # Capture preview to temp file
+        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
+            tmp_path = tmp.name
+        
+        result = subprocess.run(
+            ["gphoto2", "--capture-preview", "--filename", tmp_path],
+            capture_output=True, timeout=15, text=True
+        )
+        
+        if result.returncode == 0 and os.path.exists(tmp_path):
+            # Read and encode image
+            with open(tmp_path, 'rb') as f:
+                image_data = base64.b64encode(f.read()).decode('utf-8')
+            
+            # Clean up temp file
+            os.unlink(tmp_path)
+            
+            scanner.status_msg = "✓ Preview captured"
+            scanner.broadcast_status()
+            
+            print("✓ Preview captured successfully")
+            return jsonify({'success': True, 'image': image_data})
+        else:
+            # Clean up temp file if it exists
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            
+            error_msg = result.stderr.strip() if result.stderr else 'Unknown error'
+            print(f"✗ Preview capture failed: {error_msg}")
+            scanner.status_msg = "✗ Preview failed"
+            scanner.broadcast_status()
+            
+            return jsonify({'success': False, 'message': error_msg})
+            
+    except subprocess.TimeoutExpired:
+        print("✗ Preview timeout")
+        scanner._kill_gphoto2()
+        scanner.status_msg = "✗ Preview timeout"
+        scanner.broadcast_status()
+        return jsonify({'success': False, 'message': 'Preview timeout'})
+        
+    except Exception as e:
+        print(f"✗ Preview error: {e}")
+        scanner.status_msg = f"✗ Preview error"
+        scanner.broadcast_status()
+        return jsonify({'success': False, 'message': str(e)})
+
+@app.route('/api/update_step_sizes', methods=['POST'])
+def update_step_sizes():
+    """Update motor step sizes"""
+    data = request.json
+    fine_step = data.get('fine_step')
+    coarse_step = data.get('coarse_step')
+    
+    if not fine_step or not coarse_step:
+        return jsonify({'success': False, 'message': 'Both step sizes required'})
+    
+    try:
+        scanner.fine_step = int(fine_step)
+        scanner.coarse_step = int(coarse_step)
+        
+        # Update coarse step size on Arduino
+        if scanner.arduino:
+            scanner.arduino.write(f'l{scanner.coarse_step}\n'.encode())
+            time.sleep(0.1)
+        
+        scanner.status_msg = f"Step sizes: Fine={scanner.fine_step}, Coarse={scanner.coarse_step}"
+        scanner.broadcast_status()
+        
+        print(f"✓ Step sizes updated: Fine={scanner.fine_step}, Coarse={scanner.coarse_step}")
+        return jsonify({'success': True})
+        
+    except Exception as e:
+        print(f"✗ Failed to update step sizes: {e}")
+        return jsonify({'success': False, 'message': str(e)})
 
 
 # WebSocket events

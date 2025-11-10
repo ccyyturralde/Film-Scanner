@@ -14,8 +14,15 @@ let stripState = {
 };
 
 let previewState = {
-    active: false,
-    inverted: false
+    inverted: false,
+    autoRefresh: false,
+    refreshInterval: 1000,
+    refreshTimer: null
+};
+
+let settingsState = {
+    fineStep: 8,
+    coarseStep: 192
 };
 
 // Connect to WebSocket
@@ -27,12 +34,6 @@ socket.on('connect', () => {
 // Handle status updates
 socket.on('status_update', (status) => {
     updateUI(status);
-});
-
-// Handle preview frames
-socket.on('preview_frame', (data) => {
-    const previewImg = document.getElementById('preview-image');
-    previewImg.src = 'data:image/jpeg;base64,' + data.image;
 });
 
 // Update UI with status
@@ -70,7 +71,7 @@ function updateUI(status) {
     }
 }
 
-// API helper
+// API helper with better error handling
 async function apiCall(endpoint, data = {}) {
     try {
         const response = await fetch(`/api/${endpoint}`, {
@@ -87,14 +88,29 @@ async function apiCall(endpoint, data = {}) {
     }
 }
 
+// Button state management to prevent double-clicks
+const buttonStates = new Map();
+
+function setButtonProcessing(btn, processing) {
+    if (processing) {
+        btn.classList.add('processing');
+        btn.disabled = true;
+        buttonStates.set(btn, true);
+    } else {
+        btn.classList.remove('processing');
+        btn.disabled = false;
+        buttonStates.delete(btn);
+    }
+}
+
 // Button handlers
 async function connectArduino() {
     const btn = event.target;
-    btn.classList.add('processing');
+    setButtonProcessing(btn, true);
     
     const result = await apiCall('connect_arduino');
     
-    btn.classList.remove('processing');
+    setButtonProcessing(btn, false);
     
     if (!result.success) {
         alert('Arduino not found. Check connection and try again.');
@@ -110,11 +126,11 @@ async function createRoll() {
     }
     
     const btn = event.target;
-    btn.classList.add('processing');
+    setButtonProcessing(btn, true);
     
     const result = await apiCall('new_roll', { roll_name: rollName });
     
-    btn.classList.remove('processing');
+    setButtonProcessing(btn, false);
     
     if (result.success) {
         document.getElementById('roll-name-input').value = '';
@@ -123,14 +139,22 @@ async function createRoll() {
     }
 }
 
-// Motor control with press-and-hold support
+// Optimized motor control with better responsiveness
 let motorHoldState = {
     holding: false,
     interval: null,
-    button: null
+    button: null,
+    lastMoveTime: 0
 };
 
 async function moveMotor(direction, size) {
+    // Prevent too-frequent calls
+    const now = Date.now();
+    if (now - motorHoldState.lastMoveTime < 50) {
+        return;
+    }
+    motorHoldState.lastMoveTime = now;
+    
     await apiCall('move', { direction, size });
 }
 
@@ -144,12 +168,12 @@ function startMotorHold(button, direction, size) {
     // Immediate first move
     moveMotor(direction, size);
     
-    // Continue moving while held
+    // Continue moving while held (reduced interval for better responsiveness)
     motorHoldState.interval = setInterval(() => {
         if (motorHoldState.holding) {
             moveMotor(direction, size);
         }
-    }, 150); // Send new command every 150ms for responsiveness
+    }, 100); // Faster interval for snappier response
 }
 
 function stopMotorHold() {
@@ -170,11 +194,11 @@ function stopMotorHold() {
 
 async function advanceFrame() {
     const btn = event.target;
-    btn.classList.add('processing');
+    setButtonProcessing(btn, true);
     
     const result = await apiCall('advance_frame');
     
-    btn.classList.remove('processing');
+    setButtonProcessing(btn, false);
     
     if (!result.success) {
         alert('Cannot advance frame. Calibrate first.');
@@ -183,11 +207,11 @@ async function advanceFrame() {
 
 async function backupFrame() {
     const btn = event.target;
-    btn.classList.add('processing');
+    setButtonProcessing(btn, true);
     
     const result = await apiCall('backup_frame');
     
-    btn.classList.remove('processing');
+    setButtonProcessing(btn, false);
     
     if (!result.success) {
         alert('Cannot backup frame. Calibrate first.');
@@ -208,26 +232,13 @@ async function zeroPosition() {
     }
 }
 
-async function autofocus() {
-    const btn = event.target;
-    btn.classList.add('processing');
-    
-    const result = await apiCall('autofocus');
-    
-    btn.classList.remove('processing');
-    
-    if (!result.success) {
-        alert('Autofocus failed. Check console for details.');
-    }
-}
-
 async function testCapture() {
     const btn = event.target;
-    btn.classList.add('processing');
+    setButtonProcessing(btn, true);
     
     const result = await apiCall('test_capture');
     
-    btn.classList.remove('processing');
+    setButtonProcessing(btn, false);
     
     if (result.success) {
         alert('✓ Test capture successful!\n\nCamera is working. Check camera SD card for test image.\n\n(Frame count was NOT incremented)');
@@ -238,14 +249,126 @@ async function testCapture() {
 
 async function capture() {
     const btn = event.target;
-    btn.classList.add('processing');
+    setButtonProcessing(btn, true);
     
     const result = await apiCall('capture');
     
-    btn.classList.remove('processing');
+    setButtonProcessing(btn, false);
     
     if (!result.success) {
         alert(result.message || 'Capture failed');
+    }
+    
+    // Auto-refresh preview after capture if enabled
+    if (previewState.autoRefresh) {
+        setTimeout(() => capturePreview(), 500);
+    }
+}
+
+// Camera Preview Functions
+async function capturePreview() {
+    const btn = document.getElementById('preview-btn');
+    setButtonProcessing(btn, true);
+    
+    const result = await apiCall('get_preview');
+    
+    setButtonProcessing(btn, false);
+    
+    if (result.success && result.image) {
+        const previewImg = document.getElementById('preview-image');
+        const previewContainer = document.getElementById('preview-container');
+        const timestamp = document.getElementById('preview-timestamp');
+        
+        previewImg.src = 'data:image/jpeg;base64,' + result.image;
+        previewContainer.style.display = 'block';
+        
+        const now = new Date();
+        timestamp.textContent = now.toLocaleTimeString();
+    } else {
+        alert('Failed to get preview: ' + (result.message || 'Unknown error'));
+    }
+}
+
+function toggleInvert() {
+    const previewImg = document.getElementById('preview-image');
+    const invertText = document.getElementById('invert-text');
+    
+    previewState.inverted = !previewState.inverted;
+    
+    if (previewState.inverted) {
+        previewImg.classList.add('inverted');
+        invertText.textContent = 'Normal';
+    } else {
+        previewImg.classList.remove('inverted');
+        invertText.textContent = 'Invert';
+    }
+}
+
+// Auto-refresh preview
+function toggleAutoRefresh() {
+    const checkbox = document.getElementById('auto-refresh-toggle');
+    previewState.autoRefresh = checkbox.checked;
+    
+    if (previewState.autoRefresh) {
+        startAutoRefresh();
+    } else {
+        stopAutoRefresh();
+    }
+}
+
+function startAutoRefresh() {
+    stopAutoRefresh(); // Clear any existing timer
+    
+    previewState.refreshTimer = setInterval(() => {
+        if (previewState.autoRefresh) {
+            capturePreview();
+        }
+    }, previewState.refreshInterval);
+    
+    // Get initial preview
+    capturePreview();
+}
+
+function stopAutoRefresh() {
+    if (previewState.refreshTimer) {
+        clearInterval(previewState.refreshTimer);
+        previewState.refreshTimer = null;
+    }
+}
+
+// Update refresh interval display
+document.getElementById('refresh-interval')?.addEventListener('input', (e) => {
+    previewState.refreshInterval = parseInt(e.target.value);
+    document.getElementById('refresh-interval-display').textContent = previewState.refreshInterval + ' ms';
+    
+    // Restart auto-refresh if active
+    if (previewState.autoRefresh) {
+        startAutoRefresh();
+    }
+});
+
+// Settings Functions
+async function updateStepSizes() {
+    const fineStep = parseInt(document.getElementById('fine-step-input').value);
+    const coarseStep = parseInt(document.getElementById('coarse-step-input').value);
+    
+    if (fineStep < 1 || coarseStep < 1) {
+        alert('Step sizes must be at least 1');
+        return;
+    }
+    
+    settingsState.fineStep = fineStep;
+    settingsState.coarseStep = coarseStep;
+    
+    const result = await apiCall('update_step_sizes', {
+        fine_step: fineStep,
+        coarse_step: coarseStep
+    });
+    
+    if (result.success) {
+        alert('Step sizes updated successfully!');
+    } else {
+        alert('Failed to update step sizes: ' + (result.message || 'Unknown error'));
     }
 }
 
@@ -298,11 +421,11 @@ function showCalibrationUI() {
 
 async function captureFrame1() {
     const btn = event.target;
-    btn.classList.add('processing');
+    setButtonProcessing(btn, true);
     
     const result = await apiCall('calibrate', { action: 'capture_frame1' });
     
-    btn.classList.remove('processing');
+    setButtonProcessing(btn, false);
     
     if (result.success) {
         calibrationState.frame1Captured = true;
@@ -316,14 +439,14 @@ async function captureFrame1() {
 
 async function captureFrame2() {
     const btn = event.target;
-    btn.classList.add('processing');
+    setButtonProcessing(btn, true);
     
     const result = await apiCall('calibrate', { 
         action: 'capture_frame2',
         frame1_pos: calibrationState.frame1Position
     });
     
-    btn.classList.remove('processing');
+    setButtonProcessing(btn, false);
     
     if (result.success) {
         alert(`Calibration complete! Frame advance: ${result.frame_advance} steps`);
@@ -385,7 +508,7 @@ function showNewStripUI() {
 
 async function captureFirstFrame() {
     const btn = event.target;
-    btn.classList.add('processing');
+    setButtonProcessing(btn, true);
     
     // Start the new strip first
     await apiCall('new_strip', { action: 'start' });
@@ -393,7 +516,7 @@ async function captureFirstFrame() {
     // Then capture the first frame
     const result = await apiCall('new_strip', { action: 'capture_first' });
     
-    btn.classList.remove('processing');
+    setButtonProcessing(btn, false);
     
     if (result.success) {
         stripState.active = false;
@@ -422,56 +545,6 @@ function cancelNewStrip() {
     `;
 }
 
-// Live Preview functions
-async function togglePreview() {
-    const btn = document.getElementById('preview-toggle');
-    const invertBtn = document.getElementById('invert-toggle');
-    const previewContainer = document.getElementById('preview-container');
-    
-    if (!previewState.active) {
-        // Start preview
-        btn.classList.add('processing');
-        const result = await apiCall('start_preview');
-        btn.classList.remove('processing');
-        
-        if (result.success) {
-            previewState.active = true;
-            btn.textContent = 'Stop Preview';
-            invertBtn.disabled = false;
-            previewContainer.style.display = 'block';
-        } else {
-            alert('Failed to start preview. Check camera connection.');
-        }
-    } else {
-        // Stop preview
-        btn.classList.add('processing');
-        const result = await apiCall('stop_preview');
-        btn.classList.remove('processing');
-        
-        if (result.success) {
-            previewState.active = false;
-            btn.textContent = 'Start Preview';
-            invertBtn.disabled = true;
-            previewContainer.style.display = 'none';
-        }
-    }
-}
-
-function toggleInvert() {
-    const previewImg = document.getElementById('preview-image');
-    const invertBtn = document.getElementById('invert-toggle');
-    
-    previewState.inverted = !previewState.inverted;
-    
-    if (previewState.inverted) {
-        previewImg.classList.add('inverted');
-        invertBtn.textContent = 'View as Negative';
-    } else {
-        previewImg.classList.remove('inverted');
-        invertBtn.textContent = 'View as Positive';
-    }
-}
-
 // Keyboard shortcuts (for desktop)
 document.addEventListener('keydown', (e) => {
     // Ignore if typing in input field
@@ -492,11 +565,6 @@ document.addEventListener('keydown', (e) => {
             e.preventDefault();
             moveMotor('forward', e.shiftKey ? 'coarse' : 'fine');
             break;
-        case 'f':
-        case 'F':
-            e.preventDefault();
-            autofocus();
-            break;
         case 'a':
         case 'A':
             e.preventDefault();
@@ -507,13 +575,18 @@ document.addEventListener('keydown', (e) => {
             e.preventDefault();
             toggleMode();
             break;
+        case 'p':
+        case 'P':
+            e.preventDefault();
+            capturePreview();
+            break;
     }
 });
 
-// Request status update every 1 second (improved responsiveness)
+// Optimized status updates - less frequent for better performance
 setInterval(() => {
     socket.emit('request_status');
-}, 1000);
+}, 2000); // Every 2 seconds instead of 1
 
 // Initial status request
 window.addEventListener('load', () => {
@@ -528,39 +601,39 @@ document.addEventListener('DOMContentLoaded', () => {
         const direction = button.dataset.direction;
         const size = button.dataset.size;
         
-        // Mouse events (desktop)
+        // Mouse events (desktop) - with passive false for better control
         button.addEventListener('mousedown', (e) => {
             e.preventDefault();
             startMotorHold(button, direction, size);
-        });
+        }, { passive: false });
         
         button.addEventListener('mouseup', (e) => {
             e.preventDefault();
             stopMotorHold();
-        });
+        }, { passive: false });
         
         button.addEventListener('mouseleave', (e) => {
             stopMotorHold();
         });
         
-        // Touch events (mobile)
+        // Touch events (mobile) - with passive false for better responsiveness
         button.addEventListener('touchstart', (e) => {
             e.preventDefault();
             startMotorHold(button, direction, size);
-        });
+        }, { passive: false });
         
         button.addEventListener('touchend', (e) => {
             e.preventDefault();
             stopMotorHold();
-        });
+        }, { passive: false });
         
         button.addEventListener('touchcancel', (e) => {
             e.preventDefault();
             stopMotorHold();
-        });
+        }, { passive: false });
     });
     
-    // Global safety: stop on any mouse up anywhere on page
+    // Global safety: stop on any mouse/touch up anywhere on page
     document.addEventListener('mouseup', () => {
         stopMotorHold();
     });
@@ -569,4 +642,3 @@ document.addEventListener('DOMContentLoaded', () => {
         stopMotorHold();
     });
 });
-
