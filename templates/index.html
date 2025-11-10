@@ -59,6 +59,7 @@
         <!-- Camera Preview -->
         <section class="panel">
             <h2>Camera Preview</h2>
+            <p class="help-text">Get live preview or show last captured frame, automatically converted to positive</p>
             <div class="preview-controls">
                 <button class="btn btn-primary btn-large" id="preview-btn" onclick="capturePreview()">
                     📷 Get Preview
@@ -68,9 +69,6 @@
                 <img id="preview-image" src="" alt="Camera Preview">
                 <div class="preview-info">
                     <span id="preview-timestamp"></span>
-                    <button class="btn btn-small btn-secondary" onclick="toggleInvert()">
-                        <span id="invert-text">Invert</span>
-                    </button>
                 </div>
             </div>
         </section>

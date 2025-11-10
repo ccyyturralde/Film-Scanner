@@ -20,6 +20,12 @@ import tempfile
 import shutil
 import traceback
 from config_manager import ConfigManager
+try:
+    from PIL import Image, ImageOps
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+    print("⚠ PIL/Pillow not available - image preview will be limited")
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'film-scanner-secret-key'
@@ -328,22 +334,24 @@ class FilmScanner:
             return False
     
     def capture_image(self, retry=True):
-        """Capture image to camera SD card - simple approach that works"""
+        """Capture image to camera SD card - works with long exposures"""
         try:
             print("📷 Starting capture sequence...")
             self._kill_gphoto2()
             time.sleep(1.0)  # Give camera plenty of time to release
             
-            # Run exactly as it works manually - no fancy stuff
+            # Run exactly as it works manually - NO TIMEOUT!
+            # gphoto2 waits for camera to finish (even 30-40 second exposures)
             print("   Running: gphoto2 --capture-image")
+            print("   (Waiting for camera... may take 30-40s for long exposures)")
             result = subprocess.run(
-                ["gphoto2", "--capture-image"],
-                timeout=30
+                ["gphoto2", "--capture-image"]
+                # NO timeout parameter - let gphoto2 wait as long as needed!
             )
             
             print(f"   Return code: {result.returncode}")
             
-            # Give camera a moment to finish
+            # Give camera a moment to finish writing
             time.sleep(0.5)
             
             # Check result
@@ -777,7 +785,7 @@ def new_strip():
 
 @app.route('/api/get_preview', methods=['POST'])
 def get_preview():
-    """Get camera preview image - Canon EOS compatible"""
+    """Get camera live preview - Canon R100 compatible"""
     if not scanner.check_camera():
         return jsonify({
             'success': False,
@@ -788,114 +796,153 @@ def get_preview():
     scanner.status_msg = "Getting preview..."
     scanner.broadcast_status()
     
-    # Create temp directory for preview
+    # Create temp directory
     temp_dir = tempfile.mkdtemp()
+    original_dir = os.getcwd()
     
     try:
-        print("\n📷 Capturing preview image...")
-        print(f"   Temp directory: {temp_dir}")
-        
+        print("\n📷 Capturing live preview from camera...")
         scanner._kill_gphoto2()
-        time.sleep(1.0)  # Give camera plenty of time to release
+        time.sleep(1.0)
         
-        # Save current directory
-        original_dir = os.getcwd()
-        print(f"   Original directory: {original_dir}")
-        
-        # Change to temp directory so gphoto2 saves there
+        # Change to temp directory
         os.chdir(temp_dir)
-        print(f"   Changed to: {os.getcwd()}")
+        print(f"   Working directory: {temp_dir}")
         
-        # List files BEFORE capture
-        before_files = set(os.listdir(temp_dir))
-        print(f"   Files before capture: {list(before_files)}")
+        # Try live preview first (R100 DOES support it via EOS Utility protocol)
+        print("   Running: gphoto2 --capture-preview")
+        result = subprocess.run(
+            ["gphoto2", "--capture-preview"]
+            # NO timeout - let gphoto2 handle it
+        )
         
-        try:
-            # Run gphoto2 - let output go to terminal so we can see what it says
-            print(f"   Running: gphoto2 --capture-preview")
-            print("   ---gphoto2 output START---")
-            result = subprocess.run(
-                ["gphoto2", "--capture-preview"],
-                timeout=30,
-                cwd=temp_dir
-            )
-            print("   ---gphoto2 output END---")
-            print(f"   Return code: {result.returncode}")
-            
-        finally:
-            # Always restore directory
-            os.chdir(original_dir)
-            print(f"   Restored to: {os.getcwd()}")
+        print(f"   Return code: {result.returncode}")
         
-        # Wait for file system to sync
+        # Restore directory
+        os.chdir(original_dir)
+        
         time.sleep(0.5)
         
-        # List files AFTER capture
-        after_files = set(os.listdir(temp_dir))
-        new_files = after_files - before_files
-        print(f"   Files after capture: {list(after_files)}")
-        print(f"   New files: {list(new_files)}")
+        # Check what files were created
+        files = os.listdir(temp_dir)
+        print(f"   Files in directory: {files}")
         
-        # Find preview files (jpg/jpeg)
-        preview_files = [f for f in after_files if f.lower().endswith(('.jpg', '.jpeg'))]
-        print(f"   Preview files found: {preview_files}")
+        # Look for preview JPG files
+        preview_files = [f for f in files if f.lower().endswith(('.jpg', '.jpeg'))]
         
         if not preview_files:
-            print("✗ No preview JPG file created")
-            print(f"   Camera entered live view (screen went black) but no file saved")
-            print(f"   This might be a Canon R100 specific issue")
-            scanner.status_msg = "✗ Preview failed (no file)"
-            scanner.broadcast_status()
+            print("⚠ No preview JPG found, falling back to last captured image...")
             
-            # Return detailed error
-            return jsonify({
-                'success': False, 
-                'message': f'Preview entered live view but no file created. Files in dir: {list(after_files)}'
-            })
+            # Fallback: Download last image from camera
+            os.chdir(temp_dir)
+            print("   Running: gphoto2 --get-file 1 (last image)")
+            result2 = subprocess.run(
+                ["gphoto2", "--get-file", "1"]
+                # NO timeout
+            )
+            os.chdir(original_dir)
+            print(f"   Return code: {result2.returncode}")
+            
+            time.sleep(0.5)
+            files = os.listdir(temp_dir)
+            print(f"   Files after fallback: {files}")
+            
+            # Look for CR3/CR2/JPG files
+            image_files = [f for f in files if f.lower().endswith(('.cr3', '.cr2', '.jpg', '.jpeg'))]
+            
+            if not image_files:
+                print("✗ No image available")
+                scanner.status_msg = "✗ No preview available"
+                scanner.broadcast_status()
+                return jsonify({
+                    'success': False,
+                    'message': 'No preview available. Capture a frame first.'
+                })
+            
+            preview_files = image_files
         
         # Use the first preview file found
-        preview_path = os.path.join(temp_dir, preview_files[0])
-        file_size = os.path.getsize(preview_path)
-        print(f"   Preview file: {preview_files[0]} ({file_size} bytes)")
+        image_path = os.path.join(temp_dir, preview_files[0])
+        print(f"   Using: {preview_files[0]}")
         
-        # Check file size
+        # If it's a RAW file, extract thumbnail
+        if preview_files[0].lower().endswith(('.cr3', '.cr2')):
+            print("   Extracting thumbnail from RAW...")
+            os.chdir(temp_dir)
+            thumb_result = subprocess.run(
+                ["gphoto2", "--get-thumbnail", "1", "--filename", "thumb.jpg"]
+            )
+            os.chdir(original_dir)
+            
+            thumb_path = os.path.join(temp_dir, "thumb.jpg")
+            if thumb_result.returncode == 0 and os.path.exists(thumb_path):
+                image_path = thumb_path
+                print(f"   ✓ Using thumbnail: {os.path.getsize(thumb_path)} bytes")
+        
+        # Read the image
+        file_size = os.path.getsize(image_path)
+        print(f"   Final image: {os.path.basename(image_path)} ({file_size} bytes)")
+        
+        # Check minimum size
         if file_size < 1000:
-            print(f"✗ Preview file too small ({file_size} bytes) - likely corrupt")
-            scanner.status_msg = "✗ Preview failed (file too small)"
+            print("✗ Image too small (corrupt)")
+            scanner.status_msg = "✗ Preview corrupt"
             scanner.broadcast_status()
-            return jsonify({'success': False, 'message': f'Preview file too small: {file_size} bytes'})
+            return jsonify({'success': False, 'message': 'Preview image corrupt or too small'})
         
-        # Read and encode image
-        with open(preview_path, 'rb') as f:
-            image_data = base64.b64encode(f.read()).decode('utf-8')
+        # Convert negative to positive if PIL is available
+        if PIL_AVAILABLE:
+            try:
+                print("   Converting negative to positive...")
+                img = Image.open(image_path)
+                
+                # Convert to RGB if needed
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
+                
+                # Invert the image (negative to positive)
+                img_inverted = ImageOps.invert(img)
+                
+                # Save as JPG to buffer
+                from io import BytesIO
+                buffer = BytesIO()
+                img_inverted.save(buffer, format='JPEG', quality=85)
+                image_data = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                
+                print("   ✓ Converted to positive")
+                
+            except Exception as e:
+                print(f"   ⚠ Conversion failed: {e}, using original")
+                with open(image_path, 'rb') as f:
+                    image_data = base64.b64encode(f.read()).decode('utf-8')
+        else:
+            # No PIL, just encode original
+            print("   (PIL not available, showing as negative)")
+            with open(image_path, 'rb') as f:
+                image_data = base64.b64encode(f.read()).decode('utf-8')
         
-        scanner.status_msg = "✓ Preview captured"
+        scanner.status_msg = "✓ Preview ready"
         scanner.broadcast_status()
         
-        print(f"✓ Preview captured successfully")
+        print(f"✓ Preview ready")
         return jsonify({'success': True, 'image': image_data})
-        
-    except subprocess.TimeoutExpired:
-        os.chdir(original_dir)  # Restore directory
-        print("✗ Preview timeout (30s)")
-        scanner._kill_gphoto2()
-        scanner.status_msg = "✗ Preview timeout"
-        scanner.broadcast_status()
-        return jsonify({'success': False, 'message': 'Preview timeout - camera not responding'})
         
     except Exception as e:
         try:
-            os.chdir(original_dir)  # Try to restore directory
+            os.chdir(original_dir)
         except:
             pass
         print(f"✗ Preview error: {e}")
         traceback.print_exc()
-        scanner.status_msg = f"✗ Preview error"
+        scanner.status_msg = f"✗ Error"
         scanner.broadcast_status()
         return jsonify({'success': False, 'message': str(e)})
         
     finally:
-        # Clean up temp directory
+        try:
+            os.chdir(original_dir)
+        except:
+            pass
         try:
             shutil.rmtree(temp_dir, ignore_errors=True)
         except:

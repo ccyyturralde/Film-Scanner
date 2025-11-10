@@ -283,24 +283,9 @@ async function capturePreview() {
         previewContainer.style.display = 'block';
         
         const now = new Date();
-        timestamp.textContent = now.toLocaleTimeString();
+        timestamp.textContent = 'Updated at ' + now.toLocaleTimeString();
     } else {
         alert('Failed to get preview: ' + (result.message || 'Unknown error'));
-    }
-}
-
-function toggleInvert() {
-    const previewImg = document.getElementById('preview-image');
-    const invertText = document.getElementById('invert-text');
-    
-    previewState.inverted = !previewState.inverted;
-    
-    if (previewState.inverted) {
-        previewImg.classList.add('inverted');
-        invertText.textContent = 'Normal';
-    } else {
-        previewImg.classList.remove('inverted');
-        invertText.textContent = 'Invert';
     }
 }
 
