@@ -328,52 +328,23 @@ class FilmScanner:
             return False
     
     def capture_image(self, retry=True):
-        """Capture image to camera SD card with autofocus"""
+        """Capture image to camera SD card - simple approach that works"""
         try:
             print("📷 Starting capture sequence...")
             self._kill_gphoto2()
-            time.sleep(0.5)  # Give camera time to fully release
+            time.sleep(1.0)  # Give camera plenty of time to release
             
-            # Step 1: Try autofocus (non-blocking if fails)
-            print("   [1/2] Attempting autofocus...")
-            try:
-                af_result = subprocess.run(
-                    ["gphoto2", "--set-config", "autofocusdrive=1"],
-                    capture_output=True, timeout=10, text=True
-                )
-                
-                if af_result.returncode == 0:
-                    print("   ✓ Autofocus successful")
-                    time.sleep(1.5)  # Give camera time to focus
-                else:
-                    # Try alternative autofocus method
-                    print("   ⚠ Trying alternative autofocus...")
-                    af_result2 = subprocess.run(
-                        ["gphoto2", "--set-config", "autofocus=1"],
-                        capture_output=True, timeout=10, text=True
-                    )
-                    if af_result2.returncode == 0:
-                        print("   ✓ Alternative autofocus successful")
-                        time.sleep(1.5)
-                    else:
-                        print("   ⚠ Autofocus not available (continuing with manual focus)")
-                        time.sleep(0.3)
-            except Exception as e:
-                print(f"   ⚠ Autofocus error: {e}")
-                time.sleep(0.3)
-            
-            # Step 2: Capture image
-            print("   [2/2] Capturing image to camera SD card...")
+            # Run exactly as it works manually - no fancy stuff
+            print("   Running: gphoto2 --capture-image")
             result = subprocess.run(
                 ["gphoto2", "--capture-image"],
-                capture_output=True, timeout=30, text=True
+                timeout=30
             )
             
             print(f"   Return code: {result.returncode}")
-            if result.stdout:
-                print(f"   stdout: {result.stdout[:200]}")
-            if result.stderr:
-                print(f"   stderr: {result.stderr[:200]}")
+            
+            # Give camera a moment to finish
+            time.sleep(0.5)
             
             # Check result
             if result.returncode == 0:
@@ -806,7 +777,7 @@ def new_strip():
 
 @app.route('/api/get_preview', methods=['POST'])
 def get_preview():
-    """Get camera preview image - Canon camera compatible"""
+    """Get camera preview image - Canon EOS compatible"""
     if not scanner.check_camera():
         return jsonify({
             'success': False,
@@ -819,63 +790,77 @@ def get_preview():
     
     # Create temp directory for preview
     temp_dir = tempfile.mkdtemp()
-    preview_file = os.path.join(temp_dir, 'preview.jpg')
     
     try:
         print("\n📷 Capturing preview image...")
-        scanner._kill_gphoto2()
-        time.sleep(0.5)  # Longer delay for camera to fully release
+        print(f"   Temp directory: {temp_dir}")
         
-        # Change to temp directory and capture there
-        # Canon cameras work better when capturing to current directory
+        scanner._kill_gphoto2()
+        time.sleep(1.0)  # Give camera plenty of time to release
+        
+        # Save current directory
         original_dir = os.getcwd()
+        print(f"   Original directory: {original_dir}")
+        
+        # Change to temp directory so gphoto2 saves there
         os.chdir(temp_dir)
+        print(f"   Changed to: {os.getcwd()}")
+        
+        # List files BEFORE capture
+        before_files = set(os.listdir(temp_dir))
+        print(f"   Files before capture: {list(before_files)}")
         
         try:
-            # Capture preview without specifying filename (Canon quirk)
-            # It will save as capt0000.jpg or similar
-            print("   Running: gphoto2 --capture-preview")
+            # Run gphoto2 - let output go to terminal so we can see what it says
+            print(f"   Running: gphoto2 --capture-preview")
+            print("   ---gphoto2 output START---")
             result = subprocess.run(
                 ["gphoto2", "--capture-preview"],
-                capture_output=True,
-                timeout=25,
-                text=True,
+                timeout=30,
                 cwd=temp_dir
             )
-            
+            print("   ---gphoto2 output END---")
             print(f"   Return code: {result.returncode}")
-            if result.stdout:
-                print(f"   stdout: {result.stdout[:200]}")
-            if result.stderr:
-                print(f"   stderr: {result.stderr[:200]}")
             
         finally:
+            # Always restore directory
             os.chdir(original_dir)
+            print(f"   Restored to: {os.getcwd()}")
         
-        # Find the preview file (Canon saves with various names)
-        preview_files = []
-        for f in os.listdir(temp_dir):
-            if f.lower().endswith(('.jpg', '.jpeg')):
-                preview_files.append(os.path.join(temp_dir, f))
+        # Wait for file system to sync
+        time.sleep(0.5)
+        
+        # List files AFTER capture
+        after_files = set(os.listdir(temp_dir))
+        new_files = after_files - before_files
+        print(f"   Files after capture: {list(after_files)}")
+        print(f"   New files: {list(new_files)}")
+        
+        # Find preview files (jpg/jpeg)
+        preview_files = [f for f in after_files if f.lower().endswith(('.jpg', '.jpeg'))]
+        print(f"   Preview files found: {preview_files}")
         
         if not preview_files:
-            print("✗ No preview file created")
-            print(f"   Files in temp dir: {os.listdir(temp_dir)}")
-            scanner.status_msg = "✗ Preview failed (no file created)"
+            print("✗ No preview JPG file created")
+            print(f"   Camera entered live view (screen went black) but no file saved")
+            print(f"   This might be a Canon R100 specific issue")
+            scanner.status_msg = "✗ Preview failed (no file)"
             scanner.broadcast_status()
             
-            # Include stderr in error message
-            error_detail = result.stderr.strip() if result.stderr else 'No preview file generated'
-            return jsonify({'success': False, 'message': error_detail})
+            # Return detailed error
+            return jsonify({
+                'success': False, 
+                'message': f'Preview entered live view but no file created. Files in dir: {list(after_files)}'
+            })
         
         # Use the first preview file found
-        preview_path = preview_files[0]
+        preview_path = os.path.join(temp_dir, preview_files[0])
         file_size = os.path.getsize(preview_path)
-        print(f"   Found preview: {os.path.basename(preview_path)} ({file_size} bytes)")
+        print(f"   Preview file: {preview_files[0]} ({file_size} bytes)")
         
         # Check file size
         if file_size < 1000:
-            print(f"✗ Preview file too small ({file_size} bytes)")
+            print(f"✗ Preview file too small ({file_size} bytes) - likely corrupt")
             scanner.status_msg = "✗ Preview failed (file too small)"
             scanner.broadcast_status()
             return jsonify({'success': False, 'message': f'Preview file too small: {file_size} bytes'})
@@ -887,17 +872,22 @@ def get_preview():
         scanner.status_msg = "✓ Preview captured"
         scanner.broadcast_status()
         
-        print(f"✓ Preview captured successfully ({file_size} bytes, {len(image_data)} base64 chars)")
+        print(f"✓ Preview captured successfully")
         return jsonify({'success': True, 'image': image_data})
         
     except subprocess.TimeoutExpired:
-        print("✗ Preview timeout (25s)")
+        os.chdir(original_dir)  # Restore directory
+        print("✗ Preview timeout (30s)")
         scanner._kill_gphoto2()
         scanner.status_msg = "✗ Preview timeout"
         scanner.broadcast_status()
         return jsonify({'success': False, 'message': 'Preview timeout - camera not responding'})
         
     except Exception as e:
+        try:
+            os.chdir(original_dir)  # Try to restore directory
+        except:
+            pass
         print(f"✗ Preview error: {e}")
         traceback.print_exc()
         scanner.status_msg = f"✗ Preview error"
