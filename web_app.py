@@ -295,7 +295,12 @@ class FilmScanner:
             pass
     
     def autofocus(self):
-        """Trigger camera autofocus"""
+        """Trigger camera autofocus
+        
+        NOTE: Not currently used. Cameras with Continuous AF (like R100 in CAF mode)
+        handle focus automatically. This method is kept for compatibility with cameras
+        that might need explicit AF triggering.
+        """
         try:
             print("📷 Triggering autofocus...")
             self._kill_gphoto2()
@@ -334,10 +339,43 @@ class FilmScanner:
             print(f"✗ Autofocus error: {e}")
             return False
     
-    def enable_viewfinder(self):
-        """Enable camera viewfinder for live preview (Canon R100 requirement)"""
+    def check_viewfinder_state(self):
+        """Check if viewfinder is already enabled on camera"""
         try:
-            print("📷 Enabling viewfinder for live preview...")
+            self._kill_gphoto2()
+            
+            result = subprocess.run(
+                ["gphoto2", "--get-config", "viewfinder"],
+                capture_output=True, timeout=5, text=True
+            )
+            
+            if result.returncode == 0 and "Current:" in result.stdout:
+                # Parse current value
+                for line in result.stdout.split('\n'):
+                    if line.strip().startswith("Current:"):
+                        current_val = line.split(':')[1].strip()
+                        is_enabled = ('1' in current_val)
+                        print(f"   Viewfinder current state: {current_val} ({'enabled' if is_enabled else 'disabled'})")
+                        self.viewfinder_enabled = is_enabled
+                        return is_enabled
+            
+            return False
+        except Exception as e:
+            print(f"   ⚠ Could not check viewfinder state: {e}")
+            return False
+    
+    def enable_viewfinder(self):
+        """Enable camera viewfinder - REQUIRED for live preview on Canon R100"""
+        try:
+            print("📷 Checking viewfinder state...")
+            
+            # First check if already enabled
+            if self.check_viewfinder_state():
+                print("✓ Viewfinder already enabled")
+                return True
+            
+            # Not enabled, so enable it
+            print("   Enabling viewfinder...")
             self._kill_gphoto2()
             
             result = subprocess.run(
@@ -392,105 +430,65 @@ class FilmScanner:
             return False
     
     def capture_image(self, retry=True):
-        """Capture image to camera SD card - works with long exposures"""
+        """Capture image to camera SD card - simple and clean like SSH command"""
         try:
-            print("📷 Starting capture sequence...")
-            self._kill_gphoto2()
-            time.sleep(1.0)  # Give camera plenty of time to release
+            print("📷 Capturing image...")
             
-            # Run exactly as it works manually - NO TIMEOUT!
-            # gphoto2 waits for camera to finish (even 30-40 second exposures)
+            # Simple: just run gphoto2 --capture-image (like SSH)
+            # No unnecessary process killing or delays
             print("   Running: gphoto2 --capture-image")
-            print("   (Waiting for camera... may take 30-40s for long exposures)")
+            
             result = subprocess.run(
                 ["gphoto2", "--capture-image"],
                 capture_output=True,
-                text=True
-                # NO timeout parameter - let gphoto2 wait as long as needed!
+                text=True,
+                timeout=60  # 60 second timeout for long exposures
             )
             
             print(f"   Return code: {result.returncode}")
-            
-            # Print output for debugging
             if result.stdout:
                 print(f"   stdout: {result.stdout.strip()}")
             if result.stderr:
                 print(f"   stderr: {result.stderr.strip()}")
             
-            # Give camera a moment to finish writing
-            time.sleep(0.5)
-            
-            # Check result - gphoto2 returns 0 on success OR if image is on camera SD
-            # Some cameras return non-zero but still capture successfully
-            # Check if output indicates success
-            success = False
+            # Check if capture succeeded
             if result.returncode == 0:
-                success = True
-            elif result.stdout and ("New file is" in result.stdout or "Saving file as" in result.stdout):
-                # Image was saved even if return code is non-zero
-                print("   ⚠ Non-zero return code but image was captured successfully")
-                success = True
-            elif result.stderr and "error" not in result.stderr.lower():
-                # No actual error in stderr, might be a warning
-                print("   ⚠ Non-zero return code but no error detected, assuming success")
-                success = True
-            
-            # Check result
-            if success:
                 # Success!
                 self.frame_count += 1
                 self.frames_in_strip += 1
                 self.frame_positions.append(self.position)
                 self.save_state()
-                print(f"✓ Successfully captured frame #{self.frame_count}")
-                print(f"   (Strip {self.strip_count}, Frame {self.frames_in_strip} in strip)")
+                print(f"✓ Captured frame #{self.frame_count} (Strip {self.strip_count})")
                 return True
-                
             else:
-                # Capture failed - analyze error
-                print(f"✗ Capture failed")
-                print(f"   Return code: {result.returncode}")
+                # Failed - provide helpful error messages
+                print(f"✗ Capture failed (return code: {result.returncode})")
                 
-                if result.stdout:
-                    print(f"   Output: {result.stdout.strip()}")
-                
+                # Check if it's a process conflict error (retry once if so)
                 if result.stderr:
                     error_msg = result.stderr.strip()
-                    print(f"   Error: {error_msg}")
                     
-                    # Check for actual errors vs warnings
-                    if "error" in error_msg.lower():
-                        # Provide specific guidance for actual errors
-                        if "PTP" in error_msg:
-                            print("   → Fix: Set camera USB mode to PTP (not Mass Storage)")
-                        elif "claim" in error_msg.lower() or "busy" in error_msg.lower():
-                            print("   → Fix: Camera is locked by another process")
-                            print("   → Run: sudo killall gphoto2 gvfs-gphoto2-volume-monitor")
-                        elif "not found" in error_msg.lower() or "detect" in error_msg.lower():
-                            print("   → Fix: Camera not detected - check connection")
-                        elif "card" in error_msg.lower() or "full" in error_msg.lower():
-                            print("   → Check camera has SD card with free space")
-                        
-                        # Retry once on transient errors
-                        if retry and ("busy" in error_msg.lower() or "claim" in error_msg.lower()):
-                            print("   ↻ Retrying after cleaning up processes...")
-                            time.sleep(1)
-                            return self.capture_image(retry=False)
-                    else:
-                        # Might just be a warning
-                        print("   → This might be just a warning, check if image was captured on camera")
+                    if retry and ("claim" in error_msg.lower() or "busy" in error_msg.lower() or "lock" in error_msg.lower()):
+                        print("   → Camera locked by another process, cleaning up and retrying...")
+                        self._kill_gphoto2()
+                        time.sleep(1)
+                        return self.capture_image(retry=False)
+                    
+                    # Provide specific guidance
+                    if "PTP" in error_msg or "not found" in error_msg.lower():
+                        print("   → Check: Camera USB mode is PTP, camera is on, cable connected")
+                    elif "card" in error_msg.lower() or "space" in error_msg.lower():
+                        print("   → Check: SD card is inserted and has free space")
                 
                 return False
             
         except subprocess.TimeoutExpired:
-            print("✗ Capture timeout - camera not responding (30s)")
-            print("   → Camera may be in sleep mode or disconnected")
-            print("   → Check camera screen is on")
+            print("✗ Capture timeout (60s) - camera may be in sleep mode")
             self._kill_gphoto2()
             return False
             
         except Exception as e:
-            print(f"✗ Unexpected capture error: {e}")
+            print(f"✗ Capture error: {e}")
             self._kill_gphoto2()
             return False
     
@@ -871,7 +869,7 @@ def new_strip():
 
 @app.route('/api/get_preview', methods=['POST'])
 def get_preview():
-    """Get camera live preview - Canon R100 with viewfinder enabled"""
+    """Get live preview from camera - Canon R100 requires viewfinder enabled first"""
     if not scanner.check_camera():
         return jsonify({
             'success': False,
@@ -879,7 +877,7 @@ def get_preview():
             'error': scanner.camera_error
         })
     
-    scanner.status_msg = "Getting preview..."
+    scanner.status_msg = "Getting live preview..."
     scanner.broadcast_status()
     
     # Create temp directory
@@ -892,22 +890,23 @@ def get_preview():
         time.sleep(0.5)
         
         # CRITICAL: Enable viewfinder first (Canon R100 requirement)
-        if not scanner.viewfinder_enabled:
-            print("   Enabling viewfinder for live preview...")
-            if not scanner.enable_viewfinder():
-                print("✗ Failed to enable viewfinder")
-                scanner.status_msg = "✗ Cannot enable viewfinder"
-                scanner.broadcast_status()
-                return jsonify({
-                    'success': False,
-                    'message': 'Failed to enable viewfinder. Camera may not support it.'
-                })
+        # Per r100-liveview-testing.md: viewfinder MUST be enabled for --capture-preview to work
+        print("   Step 1: Enabling viewfinder...")
+        if not scanner.enable_viewfinder():
+            print("✗ Failed to enable viewfinder")
+            scanner.status_msg = "✗ Cannot enable viewfinder"
+            scanner.broadcast_status()
+            return jsonify({
+                'success': False,
+                'message': 'Failed to enable viewfinder. Required for live preview.'
+            })
         
         # Change to temp directory
         os.chdir(temp_dir)
         print(f"   Working directory: {temp_dir}")
         
-        # Capture preview with viewfinder enabled
+        # Step 2: Capture preview with viewfinder enabled
+        print("   Step 2: Capturing preview (viewfinder enabled)...")
         print("   Running: gphoto2 --capture-preview --force-overwrite")
         result = subprocess.run(
             ["gphoto2", "--capture-preview", "--force-overwrite"],
@@ -940,14 +939,13 @@ def get_preview():
             
             if not preview_files:
                 print("✗ No preview file created")
-                print("   → Viewfinder may need to be enabled manually on camera")
+                print("   → This shouldn't happen if viewfinder was enabled")
                 print("   → Check camera is in PTP mode")
-                print("   → Try: gphoto2 --get-config viewfinder")
                 scanner.status_msg = "✗ No preview file"
                 scanner.broadcast_status()
                 return jsonify({
                     'success': False,
-                    'message': 'No preview file created. Check camera settings.'
+                    'message': 'No preview file created despite viewfinder being enabled.'
                 })
             
             preview_path = os.path.join(temp_dir, preview_files[0])
@@ -1034,48 +1032,6 @@ def get_preview():
         except:
             pass
 
-@app.route('/api/start_preview_session', methods=['POST'])
-def start_preview_session():
-    """Start live preview session (enables viewfinder for continuous preview)"""
-    if not scanner.check_camera():
-        return jsonify({
-            'success': False,
-            'message': 'Camera not connected',
-            'error': scanner.camera_error
-        })
-    
-    if scanner.viewfinder_enabled:
-        return jsonify({'success': True, 'message': 'Preview session already active'})
-    
-    scanner.status_msg = "Starting preview session..."
-    scanner.broadcast_status()
-    
-    if scanner.enable_viewfinder():
-        scanner.status_msg = "✓ Preview session active"
-        scanner.broadcast_status()
-        return jsonify({'success': True})
-    else:
-        scanner.status_msg = "✗ Failed to start preview"
-        scanner.broadcast_status()
-        return jsonify({'success': False, 'message': 'Failed to enable viewfinder'})
-
-@app.route('/api/stop_preview_session', methods=['POST'])
-def stop_preview_session():
-    """Stop live preview session (disables viewfinder to save battery)"""
-    if not scanner.viewfinder_enabled:
-        return jsonify({'success': True, 'message': 'No preview session active'})
-    
-    scanner.status_msg = "Stopping preview session..."
-    scanner.broadcast_status()
-    
-    if scanner.disable_viewfinder():
-        scanner.status_msg = "✓ Preview session stopped"
-        scanner.broadcast_status()
-        return jsonify({'success': True})
-    else:
-        scanner.status_msg = "✗ Failed to stop preview"
-        scanner.broadcast_status()
-        return jsonify({'success': False, 'message': 'Failed to disable viewfinder'})
 
 @app.route('/api/update_step_sizes', methods=['POST'])
 def update_step_sizes():
