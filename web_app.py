@@ -17,6 +17,8 @@ import json
 import threading
 import base64
 import tempfile
+import shutil
+import traceback
 from config_manager import ConfigManager
 
 app = Flask(__name__)
@@ -330,27 +332,48 @@ class FilmScanner:
         try:
             print("📷 Starting capture sequence...")
             self._kill_gphoto2()
+            time.sleep(0.5)  # Give camera time to fully release
             
             # Step 1: Try autofocus (non-blocking if fails)
             print("   [1/2] Attempting autofocus...")
-            af_result = subprocess.run(
-                ["gphoto2", "--set-config", "autofocus=1"],
-                capture_output=True, timeout=10, text=True
-            )
-            
-            if af_result.returncode == 0:
-                print("   ✓ Autofocus successful")
-                time.sleep(2.0)  # Give camera time to focus
-            else:
-                print("   ⚠ Autofocus not available (continuing with current focus)")
-                time.sleep(0.5)
+            try:
+                af_result = subprocess.run(
+                    ["gphoto2", "--set-config", "autofocusdrive=1"],
+                    capture_output=True, timeout=10, text=True
+                )
+                
+                if af_result.returncode == 0:
+                    print("   ✓ Autofocus successful")
+                    time.sleep(1.5)  # Give camera time to focus
+                else:
+                    # Try alternative autofocus method
+                    print("   ⚠ Trying alternative autofocus...")
+                    af_result2 = subprocess.run(
+                        ["gphoto2", "--set-config", "autofocus=1"],
+                        capture_output=True, timeout=10, text=True
+                    )
+                    if af_result2.returncode == 0:
+                        print("   ✓ Alternative autofocus successful")
+                        time.sleep(1.5)
+                    else:
+                        print("   ⚠ Autofocus not available (continuing with manual focus)")
+                        time.sleep(0.3)
+            except Exception as e:
+                print(f"   ⚠ Autofocus error: {e}")
+                time.sleep(0.3)
             
             # Step 2: Capture image
-            print("   [2/2] Capturing image...")
+            print("   [2/2] Capturing image to camera SD card...")
             result = subprocess.run(
                 ["gphoto2", "--capture-image"],
                 capture_output=True, timeout=30, text=True
             )
+            
+            print(f"   Return code: {result.returncode}")
+            if result.stdout:
+                print(f"   stdout: {result.stdout[:200]}")
+            if result.stderr:
+                print(f"   stderr: {result.stderr[:200]}")
             
             # Check result
             if result.returncode == 0:
@@ -783,7 +806,7 @@ def new_strip():
 
 @app.route('/api/get_preview', methods=['POST'])
 def get_preview():
-    """Get camera preview image - optimized for Canon cameras"""
+    """Get camera preview image - Canon camera compatible"""
     if not scanner.check_camera():
         return jsonify({
             'success': False,
@@ -794,71 +817,99 @@ def get_preview():
     scanner.status_msg = "Getting preview..."
     scanner.broadcast_status()
     
+    # Create temp directory for preview
+    temp_dir = tempfile.mkdtemp()
+    preview_file = os.path.join(temp_dir, 'preview.jpg')
+    
     try:
         print("\n📷 Capturing preview image...")
         scanner._kill_gphoto2()
-        time.sleep(0.3)  # Let gphoto2 fully release
+        time.sleep(0.5)  # Longer delay for camera to fully release
         
-        # Capture preview to temp file
-        # Use --force-overwrite to handle Canon camera quirks
-        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
-            tmp_path = tmp.name
+        # Change to temp directory and capture there
+        # Canon cameras work better when capturing to current directory
+        original_dir = os.getcwd()
+        os.chdir(temp_dir)
         
-        # For Canon cameras, use --force-overwrite and longer timeout
-        result = subprocess.run(
-            ["gphoto2", "--capture-preview", "--force-overwrite", "--filename", tmp_path],
-            capture_output=True, timeout=20, text=True
-        )
+        try:
+            # Capture preview without specifying filename (Canon quirk)
+            # It will save as capt0000.jpg or similar
+            print("   Running: gphoto2 --capture-preview")
+            result = subprocess.run(
+                ["gphoto2", "--capture-preview"],
+                capture_output=True,
+                timeout=25,
+                text=True,
+                cwd=temp_dir
+            )
+            
+            print(f"   Return code: {result.returncode}")
+            if result.stdout:
+                print(f"   stdout: {result.stdout[:200]}")
+            if result.stderr:
+                print(f"   stderr: {result.stderr[:200]}")
+            
+        finally:
+            os.chdir(original_dir)
         
-        if result.returncode == 0 and os.path.exists(tmp_path):
-            # Check file size (Canon sometimes creates empty or corrupt files)
-            file_size = os.path.getsize(tmp_path)
-            print(f"   Preview file size: {file_size} bytes")
-            
-            if file_size < 1000:
-                # File too small, likely corrupt
-                os.unlink(tmp_path)
-                print(f"✗ Preview file too small ({file_size} bytes) - likely corrupt")
-                scanner.status_msg = "✗ Preview failed (corrupt file)"
-                scanner.broadcast_status()
-                return jsonify({'success': False, 'message': 'Preview file corrupt or too small'})
-            
-            # Read and encode image
-            with open(tmp_path, 'rb') as f:
-                image_data = base64.b64encode(f.read()).decode('utf-8')
-            
-            # Clean up temp file
-            os.unlink(tmp_path)
-            
-            scanner.status_msg = "✓ Preview captured"
+        # Find the preview file (Canon saves with various names)
+        preview_files = []
+        for f in os.listdir(temp_dir):
+            if f.lower().endswith(('.jpg', '.jpeg')):
+                preview_files.append(os.path.join(temp_dir, f))
+        
+        if not preview_files:
+            print("✗ No preview file created")
+            print(f"   Files in temp dir: {os.listdir(temp_dir)}")
+            scanner.status_msg = "✗ Preview failed (no file created)"
             scanner.broadcast_status()
             
-            print(f"✓ Preview captured successfully ({file_size} bytes)")
-            return jsonify({'success': True, 'image': image_data})
-        else:
-            # Clean up temp file if it exists
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-            
-            error_msg = result.stderr.strip() if result.stderr else 'Unknown error'
-            print(f"✗ Preview capture failed: {error_msg}")
-            scanner.status_msg = "✗ Preview failed"
+            # Include stderr in error message
+            error_detail = result.stderr.strip() if result.stderr else 'No preview file generated'
+            return jsonify({'success': False, 'message': error_detail})
+        
+        # Use the first preview file found
+        preview_path = preview_files[0]
+        file_size = os.path.getsize(preview_path)
+        print(f"   Found preview: {os.path.basename(preview_path)} ({file_size} bytes)")
+        
+        # Check file size
+        if file_size < 1000:
+            print(f"✗ Preview file too small ({file_size} bytes)")
+            scanner.status_msg = "✗ Preview failed (file too small)"
             scanner.broadcast_status()
-            
-            return jsonify({'success': False, 'message': error_msg})
-            
+            return jsonify({'success': False, 'message': f'Preview file too small: {file_size} bytes'})
+        
+        # Read and encode image
+        with open(preview_path, 'rb') as f:
+            image_data = base64.b64encode(f.read()).decode('utf-8')
+        
+        scanner.status_msg = "✓ Preview captured"
+        scanner.broadcast_status()
+        
+        print(f"✓ Preview captured successfully ({file_size} bytes, {len(image_data)} base64 chars)")
+        return jsonify({'success': True, 'image': image_data})
+        
     except subprocess.TimeoutExpired:
-        print("✗ Preview timeout (20s)")
+        print("✗ Preview timeout (25s)")
         scanner._kill_gphoto2()
         scanner.status_msg = "✗ Preview timeout"
         scanner.broadcast_status()
-        return jsonify({'success': False, 'message': 'Preview timeout'})
+        return jsonify({'success': False, 'message': 'Preview timeout - camera not responding'})
         
     except Exception as e:
         print(f"✗ Preview error: {e}")
+        traceback.print_exc()
         scanner.status_msg = f"✗ Preview error"
         scanner.broadcast_status()
         return jsonify({'success': False, 'message': str(e)})
+        
+    finally:
+        # Clean up temp directory
+        try:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        except:
+            pass
 
 @app.route('/api/update_step_sizes', methods=['POST'])
 def update_step_sizes():
