@@ -2,12 +2,8 @@
 """
 35mm Film Scanner - Web Application
 Mobile-friendly web interface for film scanning
-
-Supports:
-- Arduino Uno R3 (ATmega328P with ATmega16U2 USB bridge)
-- Arduino Uno R4 Minima (Renesas RA4M1 with native USB)
-- Arduino Uno R4 WiFi (Renesas RA4M1 with ESP32-S3)
 """
+
 from flask import Flask, render_template, request, jsonify
 from flask_socketio import SocketIO, emit
 import serial
@@ -23,7 +19,6 @@ import base64
 import tempfile
 import shutil
 import traceback
-import re
 from config_manager import ConfigManager
 try:
     from PIL import Image, ImageOps
@@ -32,31 +27,14 @@ except ImportError:
     PIL_AVAILABLE = False
     print("⚠ PIL/Pillow not available - image preview will be limited")
 
-# Arduino USB Vendor/Product IDs for automatic detection
-ARDUINO_USB_IDS = {
-    # Arduino Uno R3 and compatible
-    (0x2341, 0x0043): "Arduino Uno R3",
-    (0x2341, 0x0001): "Arduino Uno R3",
-    (0x2A03, 0x0043): "Arduino Uno R3 (Clone)",
-    # Arduino Uno R4 Minima
-    (0x2341, 0x0069): "Arduino Uno R4 Minima",
-    (0x2341, 0x0369): "Arduino Uno R4 Minima (Bootloader)",
-    # Arduino Uno R4 WiFi
-    (0x2341, 0x1002): "Arduino Uno R4 WiFi",
-    (0x2341, 0x006D): "Arduino Uno R4 WiFi",
-    # Generic CH340 (common clone chip)
-    (0x1A86, 0x7523): "Arduino Clone (CH340)",
-    # FTDI (used in some boards)
-    (0x0403, 0x6001): "Arduino Compatible (FTDI)",
-}
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'film-scanner-secret-key'
 socketio = SocketIO(app, cors_allowed_origins="*")
+
 class FilmScanner:
     def __init__(self):
         self.arduino = None
         self.arduino_port = None
-        self.arduino_board = "Unknown"  # Track board type (R3/R4)
         self.roll_name = ""
         self.roll_folder = ""
         self.frame_count = 0
@@ -92,36 +70,8 @@ class FilmScanner:
         # Lock for thread safety
         self.lock = threading.Lock()
     
-        # Lock to prevent gphoto2 conflicts across routes
-        self.camera_op_lock = threading.Lock()
-    
-    def identify_arduino_board(self, port_info):
-        """Identify Arduino board type from USB port info"""
-        try:
-            vid = port_info.vid
-            pid = port_info.pid
-            
-            if vid and pid:
-                board_name = ARDUINO_USB_IDS.get((vid, pid))
-                if board_name:
-                    return board_name
-                
-                # Check for Arduino vendor ID
-                if vid == 0x2341:
-                    return "Arduino (Unknown Model)"
-            
-            # Fallback to description parsing
-            desc = getattr(port_info, 'description', '') or ''
-            if 'R4' in desc.upper():
-                return "Arduino Uno R4"
-            elif 'UNO' in desc.upper():
-                return "Arduino Uno"
-            
-            return None
-        except Exception:
-            return None
     def find_arduino(self):
-        """Find Arduino on available ports (supports R3 and R4)"""
+        """Find Arduino on available ports"""
         # Close existing connection if any
         if self.arduino:
             try:
@@ -129,106 +79,52 @@ class FilmScanner:
             except:
                 pass
             self.arduino = None
-            self.arduino_board = "Unknown"
         
         ports = list(serial.tools.list_ports.comports())
         
-        # Add Raspberry Pi serial ports if they exist
-        pi_ports = ['/dev/ttyACM0', '/dev/ttyACM1', '/dev/ttyUSB0', '/dev/ttyUSB1', 
-                    '/dev/serial0', '/dev/ttyAMA0']
+        pi_ports = ['/dev/ttyACM0', '/dev/ttyUSB0', '/dev/serial0', '/dev/ttyAMA0']
         for port_path in pi_ports:
             if os.path.exists(port_path):
-                # Check if this port is already in the list
-                existing = [p for p in ports if hasattr(p, 'device') and p.device == port_path]
-                if not existing:
-                    class SimplePort:
-                        def __init__(self, device):
-                            self.device = device
-                            self.vid = None
-                            self.pid = None
-                            self.description = "Serial Port"
-                    ports.append(SimplePort(port_path))
-        
-        # Sort ports to prioritize known Arduino ports
-        def port_priority(p):
-            board = self.identify_arduino_board(p) if hasattr(p, 'vid') else None
-            if board:
-                return 0  # Known Arduino boards first
-            device = getattr(p, 'device', str(p))
-            if 'ACM' in device or 'USB' in device:
-                return 1  # Common Arduino ports
-            return 2  # Other ports
-        
-        ports = sorted(ports, key=port_priority)
-        
-        print("🔍 Scanning for Arduino boards...")
+                class SimplePort:
+                    def __init__(self, device):
+                        self.device = device
+                ports.append(SimplePort(port_path))
         
         for port in ports:
             device = port.device if hasattr(port, 'device') else str(port)
-            board_id = self.identify_arduino_board(port) if hasattr(port, 'vid') else None
-            
-            if board_id:
-                print(f"   Found: {board_id} on {device}")
             
             try:
-                # Open serial connection
                 ser = serial.Serial(device, 115200, timeout=3)
-                
-                # Wait for Arduino to reset after connection
-                # R4 native USB may need longer initialization
-                is_r4 = board_id and 'R4' in board_id
-                reset_delay = 3.0 if is_r4 else 2.5
-                time.sleep(reset_delay)
+                time.sleep(2.5)  # Give Arduino time to reset after connection
                 
                 # Clear any startup messages
                 ser.reset_input_buffer()
                 time.sleep(0.1)
                 
-                # Send status query
                 ser.write(b'?\n')
-                time.sleep(0.5)  # R4 may need slightly longer response time
-                response = ser.read(500).decode('ascii', errors='ignore')
+                time.sleep(0.3)
+                response = ser.read(200).decode('ascii', errors='ignore')
                 
-                # Check for valid Film Scanner firmware response
                 if 'Film' in response or 'READY' in response or 'Position' in response:
                     self.arduino = ser
                     self.arduino_port = device
-                    
-                    # Determine board type from response
-                    if 'UNO R4' in response or 'R4' in response:
-                        self.arduino_board = "Arduino Uno R4"
-                    elif 'UNO R3' in response or 'R3' in response:
-                        self.arduino_board = "Arduino Uno R3"
-                    elif board_id:
-                        self.arduino_board = board_id
-                    else:
-                        self.arduino_board = "Arduino Compatible"
                     
                     # Configure coarse step size
                     time.sleep(0.1)
                     self.arduino.write(f'l{self.coarse_step}\n'.encode())
                     time.sleep(0.1)
                     
-                    print(f"✓ Connected: {self.arduino_board} on {device}")
+                    print(f"✓ Arduino connected on {device}")
                     self.broadcast_status()
                     return True
                 
                 ser.close()
-            except serial.SerialException as e:
-                # Port busy or access denied
-                if 'PermissionError' in str(e) or 'Access' in str(e):
-                    print(f"   ⚠ Port {device} in use by another application")
-                else:
-                    print(f"   ✗ {device}: {e}")
-                continue
             except Exception as e:
-                print(f"   ✗ {device}: {e}")
+                print(f"✗ Failed to connect to {device}: {e}")
                 continue
         
-        print("✗ No Arduino found with Film Scanner firmware")
         self.arduino = None
         self.arduino_port = None
-        self.arduino_board = "Unknown"
         return False
     
     def verify_connection(self):
@@ -332,30 +228,55 @@ class FilmScanner:
             return False
     
     def check_camera(self):
-        """Check if camera is connected without killing gphoto2 or interrupting ops"""
+        """Check camera connection"""
+        # Check for gphoto2 USB camera
+        current_time = time.time()
+        if current_time - self.last_camera_check < 5:
+            return self.camera_connected
+        
+        self.last_camera_check = current_time
+        self.camera_error = None
+        
         try:
-            # If another camera operation is in progress (preview/capture), don't interrupt it.
-            if self.camera_op_lock.locked():
-                return self.camera_connected
-            # Passive detect; no kill here.
+            self._kill_gphoto2()
+            
             result = subprocess.run(
                 ["gphoto2", "--auto-detect"],
                 capture_output=True, timeout=10, text=True
             )
+            
             if result.returncode == 0 and "usb" in result.stdout.lower():
-                lines = result.stdout.strip().splitlines()
-                for line in lines:
-                    if "usb:" in line.lower():
+                lines = result.stdout.strip().split('\n')
+                for line in lines[2:]:
+                    if 'usb' in line.lower():
+                        self.camera_model = line.split('usb')[0].strip()
                         self.camera_connected = True
-                        self.camera_name = line.strip()
-                        print(f"✓ Camera detected: {self.camera_name}")
-                        break
-            else:
-                self.camera_connected = False
+                        self.camera_type = 'gphoto2'
+                        print(f"✓ Camera detected: {self.camera_model}")
+                        return True
+            
+            self.camera_connected = False
+            self.camera_model = "Not detected"
+            self.camera_error = "No camera found on USB. Check connection and USB mode (PTP)."
+            print(f"✗ {self.camera_error}")
+            if result.stderr:
+                print(f"   Details: {result.stderr.strip()}")
+            return False
+            
+        except subprocess.TimeoutExpired:
+            self.camera_connected = False
+            self.camera_model = "Check timeout"
+            self.camera_error = "Camera detection timed out"
+            print(f"✗ {self.camera_error}")
+            return False
+            
         except Exception as e:
-            print(f"✗ Error checking camera: {e}")
-            # Don't change state on exception
-        return self.camera_connected
+            self.camera_connected = False
+            self.camera_model = "Check failed"
+            self.camera_error = str(e)
+            print(f"✗ Camera check failed: {e}")
+            return False
+    
     def _kill_gphoto2(self):
         """Thoroughly kill any gphoto2 processes and wait for USB release"""
         try:
@@ -425,22 +346,30 @@ class FilmScanner:
             return False
     
     def check_viewfinder_state(self):
-        """Query viewfinder state without killing other gphoto2 ops"""
+        """Check if viewfinder is already enabled on camera"""
         try:
+            self._kill_gphoto2()
+            
             result = subprocess.run(
                 ["gphoto2", "--get-config", "viewfinder"],
-                capture_output=True, timeout=10, text=True
+                capture_output=True, timeout=5, text=True
             )
-            if result.returncode == 0 and result.stdout:
-                if "Current: 1" in result.stdout or "Current: On" in result.stdout:
-                    self.viewfinder_enabled = True
-                elif "Current: 0" in result.stdout or "Current: Off" in result.stdout:
-                    self.viewfinder_enabled = False
-            elif result.stderr:
-                print(f"viewfinder query stderr: {result.stderr.strip()}")
+            
+            if result.returncode == 0 and "Current:" in result.stdout:
+                # Parse current value
+                for line in result.stdout.split('\n'):
+                    if line.strip().startswith("Current:"):
+                        current_val = line.split(':')[1].strip()
+                        is_enabled = ('1' in current_val)
+                        print(f"   Viewfinder current state: {current_val} ({'enabled' if is_enabled else 'disabled'})")
+                        self.viewfinder_enabled = is_enabled
+                        return is_enabled
+            
+            return False
         except Exception as e:
-            print(f"✗ Error checking viewfinder: {e}")
-        return self.viewfinder_enabled
+            print(f"   ⚠ Could not check viewfinder state: {e}")
+            return False
+    
     def enable_viewfinder(self):
         """Enable camera viewfinder - REQUIRED for live preview on Canon R100"""
         try:
@@ -507,49 +436,70 @@ class FilmScanner:
             return False
     
     def capture_image(self, retry=True):
-        """Capture image to camera SD card with exclusive access"""
+        """Capture image to camera SD card - simple and clean like SSH command"""
         try:
-            # Ensure exclusive access
-            self.camera_op_lock.acquire()
-            # Clean any stray gphoto2 from previous ops
+            print("📷 Capturing image...")
+            
+            # MUST kill any existing gphoto2 processes first (prevents -9 errors)
             self._kill_gphoto2()
-            print("\n📷 Capturing image...")
+            time.sleep(1.0)  # Give USB time to release (needs full second)
+            
+            print("   Running: gphoto2 --capture-image")
+            
             result = subprocess.run(
                 ["gphoto2", "--capture-image"],
-                capture_output=True, timeout=30, text=True
+                capture_output=True,
+                text=True,
+                timeout=60  # 60 second timeout for long exposures
             )
+            
             print(f"   Return code: {result.returncode}")
             if result.stdout:
                 print(f"   stdout: {result.stdout.strip()}")
             if result.stderr:
                 print(f"   stderr: {result.stderr.strip()}")
-            # Success detection: allow some transient non-zero errors if shutter likely fired
-            success_code = (result.returncode == 0)
-            non_fatal = False
-            if not success_code and result.stderr:
-                low = result.stderr.lower()
-                non_fatal = any(k in low for k in ["ptp i/o error", "device busy", "resource busy", "usb device reset", "i/o in progress"])
-            if success_code or non_fatal:
-                print("✓ Capture triggered")
+            
+            # Check if capture succeeded
+            if result.returncode == 0:
+                # Success!
+                self.frame_count += 1
+                self.frames_in_strip += 1
+                self.frame_positions.append(self.position)
+                self.save_state()
+                print(f"✓ Captured frame #{self.frame_count} (Strip {self.strip_count})")
                 return True
-            # If failed and retry is allowed, try once more after a short reset
-            if retry:
-                print("↻ Retry capture after resetting gphoto2...")
-                self._kill_gphoto2()
-                time.sleep(0.5)
-                return self.capture_image(retry=False)
-            print("✗ Capture failed")
+            else:
+                # Failed - provide helpful error messages
+                print(f"✗ Capture failed (return code: {result.returncode})")
+                
+                # Check if it's a process conflict error (retry once if so)
+                if result.stderr:
+                    error_msg = result.stderr.strip()
+                    
+                    if retry and ("claim" in error_msg.lower() or "busy" in error_msg.lower() or "lock" in error_msg.lower()):
+                        print("   → Camera locked by another process, cleaning up and retrying...")
+                        self._kill_gphoto2()
+                        time.sleep(1)
+                        return self.capture_image(retry=False)
+                    
+                    # Provide specific guidance
+                    if "PTP" in error_msg or "not found" in error_msg.lower():
+                        print("   → Check: Camera USB mode is PTP, camera is on, cable connected")
+                    elif "card" in error_msg.lower() or "space" in error_msg.lower():
+                        print("   → Check: SD card is inserted and has free space")
+                
+                return False
+            
+        except subprocess.TimeoutExpired:
+            print("✗ Capture timeout (60s) - camera may be in sleep mode")
+            self._kill_gphoto2()
             return False
+            
         except Exception as e:
             print(f"✗ Capture error: {e}")
             self._kill_gphoto2()
             return False
-        finally:
-            if self.camera_op_lock.locked():
-                try:
-                    self.camera_op_lock.release()
-                except RuntimeError:
-                    pass
+    
     def save_state(self):
         """Save scanning state"""
         if not self.state_file:
@@ -604,9 +554,7 @@ class FilmScanner:
     def backup_frame(self):
         """Backup one full frame using calibrated distance"""
         if self.frame_advance:
-            # Use 'h' command for backward movement (lowercase = reverse direction)
-            # Note: 'H' only accepts positive values; 'h' moves backward with positive value
-            success = self.send(f'h{self.frame_advance}')
+            success = self.send(f'H-{self.frame_advance}')
             if success:
                 self.status_msg = f"Backed up {self.frame_advance} steps"
                 return True
@@ -631,9 +579,7 @@ class FilmScanner:
             'camera_error': self.camera_error,
             'viewfinder_enabled': self.viewfinder_enabled,
             'status_msg': self.status_msg,
-            'arduino_connected': self.arduino is not None,
-            'arduino_port': self.arduino_port,
-            'arduino_board': self.arduino_board
+            'arduino_connected': self.arduino is not None
         }
         
         return status
@@ -641,23 +587,28 @@ class FilmScanner:
     def broadcast_status(self):
         """Broadcast status to all connected clients"""
         socketio.emit('status_update', self.get_status())
+
 # Global scanner instance
 scanner = FilmScanner()
+
 # Routes
 @app.route('/')
 def index():
     """Main page"""
     return render_template('index.html')
+
 @app.route('/api/status')
 def get_status():
     """Get current status"""
     return jsonify(scanner.get_status())
+
 @app.route('/api/connect_arduino', methods=['POST'])
 def connect_arduino():
     """Connect to Arduino"""
     success = scanner.find_arduino()
     scanner.broadcast_status()
     return jsonify({'success': success})
+
 @app.route('/api/new_roll', methods=['POST'])
 def new_roll():
     """Create new roll"""
@@ -691,6 +642,7 @@ def new_roll():
     scanner.broadcast_status()
     
     return jsonify({'success': True})
+
 @app.route('/api/move', methods=['POST'])
 def move():
     """Move motor - optimized for quick response"""
@@ -722,18 +674,21 @@ def move():
     # Status will be updated by periodic polling
     
     return jsonify({'success': success, 'position': scanner.position})
+
 @app.route('/api/advance_frame', methods=['POST'])
 def advance_frame():
     """Advance one frame"""
     success = scanner.advance_frame()
     scanner.broadcast_status()
     return jsonify({'success': success})
+
 @app.route('/api/backup_frame', methods=['POST'])
 def backup_frame():
     """Backup one frame"""
     success = scanner.backup_frame()
     scanner.broadcast_status()
     return jsonify({'success': success})
+
 @app.route('/api/toggle_mode', methods=['POST'])
 def toggle_mode():
     """Toggle mode"""
@@ -742,6 +697,7 @@ def toggle_mode():
     scanner.save_state()
     scanner.broadcast_status()
     return jsonify({'success': True})
+
 @app.route('/api/toggle_auto_advance', methods=['POST'])
 def toggle_auto_advance():
     """Toggle auto advance"""
@@ -753,6 +709,7 @@ def toggle_auto_advance():
         scanner.status_msg = "Auto-advance only in calibrated mode"
     scanner.broadcast_status()
     return jsonify({'success': True})
+
 @app.route('/api/zero_position', methods=['POST'])
 def zero_position():
     """Zero position"""
@@ -765,8 +722,10 @@ def zero_position():
         scanner.status_msg = "❌ Zero failed - Check Arduino"
     scanner.broadcast_status()
     return jsonify({'success': success})
+
 # Autofocus button removed - autofocus is now only used internally during capture
 # The autofocus() method is kept for internal use in capture_image()
+
 @app.route('/api/test_capture', methods=['POST'])
 def test_capture():
     """Test camera capture without saving to roll (for debugging)"""
@@ -819,6 +778,7 @@ def test_capture():
         scanner.status_msg = f"✗ Test error: {str(e)}"
         scanner.broadcast_status()
         return jsonify({'success': False, 'message': str(e)})
+
 @app.route('/api/capture', methods=['POST'])
 def capture():
     """Capture image"""
@@ -828,6 +788,13 @@ def capture():
     if not scanner.check_camera():
         return jsonify({'success': False, 'message': 'Camera not connected'})
     
+    # Auto-advance before capture (for frames 2+)
+    if scanner.mode == 'calibrated' and scanner.auto_advance and scanner.frames_in_strip > 0:
+        if scanner.frame_advance:
+            if not scanner.send(f'H{scanner.frame_advance}'):
+                return jsonify({'success': False, 'message': 'Auto-advance failed - Check Arduino'})
+            time.sleep(0.5)
+    
     scanner.status_msg = "Capturing..."
     scanner.broadcast_status()
     
@@ -835,20 +802,12 @@ def capture():
     
     if success:
         scanner.status_msg = f"✓ Frame {scanner.frame_count} (Strip {scanner.strip_count})"
-        
-        # Auto-advance AFTER capture (for calibrated mode)
-        # Advances to next frame position so user is ready for next capture
-        if scanner.mode == 'calibrated' and scanner.auto_advance and scanner.frame_advance:
-            time.sleep(0.3)  # Brief pause before advancing
-            if scanner.send(f'H{scanner.frame_advance}'):
-                scanner.status_msg = f"✓ Frame {scanner.frame_count} → Ready for next"
-            else:
-                scanner.status_msg = f"✓ Frame {scanner.frame_count} (advance failed)"
     else:
         scanner.status_msg = "❌ Capture failed!"
     
     scanner.broadcast_status()
     return jsonify({'success': success})
+
 @app.route('/api/calibrate', methods=['POST'])
 def calibrate():
     """Start or continue calibration"""
@@ -887,6 +846,7 @@ def calibrate():
         return jsonify({'success': True, 'frame_advance': scanner.frame_advance})
     
     return jsonify({'success': True})
+
 @app.route('/api/new_strip', methods=['POST'])
 def new_strip():
     """Start new strip"""
@@ -914,6 +874,7 @@ def new_strip():
     # Reset strip frame count
     scanner.frames_in_strip = 0
     return jsonify({'success': True})
+
 @app.route('/api/get_preview', methods=['POST'])
 def get_preview():
     """Get live preview from camera - Canon R100 requires viewfinder enabled first"""
@@ -932,8 +893,6 @@ def get_preview():
     original_dir = os.getcwd()
     
     try:
-        # Ensure exclusive access to gphoto2 during preview
-        scanner.camera_op_lock.acquire()
         print("\n📷 Capturing live preview from camera...")
         scanner._kill_gphoto2()
         time.sleep(0.5)
@@ -1078,11 +1037,6 @@ def get_preview():
         return jsonify({'success': False, 'message': str(e)})
         
     finally:
-        if scanner.camera_op_lock.locked():
-            try:
-                scanner.camera_op_lock.release()
-            except RuntimeError:
-                pass
         try:
             os.chdir(original_dir)
         except:
@@ -1091,6 +1045,8 @@ def get_preview():
             shutil.rmtree(temp_dir, ignore_errors=True)
         except:
             pass
+
+
 @app.route('/api/update_step_sizes', methods=['POST'])
 def update_step_sizes():
     """Update motor step sizes"""
@@ -1119,16 +1075,20 @@ def update_step_sizes():
     except Exception as e:
         print(f"✗ Failed to update step sizes: {e}")
         return jsonify({'success': False, 'message': str(e)})
+
+
 # WebSocket events
 @socketio.on('connect')
 def handle_connect():
     """Handle client connection"""
     emit('status_update', scanner.get_status())
+
 @socketio.on('request_status')
 def handle_status_request():
     """Handle status request"""
     scanner.check_camera()
     emit('status_update', scanner.get_status())
+
 if __name__ == '__main__':
     # Handle command line arguments
     import argparse
@@ -1171,13 +1131,11 @@ if __name__ == '__main__':
     print("✓ Process cleanup complete")
     
     # Auto-connect to Arduino on startup
-    print("\n🔌 Searching for Arduino (R3/R4 supported)...")
+    print("\n🔌 Searching for Arduino...")
     if scanner.find_arduino():
-        print(f"✓ Arduino connected: {scanner.arduino_board}")
-        print(f"   Port: {scanner.arduino_port}")
+        print("✓ Arduino connected")
     else:
         print("✗ Arduino not found (you can connect later via the web interface)")
-        print("   Supported boards: Arduino Uno R3, R4 Minima, R4 WiFi")
     
     # Check for camera
     print("\n📷 Camera Setup")
@@ -1201,3 +1159,4 @@ if __name__ == '__main__':
     
     # Run without debug mode to prevent reloads that disrupt Arduino connection
     socketio.run(app, host=host, port=port, debug=False, allow_unsafe_werkzeug=True)
+
