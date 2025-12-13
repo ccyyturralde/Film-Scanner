@@ -6,9 +6,11 @@ Handles first-time setup, IP discovery, and persistent settings
 
 import json
 import os
+import platform
 import socket
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 class ConfigManager:
@@ -76,6 +78,24 @@ class ConfigManager:
         except Exception:
             return "127.0.0.1"
     
+    def _get_ping_command(self, ip, count=1, timeout_sec=1):
+        """Build platform-aware ping command
+        
+        Args:
+            ip: Target IP address
+            count: Number of ping packets
+            timeout_sec: Timeout in seconds
+            
+        Returns:
+            List of command arguments for subprocess
+        """
+        if platform.system().lower() == 'windows':
+            # Windows: -n for count, -w for timeout in milliseconds
+            return ["ping", "-n", str(count), "-w", str(timeout_sec * 1000), ip]
+        else:
+            # Linux/macOS: -c for count, -W for timeout in seconds
+            return ["ping", "-c", str(count), "-W", str(timeout_sec), ip]
+    
     def scan_network_for_pi(self):
         """Scan local network for Raspberry Pi devices"""
         print("\n🔍 Scanning network for Raspberry Pi devices...")
@@ -90,9 +110,9 @@ class ConfigManager:
         for i in range(1, 255):
             ip = f"{network_prefix}.{i}"
             try:
-                # Try to connect with a short timeout
+                # Try to connect with a short timeout (platform-aware ping)
                 result = subprocess.run(
-                    ["ping", "-c", "1", "-W", "1", ip],
+                    self._get_ping_command(ip, count=1, timeout_sec=1),
                     capture_output=True,
                     timeout=2
                 )
@@ -129,7 +149,7 @@ class ConfigManager:
         
         config = {
             'setup_complete': True,
-            'setup_date': str(Path.home())
+            'setup_date': datetime.now().isoformat()
         }
         
         if is_raspberry_pi:
@@ -193,6 +213,7 @@ class ConfigManager:
                 
                 if choice == '2':
                     # Manual entry
+                    manual_success = False
                     while True:
                         pi_ip = input("\nEnter Raspberry Pi IP address: ").strip()
                         
@@ -200,10 +221,10 @@ class ConfigManager:
                         try:
                             socket.inet_aton(pi_ip)
                             
-                            # Try to ping it
+                            # Try to ping it (platform-aware ping)
                             print(f"Testing connection to {pi_ip}...")
                             result = subprocess.run(
-                                ["ping", "-c", "2", "-W", "2", pi_ip],
+                                self._get_ping_command(pi_ip, count=2, timeout_sec=2),
                                 capture_output=True,
                                 timeout=5
                             )
@@ -217,15 +238,22 @@ class ConfigManager:
                                     config['hostname'] = hostname
                                 except:
                                     config['hostname'] = 'unknown'
+                                manual_success = True
                                 break
                             else:
                                 print(f"⚠️  Could not reach {pi_ip}")
                                 retry = input("Try another IP? (y/n): ").strip().lower()
                                 if retry != 'y':
+                                    print("\nReturning to menu...")
                                     break
                         except:
                             print("Invalid IP address format")
-                    break
+                    
+                    # Only exit outer loop if manual entry succeeded
+                    if manual_success:
+                        break
+                    # Otherwise, continue to show menu again
+                    continue
                 
                 elif choice == '3':
                     # Localhost

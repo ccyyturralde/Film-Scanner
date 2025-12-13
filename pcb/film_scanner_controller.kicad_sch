@@ -1,0 +1,74 @@
+(kicad_sch
+  (version 20230121)
+  (generator "eeschema")
+  (generator_version "7.0")
+  (uuid "e63e39d7-6ac0-4ffd-8aa3-1841a4541b3a")
+  (paper "A4")
+  (title_block
+    (title "Film Scanner Motor Controller")
+    (date "2024-12-10")
+    (rev "1.0")
+    (comment 1 "USB-C PD + DC Jack Input")
+    (comment 2 "NEMA 17 Stepper Control via A4988")
+  )
+
+  ;; Power symbols and flags
+  (symbol (lib_id "power:GND") (at 50.8 177.8 0) (unit 1)
+    (in_bom yes) (on_board yes) (dnp no)
+    (uuid "00000001-0001-0001-0001-000000000001")
+    (property "Reference" "#PWR01" (at 50.8 184.15 0) (effects (font (size 1.27 1.27)) hide))
+    (property "Value" "GND" (at 50.8 181.61 0) (effects (font (size 1.27 1.27))))
+  )
+
+  ;; Text notes for schematic sections
+  (text "USB-C POWER DELIVERY INPUT\n========================\nCH224K configured for 12V output\nCFG2 tied to GND via 1K resistor"
+    (at 25.4 25.4 0)
+    (effects (font (size 2.54 2.54)) (justify left))
+  )
+
+  (text "DC BARREL JACK INPUT (BACKUP)\n============================\n5.5x2.1mm center positive\n12V DC supply"
+    (at 25.4 76.2 0)
+    (effects (font (size 2.54 2.54)) (justify left))
+  )
+
+  (text "POWER OR-ING\n============\nSchottky diodes combine\nboth power sources"
+    (at 127 50.8 0)
+    (effects (font (size 2.54 2.54)) (justify left))
+  )
+
+  (text "5V BUCK CONVERTER\n=================\nMP2359 12V to 5V\n1.2A output"
+    (at 203.2 25.4 0)
+    (effects (font (size 2.54 2.54)) (justify left))
+  )
+
+  (text "A4988 DRIVER SOCKET\n===================\n16-pin DIP for Pololu-style\nA4988 or DRV8825 module"
+    (at 25.4 127 0)
+    (effects (font (size 2.54 2.54)) (justify left))
+  )
+
+  (text "MOTOR OUTPUT\n============\n4-pin JST-XH\nto NEMA 17"
+    (at 127 127 0)
+    (effects (font (size 2.54 2.54)) (justify left))
+  )
+
+  (text "ARDUINO INTERFACE\n=================\nSTEP, DIR, EN, GND\nConnect to Arduino D2, D3, D4"
+    (at 203.2 127 0)
+    (effects (font (size 2.54 2.54)) (justify left))
+  )
+
+  (text "STATUS LEDS\n===========\nLED1: 12V OK (Green)\nLED2: 5V OK (Green)\nLED3: PD OK (Blue)\nLED4: Step Activity (Yellow)"
+    (at 203.2 76.2 0)
+    (effects (font (size 2.54 2.54)) (justify left))
+  )
+
+  ;; Main schematic as hierarchical text description
+  ;; (Full schematic symbols would be placed here in actual KiCad file)
+  ;; This is a template - use KiCad to add actual symbols
+
+  (text "=== COMPONENT PLACEMENT GUIDE ===\n\nThis schematic file provides the structure.\nOpen in KiCad and add components from libraries:\n\n1. CH224K - Use generic SOP-10 symbol, rename pins\n2. MP2359 - Available in KiCad default library\n3. USB-C connector - Connector_USB:USB_C_Receptacle_USB2.0\n4. DC Jack - Connector_BarrelJack:BarrelJack_Horizontal\n5. A4988 Socket - Use Connector_PinHeader:PinHeader_2x08_P2.54mm\n6. Passives - Use standard 0603/0805 footprints\n\nSee SCHEMATIC.md for complete wiring details."
+    (at 101.6 203.2 0)
+    (effects (font (size 2.54 2.54)) (justify left))
+  )
+
+)
+

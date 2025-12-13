@@ -1,112 +1,98 @@
-# Film Scanner v2 - Quick Reference Card
+# Film Scanner - Quick Reference
 
-## Essential Controls
+## Web Interface Controls
 
-```
-MOVEMENT
-├── ← →           Fine adjust (8 or 64 steps)
-├── Shift+← →     Full frame back/forward
-└── G             Toggle small/LARGE steps
+### Movement (Arrow Keys or Buttons)
 
-CAPTURE
-├── SPACE         Capture + auto-advance
-├── F             Autofocus
-└── A             Toggle auto-advance ON/OFF
+| Control | Action |
+|---------|--------|
+| ← → | Fine position adjustment |
+| Shift + ← → | Coarse position adjustment |
+| Zero | Reset position counter |
 
-SETUP
-├── N             New roll
-├── C             Calibrate (captures frames 1 & 2)
-└── M             Manual/Calibrated mode
+### Capture
 
-UTILITY
-├── Z             Zero position
-└── Q             Quit
-```
+| Control | Action |
+|---------|--------|
+| SPACE or Capture button | Capture frame |
+| P or Preview button | Get camera preview |
+| Auto-advance toggle | Enable/disable automatic frame advance |
 
 ## Standard Workflow
 
-```
-1. N → Create roll
-2. Position frame 1 with arrows
-3. C → Calibrate
-   - SPACE to confirm frame 1 (captures)
-   - Position frame 2 with arrows
-   - SPACE to confirm frame 2 (captures)
-4. SPACE for each remaining frame
-```
+1. **Create Roll**: Enter a name for your film roll
+2. **Calibrate** (first strip only):
+   - Position frame 1 using arrows
+   - Click "Capture Frame 1"
+   - Position frame 2 using arrows
+   - Click "Capture Frame 2"
+   - System learns frame spacing
+3. **Scan**: Click CAPTURE for each frame
+4. **New Strip**: Click "New Strip", position first frame, continue
 
 ## Status Display
 
 ```
 Roll: [roll_name]
-Frame: [count]          ← No limit!
+Frame: [count]
+Strip: [strip_number]
 Position: [steps]
 Mode: MANUAL/CALIBRATED
-Frame advance: [steps]
-Camera: ✓/✗ Connected   ← Live status
+Frame Advance: [steps]
+Camera: Connected/Not connected
+Arduino: Connected/Not connected
 Auto-advance: ON/OFF
-```
-
-## Key Improvements
-
-| Feature | What Changed |
-|---------|-------------|
-| **Capture Order** | Captures THEN advances (was opposite) |
-| **Calibration** | Captures both frames 1 & 2 |
-| **Fine Adjust** | Always available, even in calibrated mode |
-| **Shift+Arrows** | Jump full frame forward/back |
-| **Autofocus** | F key (replaced preview) |
-| **Camera Files** | Saved to SD card (not downloaded) |
-| **Frame Counter** | Unlimited (was capped) |
-
-## Calibration Explained
-
-```
-Position Frame 1 → C → SPACE (captures)
-                        ↓
-                Position Frame 2
-                        ↓
-                    SPACE (captures)
-                        ↓
-                 Spacing = Pos2 - Pos1
-                        ↓
-              Use for all frames
 ```
 
 ## Modes
 
 ### Manual Mode
-- Full control
-- No automation
-- Position each frame
+- Full manual control
+- Position each frame individually
+- No automatic advancement
 
-### Calibrated + Auto-Advance ON
-- SPACE = capture + advance
-- Most efficient
-- Fine-tune with arrows
+### Calibrated Mode
+- Uses learned frame spacing
+- Auto-advance moves to next frame after capture
+- Fine adjustments still available
 
-### Calibrated + Auto-Advance OFF  
-- SPACE = capture only
-- Shift+Right to advance
-- More control
+## Arduino Commands (Serial)
+
+For direct serial testing via `screen /dev/ttyACM0 115200`:
+
+| Command | Description |
+|---------|-------------|
+| f | Fine step forward |
+| b | Fine step backward |
+| F | Coarse step forward |
+| B | Coarse step backward |
+| N | Full frame advance |
+| R | Full frame reverse |
+| ? | Show status |
+| Z | Zero position |
+| E | Enable motor |
+| M | Disable motor |
+
+## File Locations
+
+| Item | Location |
+|------|----------|
+| Images | Camera SD card (.CR3/.CR2) |
+| Roll state | `~/scans/DATE/roll_name/.scan_state.json` |
+| Config | `~/.film_scanner/scanner_config.json` |
 
 ## Quick Tips
 
-1. **Drift correction**: Use arrows between frames
-2. **Different spacing**: Recalibrate mid-roll with C
-3. **Problem frame**: Turn off auto-advance (A), position manually
-4. **Jump frames**: Shift+arrows moves full frame
-5. **Focus check**: Press F before capturing
+1. **Drift correction**: Use fine arrows between frames
+2. **Focus check**: Use Preview before capturing
+3. **Problem frame**: Disable auto-advance, position manually
+4. **Resume roll**: Enter same roll name, choose "Resume"
 
-## Files
+## Troubleshooting Quick Fixes
 
-- **Images**: Camera SD card (.CR3)
-- **State**: `~/scans/DATE/roll/.scan_state.json`
-
-## Remember
-
-- Calibration captures frames 1 & 2 (no missing!)
-- Auto-advance happens AFTER capture
-- Fine adjustments always work
-- Camera status shown live
-- SPACE for all confirmations
+| Problem | Fix |
+|---------|-----|
+| Motor not responding | Click "Connect Arduino" button |
+| Camera not found | Check USB, ensure PTP mode |
+| Preview fails | Run `killall gphoto2` on Pi |
+| Position wrong | Use fine arrows to adjust |

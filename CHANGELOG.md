@@ -2,6 +2,60 @@
 
 All notable changes to the Film Scanner project.
 
+## [2.2.0] - 2025-12-13 - Arduino R4 Support & Repository Cleanup
+
+### 🎯 Major Changes
+
+#### Added
+- **Arduino Uno R4 Support** - Full compatibility with R4 Minima and R4 WiFi
+  - Automatic board detection in web app
+  - Updated firmware compatible with both R3 and R4
+  - USB VID/PID recognition for known Arduino boards
+  - Proper timing for R4 native USB initialization
+
+- **LED Matrix Status Display** (R4 WiFi only) - Visual system status
+  - Happy face: All systems OK
+  - "17": Motor not detected / motor error
+  - "!": General error
+  - "X": Communication error
+  - "?": Unknown command (flashes)
+  - "L": Motion locked
+  - Spinning animation during motor movement
+  - New 'L' command for manual LED control (L0-L5)
+
+#### Improved
+- **Repository Organization** - Complete cleanup and restructuring
+  - Removed 20+ redundant development/debug files (ARCHITECTURE.md, IMPLEMENTATION_SUMMARY.md, FINAL_FIX_SUMMARY.md, various *_README.md files, etc.)
+  - Moved setup scripts to `scripts/` folder (flash_arduino.sh, setup.sh)
+  - Removed old scattered scripts (update.sh, setup_pi.sh, launch_scanner.*)
+  - Added comprehensive PCB design files in `pcb/` folder
+  - Clean, professional project structure
+
+- **Documentation** - Updated all docs for R3/R4 compatibility
+  - Fixed markdown table formatting in hardware-setup.md
+  - Updated flash commands for all board types
+  - Added troubleshooting for R4-specific issues
+
+#### Technical
+- Simplified Arduino firmware (removed unnecessary compile-time detection)
+- Added `flash_arduino.sh` utility for easy firmware updates
+- Updated `setup.sh` to install both R3 and R4 Arduino cores
+
+### 📁 New Project Structure
+```
+Film-Scanner/
+├── arduino/          # Arduino firmware
+├── docs/             # Documentation
+├── pcb/              # PCB design files
+├── scripts/          # Setup utilities
+├── static/           # Web assets
+├── templates/        # HTML templates
+├── web_app.py        # Main application
+└── README.md
+```
+
+---
+
 ## [2.1.0] - 2025-11-10 - Branch Rebuild
 
 ### 🎯 Major Changes

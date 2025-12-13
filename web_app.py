@@ -2,6 +2,11 @@
 """
 35mm Film Scanner - Web Application
 Mobile-friendly web interface for film scanning
+
+Supports:
+- Arduino Uno R3 (ATmega328P with ATmega16U2 USB bridge)
+- Arduino Uno R4 Minima (Renesas RA4M1 with native USB)
+- Arduino Uno R4 WiFi (Renesas RA4M1 with ESP32-S3)
 """
 
 from flask import Flask, render_template, request, jsonify
@@ -19,6 +24,7 @@ import base64
 import tempfile
 import shutil
 import traceback
+import re
 from config_manager import ConfigManager
 try:
     from PIL import Image, ImageOps
@@ -26,6 +32,24 @@ try:
 except ImportError:
     PIL_AVAILABLE = False
     print("⚠ PIL/Pillow not available - image preview will be limited")
+
+# Arduino USB Vendor/Product IDs for automatic detection
+ARDUINO_USB_IDS = {
+    # Arduino Uno R3 and compatible
+    (0x2341, 0x0043): "Arduino Uno R3",
+    (0x2341, 0x0001): "Arduino Uno R3",
+    (0x2A03, 0x0043): "Arduino Uno R3 (Clone)",
+    # Arduino Uno R4 Minima
+    (0x2341, 0x0069): "Arduino Uno R4 Minima",
+    (0x2341, 0x0369): "Arduino Uno R4 Minima (Bootloader)",
+    # Arduino Uno R4 WiFi
+    (0x2341, 0x1002): "Arduino Uno R4 WiFi",
+    (0x2341, 0x006D): "Arduino Uno R4 WiFi",
+    # Generic CH340 (common clone chip)
+    (0x1A86, 0x7523): "Arduino Clone (CH340)",
+    # FTDI (used in some boards)
+    (0x0403, 0x6001): "Arduino Compatible (FTDI)",
+}
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'film-scanner-secret-key'
@@ -35,6 +59,7 @@ class FilmScanner:
     def __init__(self):
         self.arduino = None
         self.arduino_port = None
+        self.arduino_board = "Unknown"  # Track board type (R3/R4)
         self.roll_name = ""
         self.roll_folder = ""
         self.frame_count = 0
@@ -70,8 +95,34 @@ class FilmScanner:
         # Lock for thread safety
         self.lock = threading.Lock()
     
+    def identify_arduino_board(self, port_info):
+        """Identify Arduino board type from USB port info"""
+        try:
+            vid = port_info.vid
+            pid = port_info.pid
+            
+            if vid and pid:
+                board_name = ARDUINO_USB_IDS.get((vid, pid))
+                if board_name:
+                    return board_name
+                
+                # Check for Arduino vendor ID
+                if vid == 0x2341:
+                    return "Arduino (Unknown Model)"
+            
+            # Fallback to description parsing
+            desc = getattr(port_info, 'description', '') or ''
+            if 'R4' in desc.upper():
+                return "Arduino Uno R4"
+            elif 'UNO' in desc.upper():
+                return "Arduino Uno"
+            
+            return None
+        except Exception:
+            return None
+    
     def find_arduino(self):
-        """Find Arduino on available ports"""
+        """Find Arduino on available ports (supports R3 and R4)"""
         # Close existing connection if any
         if self.arduino:
             try:
@@ -79,52 +130,106 @@ class FilmScanner:
             except:
                 pass
             self.arduino = None
+            self.arduino_board = "Unknown"
         
         ports = list(serial.tools.list_ports.comports())
         
-        pi_ports = ['/dev/ttyACM0', '/dev/ttyUSB0', '/dev/serial0', '/dev/ttyAMA0']
+        # Add Raspberry Pi serial ports if they exist
+        pi_ports = ['/dev/ttyACM0', '/dev/ttyACM1', '/dev/ttyUSB0', '/dev/ttyUSB1', 
+                    '/dev/serial0', '/dev/ttyAMA0']
         for port_path in pi_ports:
             if os.path.exists(port_path):
-                class SimplePort:
-                    def __init__(self, device):
-                        self.device = device
-                ports.append(SimplePort(port_path))
+                # Check if this port is already in the list
+                existing = [p for p in ports if hasattr(p, 'device') and p.device == port_path]
+                if not existing:
+                    class SimplePort:
+                        def __init__(self, device):
+                            self.device = device
+                            self.vid = None
+                            self.pid = None
+                            self.description = "Serial Port"
+                    ports.append(SimplePort(port_path))
+        
+        # Sort ports to prioritize known Arduino ports
+        def port_priority(p):
+            board = self.identify_arduino_board(p) if hasattr(p, 'vid') else None
+            if board:
+                return 0  # Known Arduino boards first
+            device = getattr(p, 'device', str(p))
+            if 'ACM' in device or 'USB' in device:
+                return 1  # Common Arduino ports
+            return 2  # Other ports
+        
+        ports = sorted(ports, key=port_priority)
+        
+        print("🔍 Scanning for Arduino boards...")
         
         for port in ports:
             device = port.device if hasattr(port, 'device') else str(port)
+            board_id = self.identify_arduino_board(port) if hasattr(port, 'vid') else None
+            
+            if board_id:
+                print(f"   Found: {board_id} on {device}")
             
             try:
+                # Open serial connection
                 ser = serial.Serial(device, 115200, timeout=3)
-                time.sleep(2.5)  # Give Arduino time to reset after connection
+                
+                # Wait for Arduino to reset after connection
+                # R4 native USB may need longer initialization
+                is_r4 = board_id and 'R4' in board_id
+                reset_delay = 3.0 if is_r4 else 2.5
+                time.sleep(reset_delay)
                 
                 # Clear any startup messages
                 ser.reset_input_buffer()
                 time.sleep(0.1)
                 
+                # Send status query
                 ser.write(b'?\n')
-                time.sleep(0.3)
-                response = ser.read(200).decode('ascii', errors='ignore')
+                time.sleep(0.5)  # R4 may need slightly longer response time
+                response = ser.read(500).decode('ascii', errors='ignore')
                 
+                # Check for valid Film Scanner firmware response
                 if 'Film' in response or 'READY' in response or 'Position' in response:
                     self.arduino = ser
                     self.arduino_port = device
+                    
+                    # Determine board type from response
+                    if 'UNO R4' in response or 'R4' in response:
+                        self.arduino_board = "Arduino Uno R4"
+                    elif 'UNO R3' in response or 'R3' in response:
+                        self.arduino_board = "Arduino Uno R3"
+                    elif board_id:
+                        self.arduino_board = board_id
+                    else:
+                        self.arduino_board = "Arduino Compatible"
                     
                     # Configure coarse step size
                     time.sleep(0.1)
                     self.arduino.write(f'l{self.coarse_step}\n'.encode())
                     time.sleep(0.1)
                     
-                    print(f"✓ Arduino connected on {device}")
+                    print(f"✓ Connected: {self.arduino_board} on {device}")
                     self.broadcast_status()
                     return True
                 
                 ser.close()
+            except serial.SerialException as e:
+                # Port busy or access denied
+                if 'PermissionError' in str(e) or 'Access' in str(e):
+                    print(f"   ⚠ Port {device} in use by another application")
+                else:
+                    print(f"   ✗ {device}: {e}")
+                continue
             except Exception as e:
-                print(f"✗ Failed to connect to {device}: {e}")
+                print(f"   ✗ {device}: {e}")
                 continue
         
+        print("✗ No Arduino found with Film Scanner firmware")
         self.arduino = None
         self.arduino_port = None
+        self.arduino_board = "Unknown"
         return False
     
     def verify_connection(self):
@@ -554,7 +659,9 @@ class FilmScanner:
     def backup_frame(self):
         """Backup one full frame using calibrated distance"""
         if self.frame_advance:
-            success = self.send(f'H-{self.frame_advance}')
+            # Use 'h' command for backward movement (lowercase = reverse direction)
+            # Note: 'H' only accepts positive values; 'h' moves backward with positive value
+            success = self.send(f'h{self.frame_advance}')
             if success:
                 self.status_msg = f"Backed up {self.frame_advance} steps"
                 return True
@@ -579,7 +686,9 @@ class FilmScanner:
             'camera_error': self.camera_error,
             'viewfinder_enabled': self.viewfinder_enabled,
             'status_msg': self.status_msg,
-            'arduino_connected': self.arduino is not None
+            'arduino_connected': self.arduino is not None,
+            'arduino_port': self.arduino_port,
+            'arduino_board': self.arduino_board
         }
         
         return status
@@ -788,13 +897,6 @@ def capture():
     if not scanner.check_camera():
         return jsonify({'success': False, 'message': 'Camera not connected'})
     
-    # Auto-advance before capture (for frames 2+)
-    if scanner.mode == 'calibrated' and scanner.auto_advance and scanner.frames_in_strip > 0:
-        if scanner.frame_advance:
-            if not scanner.send(f'H{scanner.frame_advance}'):
-                return jsonify({'success': False, 'message': 'Auto-advance failed - Check Arduino'})
-            time.sleep(0.5)
-    
     scanner.status_msg = "Capturing..."
     scanner.broadcast_status()
     
@@ -802,6 +904,15 @@ def capture():
     
     if success:
         scanner.status_msg = f"✓ Frame {scanner.frame_count} (Strip {scanner.strip_count})"
+        
+        # Auto-advance AFTER capture (for calibrated mode)
+        # Advances to next frame position so user is ready for next capture
+        if scanner.mode == 'calibrated' and scanner.auto_advance and scanner.frame_advance:
+            time.sleep(0.3)  # Brief pause before advancing
+            if scanner.send(f'H{scanner.frame_advance}'):
+                scanner.status_msg = f"✓ Frame {scanner.frame_count} → Ready for next"
+            else:
+                scanner.status_msg = f"✓ Frame {scanner.frame_count} (advance failed)"
     else:
         scanner.status_msg = "❌ Capture failed!"
     
@@ -1131,11 +1242,13 @@ if __name__ == '__main__':
     print("✓ Process cleanup complete")
     
     # Auto-connect to Arduino on startup
-    print("\n🔌 Searching for Arduino...")
+    print("\n🔌 Searching for Arduino (R3/R4 supported)...")
     if scanner.find_arduino():
-        print("✓ Arduino connected")
+        print(f"✓ Arduino connected: {scanner.arduino_board}")
+        print(f"   Port: {scanner.arduino_port}")
     else:
         print("✗ Arduino not found (you can connect later via the web interface)")
+        print("   Supported boards: Arduino Uno R3, R4 Minima, R4 WiFi")
     
     # Check for camera
     print("\n📷 Camera Setup")

@@ -1,0 +1,39 @@
+Reference,Quantity,Value,Description,Package,Manufacturer,Part Number,LCSC Part,Notes
+U1,1,CH224K,USB-C PD Controller,SOP-10,WCH,CH224K,C970725,Set CFG2 to GND via 1K for 12V output
+U2,1,MP2359DJ,Step-down Buck 1.2A,SOT23-6,MPS,MP2359DJ-LF-Z,C14259,12V to 5V conversion
+J1,1,USB-C,USB-C Receptacle 16-pin,SMD,Various,TYPE-C-31-M-12,C165948,Power only - no data lines needed
+J2,1,DC-005,DC Barrel Jack 5.5x2.1mm,Through-hole,Various,DC-005,C111588,Center positive
+J3,1,JST-XH-4P,4-pin JST-XH Header,Through-hole,JST,B4B-XH-A,C144395,Motor output connector
+J4,1,Header 1x4,4-pin 2.54mm header,Through-hole,Various,Pin Header 1x4,C124378,Arduino interface
+J5,1,Header 1x2,2-pin 2.54mm header,Through-hole,Various,Pin Header 1x2,C124375,5V output (optional)
+JP1,1,Header 2x3,Microstepping jumpers,Through-hole,Various,Pin Header 2x3,C124381,For MS1/MS2/MS3 config
+U3,1,DIP-16 Socket,16-pin DIP socket 0.6in wide,Through-hole,Various,DIP-16 Socket,C72115,For A4988/DRV8825 module
+D1,1,SS54,Schottky 5A 40V,SMA,Various,SS54,C8598,USB-C power path
+D2,1,SS54,Schottky 5A 40V,SMA,Various,SS54,C8598,DC Jack power path
+D3,1,SMBJ15A,TVS Diode 15V,SMB,Littelfuse,SMBJ15A,C123799,USB-C overvoltage protection
+F1,1,2A,Resettable Fuse PTC,1206,Bourns,MF-MSMF200,C70069,Input protection
+L1,1,10uH,Inductor 2A shielded,5x5mm,Various,SWPA5040S100MT,C408335,Buck converter inductor
+C1,1,10uF,Ceramic 25V,0805,Various,CL21A106KAYNNNE,C15850,CH224K input
+C2,1,10uF,Ceramic 25V,0805,Various,CL21A106KAYNNNE,C15850,CH224K output
+C3,1,100nF,Ceramic 25V,0603,Various,CC0603KRX7R9BB104,C14663,Buck input
+C4,1,100nF,Ceramic 16V,0603,Various,CC0603KRX7R9BB104,C14663,Buck bootstrap
+C5,1,22uF,Ceramic 10V,0805,Various,CL21A226MAQNNNE,C45783,Buck output
+C6,1,100uF,Electrolytic 25V,6.3x7.7mm,Various,25V 100uF,C3339,12V bulk capacitor
+C7,1,100nF,Ceramic 25V,0603,Various,CC0603KRX7R9BB104,C14663,12V decoupling
+C8,1,100uF,Electrolytic 25V,6.3x7.7mm,Various,25V 100uF,C3339,VMOT capacitor (critical!)
+R1,1,1K,Resistor,0603,Various,0603WAF1001T5E,C21190,CFG2 to GND (12V config)
+R2,1,4.7K,Resistor,0603,Various,0603WAF4701T5E,C23162,LED1 current limit
+R3,1,1K,Resistor,0603,Various,0603WAF1001T5E,C21190,LED2 current limit
+R4,1,1K,Resistor,0603,Various,0603WAF1001T5E,C21190,LED3 current limit
+R5,1,1K,Resistor,0603,Various,0603WAF1001T5E,C21190,LED4 current limit
+R6,1,40.2K,Resistor 1%,0603,Various,0603WAF4022T5E,C23142,Buck FB divider top
+R7,1,10K,Resistor,0603,Various,0603WAF1002T5E,C25804,Buck FB divider bottom
+R8,1,10K,Resistor,0603,Various,0603WAF1002T5E,C25804,SLEEP pullup
+R9,1,100,Resistor,0603,Various,0603WAF1000T5E,C22775,STEP series protection
+R10,1,100,Resistor,0603,Various,0603WAF1000T5E,C22775,DIR series protection
+R11,1,100,Resistor,0603,Various,0603WAF1000T5E,C22775,EN series protection
+LED1,1,Green,LED 0805,0805,Various,KT-0805G,C2297,12V power indicator
+LED2,1,Green,LED 0805,0805,Various,KT-0805G,C2297,5V power indicator
+LED3,1,Blue,LED 0805,0805,Various,KT-0805B,C2293,USB PD status indicator
+LED4,1,Yellow,LED 0805,0805,Various,KT-0805Y,C2296,Step activity indicator
+
