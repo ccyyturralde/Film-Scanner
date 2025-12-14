@@ -26,25 +26,28 @@ Professional-grade 35mm film scanner using Raspberry Pi, Arduino, and DSLR camer
 
 ## Quick Start
 
-### 1. Clone Repository
+### Raspberry Pi (fresh install)
 
 ```bash
 git clone https://github.com/YOUR_USERNAME/Film-Scanner.git
 cd Film-Scanner
+sudo bash scripts/setup_pi.sh   # installs deps, service, helper commands
+start-scanner                    # launches the web app (service already enabled)
 ```
 
-### 2. Install Dependencies
+- Access at `http://<raspberry-pi-ip>:5000`
+- Service starts automatically on boot: `film-scanner.service`
+- Stop or restart: `stop-scanner` / `sudo systemctl restart film-scanner.service`
+
+### Manual install (existing setup)
 
 ```bash
-# On Raspberry Pi
+git clone https://github.com/YOUR_USERNAME/Film-Scanner.git
+cd Film-Scanner
 bash scripts/setup.sh
-
-# Or manually
-pip3 install -r requirements.txt
-sudo apt install gphoto2
 ```
 
-### 3. Flash Arduino
+### Flash Arduino
 
 ```bash
 # Using the flash utility
@@ -79,6 +82,11 @@ Pin D3 → DIR
 Pin D4 → ENABLE
 GND → GND (common with 12V supply)
 
+Stepper coils (must be paired or motor will only vibrate)
+- Coil A (A1/A2): Black & Blue
+- Coil B (B1/B2): Red & Green
+Swapping A1↔A2 or B1↔B2 only flips direction; crossing coils will not work.
+
 Power
 12V → VMOT (A4988)
 5V → VDD (A4988)
@@ -98,7 +106,8 @@ Film-Scanner/
 │   └── quick-reference.md
 ├── pcb/                  # PCB design files (KiCad)
 ├── scripts/              # Setup utilities
-│   ├── setup.sh
+│   ├── setup.sh          # Manual dependency install
+│   ├── setup_pi.sh       # Automated Pi install + service
 │   └── flash_arduino.sh
 ├── static/               # Web assets
 │   ├── css/style.css
