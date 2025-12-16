@@ -438,13 +438,14 @@ class AppManager:
     
     def get_friendly_status(self) -> dict:
         """Get status formatted for display"""
+        # Use ASCII-compatible status messages (no emoji for TFT font compatibility)
         state_messages = {
-            AppState.STOPPED: ("⏹️ Stopped", "App is not running"),
-            AppState.STARTING: ("🔄 Starting...", "App is starting up"),
-            AppState.RUNNING: ("✅ Running", "App is running normally"),
-            AppState.STOPPING: ("🔄 Stopping...", "App is shutting down"),
-            AppState.ERROR: ("❌ Error", "App failed to start"),
-            AppState.CRASHED: ("💥 Crashed", "App stopped unexpectedly"),
+            AppState.STOPPED: ("STOPPED", "App is not running"),
+            AppState.STARTING: ("STARTING", "App is starting up"),
+            AppState.RUNNING: ("RUNNING", "App is running normally"),
+            AppState.STOPPING: ("STOPPING", "App is shutting down"),
+            AppState.ERROR: ("ERROR", "App failed to start"),
+            AppState.CRASHED: ("CRASHED", "App stopped unexpectedly"),
         }
         
         # Read all shared state under lock for thread safety
@@ -458,7 +459,7 @@ class AppManager:
             arduino_connected = self.status.arduino_connected
             camera_connected = self.status.camera_connected
         
-        icon, desc = state_messages.get(current_state, ("❓ Unknown", "Unknown state"))
+        icon, desc = state_messages.get(current_state, ("UNKNOWN", "Unknown state"))
         
         # Format uptime
         uptime = ""

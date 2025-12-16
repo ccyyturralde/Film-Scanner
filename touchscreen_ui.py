@@ -70,16 +70,30 @@ class TouchInputHandler:
         self.current_y = 0
         self.is_touching = False
         self._pending_touch = None  # (x, y) of pending touch release
+        self._x_min = 0
+        self._x_max = width
+        self._y_min = 0
+        self._y_max = height
         
         if not EVDEV_AVAILABLE:
             print("evdev not available - touch input disabled")
+            print("Install with: sudo apt install python3-evdev")
             return
         
-        # Try to find touch device
+        print(f"Looking for touch device...")
+        print(f"Available input devices:")
+        for path in evdev.list_devices():
+            try:
+                dev = InputDevice(path)
+                print(f"  {path}: {dev.name}")
+            except:
+                pass
+        
+        # Try specified device first
         if device_path and os.path.exists(device_path):
             try:
                 self.device = InputDevice(device_path)
-                print(f"Touch device: {self.device.name}")
+                self._setup_device(self.device)
                 return
             except Exception as e:
                 print(f"Failed to open {device_path}: {e}")
@@ -96,22 +110,37 @@ class TouchInputHandler:
                     has_y = any(c[0] == ecodes.ABS_Y for c in abs_caps)
                     if has_x and has_y:
                         self.device = dev
-                        # Get axis info for scaling
-                        for code, info in abs_caps:
-                            if code == ecodes.ABS_X:
-                                self._x_min = info.min
-                                self._x_max = info.max
-                            elif code == ecodes.ABS_Y:
-                                self._y_min = info.min
-                                self._y_max = info.max
-                        print(f"Touch device found: {dev.name}")
-                        print(f"  X range: {self._x_min}-{self._x_max}")
-                        print(f"  Y range: {self._y_min}-{self._y_max}")
+                        self._setup_device(dev)
                         return
-            except Exception:
+            except Exception as e:
+                print(f"  Error checking {path}: {e}")
                 continue
         
-        print("No touch device found")
+        print("No touch device found!")
+        print("Touch input will not work.")
+    
+    def _setup_device(self, dev):
+        """Setup device and get calibration info"""
+        caps = dev.capabilities()
+        if ecodes.EV_ABS in caps:
+            abs_caps = caps[ecodes.EV_ABS]
+            for item in abs_caps:
+                code = item[0] if isinstance(item, tuple) else item
+                info = item[1] if isinstance(item, tuple) and len(item) > 1 else None
+                if code == ecodes.ABS_X and info:
+                    self._x_min = info.min
+                    self._x_max = info.max
+                elif code == ecodes.ABS_Y and info:
+                    self._y_min = info.min
+                    self._y_max = info.max
+        
+        # Set non-blocking mode
+        dev.grab()  # Exclusive access
+        
+        print(f"Touch device initialized: {dev.name}")
+        print(f"  Path: {dev.path}")
+        print(f"  X range: {self._x_min}-{self._x_max} -> 0-{self.width}")
+        print(f"  Y range: {self._y_min}-{self._y_max} -> 0-{self.height}")
     
     def _scale_x(self, raw_x: int) -> int:
         """Scale raw X coordinate to screen width"""
@@ -378,12 +407,9 @@ class StatusBar:
         
     def update(self, status: dict):
         """Update status from app manager"""
-        # Use simple ASCII icons instead of emoji
-        icon = status.get('icon', '?')
-        # Replace any emoji icons with ASCII
-        icon_map = {'❓': '?', '✓': '+', '✗': 'x', '⏳': '~', '●': 'o'}
-        icon = icon_map.get(icon, icon) if len(icon) > 1 or ord(icon[0]) > 127 else icon
-        self.status_text = f"[{icon}] {status.get('description', 'Unknown')}"
+        # Status icon is now plain text like "STOPPED", "RUNNING", etc.
+        icon = status.get('icon', 'UNKNOWN')
+        self.status_text = icon
         self.arduino_connected = status.get('arduino_connected', False)
         self.camera_connected = status.get('camera_connected', False)
         self.time_str = datetime.now().strftime("%H:%M")
@@ -664,7 +690,6 @@ class TouchScreenUI:
             self._on_start,
             color=colors.btn_success,
             hover_color=colors.btn_success_hover,
-            icon=">",
             config=self.config
         )
         self.home_buttons.append(self.btn_start)
@@ -675,7 +700,6 @@ class TouchScreenUI:
             self._on_stop,
             color=colors.btn_danger,
             hover_color=colors.btn_danger_hover,
-            icon="X",
             config=self.config
         )
         self.home_buttons.append(self.btn_stop)
@@ -689,7 +713,6 @@ class TouchScreenUI:
             self._on_restart,
             color=colors.btn_primary,
             hover_color=colors.btn_primary_hover,
-            icon="*",
             config=self.config
         )
         self.home_buttons.append(self.btn_restart)
@@ -700,7 +723,6 @@ class TouchScreenUI:
             self._show_logs,
             color=colors.btn_secondary,
             hover_color=colors.btn_secondary_hover,
-            icon="=",
             config=self.config
         )
         self.home_buttons.append(self.btn_logs)
@@ -714,7 +736,6 @@ class TouchScreenUI:
             self._show_errors,
             color=colors.btn_secondary,
             hover_color=colors.btn_secondary_hover,
-            icon="!",
             config=self.config
         )
         self.home_buttons.append(self.btn_errors)
@@ -725,7 +746,6 @@ class TouchScreenUI:
             self._on_exit,
             color=colors.btn_secondary,
             hover_color=colors.btn_secondary_hover,
-            icon="<",
             config=self.config
         )
         self.home_buttons.append(self.btn_back_home)
@@ -751,7 +771,6 @@ class TouchScreenUI:
             self._show_home,
             color=colors.btn_secondary,
             hover_color=colors.btn_secondary_hover,
-            icon="<",
             config=self.config
         )
         
