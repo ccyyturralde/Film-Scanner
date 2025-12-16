@@ -30,6 +30,14 @@ try:
 except ImportError:
     PSUTIL_AVAILABLE = False
 
+# Optional evdev for direct touch input (when using framebuffer mode)
+try:
+    import evdev
+    from evdev import InputDevice, ecodes
+    EVDEV_AVAILABLE = True
+except ImportError:
+    EVDEV_AVAILABLE = False
+
 # Import our modules
 from app_manager import AppManager, AppState, LogEntry, get_app_manager
 from touchscreen_config import TouchScreenConfig, get_config, ColorTheme
@@ -44,6 +52,134 @@ except ImportError:
 def is_windowed_mode():
     """Check if running in windowed/desktop mode"""
     return '--windowed' in sys.argv
+
+
+class TouchInputHandler:
+    """
+    Handles touch input via evdev for direct framebuffer mode.
+    
+    When using direct framebuffer rendering (bypassing SDL), pygame events
+    don't work. This class reads touch events directly from the input device.
+    """
+    
+    def __init__(self, device_path: str = None, width: int = 480, height: int = 320):
+        self.width = width
+        self.height = height
+        self.device = None
+        self.current_x = 0
+        self.current_y = 0
+        self.is_touching = False
+        self._pending_touch = None  # (x, y) of pending touch release
+        
+        if not EVDEV_AVAILABLE:
+            print("evdev not available - touch input disabled")
+            return
+        
+        # Try to find touch device
+        if device_path and os.path.exists(device_path):
+            try:
+                self.device = InputDevice(device_path)
+                print(f"Touch device: {self.device.name}")
+                return
+            except Exception as e:
+                print(f"Failed to open {device_path}: {e}")
+        
+        # Auto-detect touch device
+        for path in evdev.list_devices():
+            try:
+                dev = InputDevice(path)
+                caps = dev.capabilities()
+                # Look for absolute positioning (touch screens)
+                if ecodes.EV_ABS in caps:
+                    abs_caps = caps[ecodes.EV_ABS]
+                    has_x = any(c[0] == ecodes.ABS_X for c in abs_caps)
+                    has_y = any(c[0] == ecodes.ABS_Y for c in abs_caps)
+                    if has_x and has_y:
+                        self.device = dev
+                        # Get axis info for scaling
+                        for code, info in abs_caps:
+                            if code == ecodes.ABS_X:
+                                self._x_min = info.min
+                                self._x_max = info.max
+                            elif code == ecodes.ABS_Y:
+                                self._y_min = info.min
+                                self._y_max = info.max
+                        print(f"Touch device found: {dev.name}")
+                        print(f"  X range: {self._x_min}-{self._x_max}")
+                        print(f"  Y range: {self._y_min}-{self._y_max}")
+                        return
+            except Exception:
+                continue
+        
+        print("No touch device found")
+    
+    def _scale_x(self, raw_x: int) -> int:
+        """Scale raw X coordinate to screen width"""
+        if not hasattr(self, '_x_max'):
+            return raw_x
+        return int((raw_x - self._x_min) * self.width / (self._x_max - self._x_min))
+    
+    def _scale_y(self, raw_y: int) -> int:
+        """Scale raw Y coordinate to screen height"""
+        if not hasattr(self, '_y_max'):
+            return raw_y
+        return int((raw_y - self._y_min) * self.height / (self._y_max - self._y_min))
+    
+    def poll(self) -> Optional[Tuple[str, int, int]]:
+        """
+        Poll for touch events.
+        
+        Returns:
+            ('touch', x, y) for touch press
+            ('release', x, y) for touch release
+            None if no event
+        """
+        if not self.device:
+            return None
+        
+        # Return pending touch release
+        if self._pending_touch:
+            result = ('release', self._pending_touch[0], self._pending_touch[1])
+            self._pending_touch = None
+            return result
+        
+        try:
+            # Non-blocking read
+            while True:
+                event = self.device.read_one()
+                if event is None:
+                    break
+                
+                if event.type == ecodes.EV_ABS:
+                    if event.code == ecodes.ABS_X:
+                        self.current_x = self._scale_x(event.value)
+                    elif event.code == ecodes.ABS_Y:
+                        self.current_y = self._scale_y(event.value)
+                
+                elif event.type == ecodes.EV_KEY:
+                    if event.code == ecodes.BTN_TOUCH:
+                        if event.value == 1:  # Touch press
+                            self.is_touching = True
+                            return ('touch', self.current_x, self.current_y)
+                        else:  # Touch release
+                            self.is_touching = False
+                            return ('release', self.current_x, self.current_y)
+                
+                elif event.type == ecodes.EV_SYN:
+                    # Sync event - if touching, this might be a touch event
+                    pass
+        
+        except BlockingIOError:
+            pass
+        except Exception as e:
+            print(f"Touch read error: {e}")
+        
+        return None
+    
+    def close(self):
+        """Close the touch device"""
+        if self.device:
+            self.device.close()
 
 
 class SystemStatsMonitor:
@@ -242,7 +378,12 @@ class StatusBar:
         
     def update(self, status: dict):
         """Update status from app manager"""
-        self.status_text = f"{status.get('icon', '❓')} {status.get('description', 'Unknown')}"
+        # Use simple ASCII icons instead of emoji
+        icon = status.get('icon', '?')
+        # Replace any emoji icons with ASCII
+        icon_map = {'❓': '?', '✓': '+', '✗': 'x', '⏳': '~', '●': 'o'}
+        icon = icon_map.get(icon, icon) if len(icon) > 1 or ord(icon[0]) > 127 else icon
+        self.status_text = f"[{icon}] {status.get('description', 'Unknown')}"
         self.arduino_connected = status.get('arduino_connected', False)
         self.camera_connected = status.get('camera_connected', False)
         self.time_str = datetime.now().strftime("%H:%M")
@@ -273,17 +414,17 @@ class StatusBar:
         surface.blit(time_surface, time_rect)
         x_pos -= time_rect.width + 15
         
-        # Camera indicator
+        # Camera indicator (CAM label with color)
         cam_color = colors.success if self.camera_connected else colors.error
-        cam_text = "📷" if self.camera_connected else "🚫"
+        cam_text = "CAM"
         cam_surface, cam_rect = font.render(cam_text, cam_color)
         cam_rect.midright = (x_pos, indicator_y)
         surface.blit(cam_surface, cam_rect)
         x_pos -= cam_rect.width + 10
         
-        # Arduino indicator  
+        # Arduino indicator (ARD label with color)
         ard_color = colors.success if self.arduino_connected else colors.error
-        ard_text = "🔌"
+        ard_text = "ARD"
         ard_surface, ard_rect = font.render(ard_text, ard_color)
         ard_rect.midright = (x_pos, indicator_y)
         surface.blit(ard_surface, ard_rect)
@@ -444,6 +585,16 @@ class TouchScreenUI:
             pygame.display.set_caption("Scanner Control")
             print("Using SDL display")
         
+        # Initialize touch input (for framebuffer mode)
+        self._touch_handler = None
+        if self._using_framebuffer and EVDEV_AVAILABLE:
+            touch_device = self.config.display.touch_device
+            self._touch_handler = TouchInputHandler(
+                touch_device,
+                self.config.display.width,
+                self.config.display.height
+            )
+        
         # Load fonts
         self.font = pygame.freetype.SysFont(
             self.config.ui.font_family, 
@@ -513,7 +664,7 @@ class TouchScreenUI:
             self._on_start,
             color=colors.btn_success,
             hover_color=colors.btn_success_hover,
-            icon="▶",
+            icon=">",
             config=self.config
         )
         self.home_buttons.append(self.btn_start)
@@ -524,12 +675,12 @@ class TouchScreenUI:
             self._on_stop,
             color=colors.btn_danger,
             hover_color=colors.btn_danger_hover,
-            icon="⏹",
+            icon="X",
             config=self.config
         )
         self.home_buttons.append(self.btn_stop)
         
-        # Row 2: Restart / Open Web
+        # Row 2: Restart / Logs
         row2_y = content_y + btn_h + margin
         
         self.btn_restart = Button(
@@ -538,7 +689,7 @@ class TouchScreenUI:
             self._on_restart,
             color=colors.btn_primary,
             hover_color=colors.btn_primary_hover,
-            icon="🔄",
+            icon="*",
             config=self.config
         )
         self.home_buttons.append(self.btn_restart)
@@ -549,12 +700,12 @@ class TouchScreenUI:
             self._show_logs,
             color=colors.btn_secondary,
             hover_color=colors.btn_secondary_hover,
-            icon="📋",
+            icon="=",
             config=self.config
         )
         self.home_buttons.append(self.btn_logs)
         
-        # Row 3: Errors / Settings
+        # Row 3: Errors / Exit
         row3_y = row2_y + btn_h + margin
         
         self.btn_errors = Button(
@@ -563,18 +714,18 @@ class TouchScreenUI:
             self._show_errors,
             color=colors.btn_secondary,
             hover_color=colors.btn_secondary_hover,
-            icon="⚠️",
+            icon="!",
             config=self.config
         )
         self.home_buttons.append(self.btn_errors)
         
         self.btn_back_home = Button(
             pygame.Rect(col2_x, row3_y, btn_full_w, btn_h),
-            "BACK",
+            "EXIT",
             self._on_exit,
             color=colors.btn_secondary,
             hover_color=colors.btn_secondary_hover,
-            icon="←",
+            icon="<",
             config=self.config
         )
         self.home_buttons.append(self.btn_back_home)
@@ -600,7 +751,7 @@ class TouchScreenUI:
             self._show_home,
             color=colors.btn_secondary,
             hover_color=colors.btn_secondary_hover,
-            icon="←",
+            icon="<",
             config=self.config
         )
         
@@ -608,7 +759,7 @@ class TouchScreenUI:
         scroll_btn_w = btn_full_w // 2 - margin // 2
         self.btn_scroll_up = Button(
             pygame.Rect(col2_x, back_btn_y, scroll_btn_w, btn_h),
-            "▲",
+            "UP",
             self.log_viewer.scroll_up,
             color=colors.btn_secondary,
             hover_color=colors.btn_secondary_hover,
@@ -617,7 +768,7 @@ class TouchScreenUI:
         
         self.btn_scroll_down = Button(
             pygame.Rect(col2_x + scroll_btn_w + margin, back_btn_y, scroll_btn_w, btn_h),
-            "▼",
+            "DOWN",
             self.log_viewer.scroll_down,
             color=colors.btn_secondary,
             hover_color=colors.btn_secondary_hover,
@@ -700,7 +851,8 @@ class TouchScreenUI:
                 self._last_logs = self.app_manager.get_logs(100)
     
     def _handle_events(self):
-        """Handle pygame events"""
+        """Handle pygame and touch events"""
+        # Handle pygame events (works in SDL mode)
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.running = False
@@ -722,6 +874,42 @@ class TouchScreenUI:
                 self.btn_back.handle_event(event)
                 self.btn_scroll_up.handle_event(event)
                 self.btn_scroll_down.handle_event(event)
+        
+        # Handle evdev touch events (for framebuffer mode)
+        if self._touch_handler:
+            touch_event = self._touch_handler.poll()
+            if touch_event:
+                event_type, x, y = touch_event
+                
+                if event_type == 'touch':
+                    # Touch press - mark buttons as pressed
+                    if self.current_screen == Screen.HOME:
+                        for btn in self.home_buttons:
+                            if btn.enabled and btn.rect.collidepoint(x, y):
+                                btn.pressed = True
+                                btn.press_time = time.time()
+                    else:
+                        for btn in [self.btn_back, self.btn_scroll_up, self.btn_scroll_down]:
+                            if btn.enabled and btn.rect.collidepoint(x, y):
+                                btn.pressed = True
+                                btn.press_time = time.time()
+                
+                elif event_type == 'release':
+                    # Touch release - trigger callbacks
+                    if self.current_screen == Screen.HOME:
+                        for btn in self.home_buttons:
+                            if btn.pressed and btn.rect.collidepoint(x, y):
+                                btn.pressed = False
+                                if btn.callback:
+                                    btn.callback()
+                            btn.pressed = False
+                    else:
+                        for btn in [self.btn_back, self.btn_scroll_up, self.btn_scroll_down]:
+                            if btn.pressed and btn.rect.collidepoint(x, y):
+                                btn.pressed = False
+                                if btn.callback:
+                                    btn.callback()
+                            btn.pressed = False
     
     def _draw_home_screen(self):
         """Draw the home screen"""
@@ -766,14 +954,18 @@ class TouchScreenUI:
                 self.screen.blit(surf, (x, y))
                 y += rect.height + 8
             
-            # Last error (truncated)
+            # Last error (truncated to fit panel)
             if status.get('last_error'):
-                err = status['last_error'][:40]
-                if len(status['last_error']) > 40:
+                # Calculate max chars that fit in panel width
+                max_chars = 35  # Conservative for small screens
+                err = status['last_error'][:max_chars]
+                if len(status['last_error']) > max_chars:
                     err += "..."
                 self.font.size = ui.font_size_tiny
-                surf, rect = self.font.render(f"Last: {err}", colors.error)
-                self.screen.blit(surf, (x, y))
+                # Only draw if there's room in the panel
+                if y + ui.font_size_tiny < self.info_rect.bottom - ui.panel_padding:
+                    surf, rect = self.font.render(err, colors.error)
+                    self.screen.blit(surf, (x, y))
     
     def _draw_system_stats(self):
         """Draw system stats (CPU, RAM, temp) in the bottom-right corner."""
