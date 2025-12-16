@@ -16,3 +16,6 @@ numpy>=1.24.0
 
 # Touch Screen UI (3.5" TFT Display)
 pygame>=2.5.0
+
+# System Monitoring (CPU, RAM, temperature stats)
+psutil>=5.9.0

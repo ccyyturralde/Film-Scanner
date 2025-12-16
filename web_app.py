@@ -96,8 +96,8 @@ class FilmScanner:
         # Lock for thread safety
         self.lock = threading.Lock()
     
-        # Lock to prevent gphoto2 conflicts across routes
-        self.camera_op_lock = threading.Lock()
+        # RLock to prevent gphoto2 conflicts across routes (reentrant for recursive calls)
+        self.camera_op_lock = threading.RLock()
     
     def identify_arduino_board(self, port_info):
         """Identify Arduino board type from USB port info"""
@@ -512,105 +512,103 @@ class FilmScanner:
     
     def capture_image(self, retry=True):
         """Capture image to camera SD card with exclusive access"""
-        try:
-            # Ensure exclusive access
-            self.camera_op_lock.acquire()
-            # Clean any stray gphoto2 from previous ops
-            self._kill_gphoto2()
-            print("\n📷 Capturing image...")
-            result = subprocess.run(
-                ["gphoto2", "--capture-image"],
-                capture_output=True, timeout=30, text=True
-            )
-            print(f"   Return code: {result.returncode}")
-            if result.stdout:
-                print(f"   stdout: {result.stdout.strip()}")
-            if result.stderr:
-                print(f"   stderr: {result.stderr.strip()}")
-            # Success detection: allow some transient non-zero errors if shutter likely fired
-            success_code = (result.returncode == 0)
-            non_fatal = False
-            if not success_code and result.stderr:
-                low = result.stderr.lower()
-                non_fatal = any(k in low for k in ["ptp i/o error", "device busy", "resource busy", "usb device reset", "i/o in progress"])
-            if success_code or non_fatal:
-                print("✓ Capture triggered")
-                return True
-            # If failed and retry is allowed, try once more after a short reset
-            if retry:
-                print("↻ Retry capture after resetting gphoto2...")
+        # Ensure exclusive access - RLock allows recursive acquisition by same thread
+        with self.camera_op_lock:
+            try:
+                # Clean any stray gphoto2 from previous ops
                 self._kill_gphoto2()
-                time.sleep(0.5)
-                return self.capture_image(retry=False)
-            print("✗ Capture failed")
-            return False
-        except Exception as e:
-            print(f"✗ Capture error: {e}")
-            self._kill_gphoto2()
-            return False
-        finally:
-            if self.camera_op_lock.locked():
-                try:
-                    self.camera_op_lock.release()
-                except RuntimeError:
-                    pass
+                print("\n📷 Capturing image...")
+                result = subprocess.run(
+                    ["gphoto2", "--capture-image"],
+                    capture_output=True, timeout=30, text=True
+                )
+                print(f"   Return code: {result.returncode}")
+                if result.stdout:
+                    print(f"   stdout: {result.stdout.strip()}")
+                if result.stderr:
+                    print(f"   stderr: {result.stderr.strip()}")
+                # Success detection: allow some transient non-zero errors if shutter likely fired
+                success_code = (result.returncode == 0)
+                non_fatal = False
+                if not success_code and result.stderr:
+                    low = result.stderr.lower()
+                    non_fatal = any(k in low for k in ["ptp i/o error", "device busy", "resource busy", "usb device reset", "i/o in progress"])
+                if success_code or non_fatal:
+                    print("✓ Capture triggered")
+                    return True
+                # If failed and retry is allowed, try once more after a short reset
+                if retry:
+                    print("↻ Retry capture after resetting gphoto2...")
+                    self._kill_gphoto2()
+                    time.sleep(0.5)
+                    return self.capture_image(retry=False)
+                print("✗ Capture failed")
+                return False
+            except Exception as e:
+                print(f"✗ Capture error: {e}")
+                self._kill_gphoto2()
+                return False
 
     def capture_preview_bytes(self):
         """Capture a preview image and return raw JPEG bytes (no inversion)."""
         if not self.check_camera():
             raise RuntimeError("Camera not connected")
 
-        temp_dir = tempfile.mkdtemp()
+        temp_dir = None
         original_dir = os.getcwd()
         try:
-            self.camera_op_lock.acquire()
-            self._kill_gphoto2()
-            time.sleep(0.5)
+            temp_dir = tempfile.mkdtemp()
+            with self.camera_op_lock:
+                self._kill_gphoto2()
+                time.sleep(0.5)
 
-            if not self.enable_viewfinder():
-                raise RuntimeError("Failed to enable viewfinder")
+                if not self.enable_viewfinder():
+                    raise RuntimeError("Failed to enable viewfinder")
 
-            os.chdir(temp_dir)
-            result = subprocess.run(
-                ["gphoto2", "--capture-preview", "--force-overwrite"],
-                capture_output=True,
-                timeout=10,
-                text=True
-            )
-            os.chdir(original_dir)
+                os.chdir(temp_dir)
+                try:
+                    result = subprocess.run(
+                        ["gphoto2", "--capture-preview", "--force-overwrite"],
+                        capture_output=True,
+                        timeout=10,
+                        text=True
+                    )
+                finally:
+                    try:
+                        os.chdir(original_dir)
+                    except Exception:
+                        pass  # Don't mask subprocess errors; outer finally handles cleanup
 
-            if result.returncode != 0:
-                raise RuntimeError(f"Preview capture failed: {result.stderr.strip() if result.stderr else result.returncode}")
+                if result.returncode != 0:
+                    raise RuntimeError(f"Preview capture failed: {result.stderr.strip() if result.stderr else result.returncode}")
 
-            files = os.listdir(temp_dir)
-            preview_path = os.path.join(temp_dir, "preview.jpg")
-            if not os.path.exists(preview_path):
-                jpgs = [f for f in files if f.lower().endswith(('.jpg', '.jpeg'))]
-                if not jpgs:
-                    raise RuntimeError("No preview file created")
-                preview_path = os.path.join(temp_dir, jpgs[0])
+                files = os.listdir(temp_dir)
+                preview_path = os.path.join(temp_dir, "preview.jpg")
+                if not os.path.exists(preview_path):
+                    jpgs = [f for f in files if f.lower().endswith(('.jpg', '.jpeg'))]
+                    if not jpgs:
+                        raise RuntimeError("No preview file created")
+                    preview_path = os.path.join(temp_dir, jpgs[0])
 
-            with open(preview_path, "rb") as f:
-                data = f.read()
+                with open(preview_path, "rb") as f:
+                    data = f.read()
 
-            if len(data) < 1000:
-                raise RuntimeError("Preview image too small/corrupt")
+                if len(data) < 1000:
+                    raise RuntimeError("Preview image too small/corrupt")
 
-            return data
+                return data
         finally:
+            # Ensure we're back in original directory
             try:
                 os.chdir(original_dir)
             except Exception:
                 pass
-            if self.camera_op_lock.locked():
+            # Clean up temp directory
+            if temp_dir:
                 try:
-                    self.camera_op_lock.release()
-                except RuntimeError:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                except Exception:
                     pass
-            try:
-                shutil.rmtree(temp_dir, ignore_errors=True)
-            except Exception:
-                pass
 
     def auto_align(self, max_iters=5, stop_px=6, max_step=600, min_step=8, prefer_forward=True):
         """
@@ -619,13 +617,16 @@ class FilmScanner:
         """
         prev_offset = None
         last_move_steps = None
+        offset = 0  # Initialize to handle max_iters=0 edge case
 
         for iteration in range(max_iters):
             preview_bytes = self.capture_preview_bytes()
             detection = detect_frame_gap(preview_bytes)
 
-            self.last_gap_px = detection.gap_x
-            self.alignment_confidence = detection.confidence
+            # Update shared state under lock for thread safety
+            with self.lock:
+                self.last_gap_px = detection.gap_x
+                self.alignment_confidence = detection.confidence
 
             if detection.confidence < 0.15:
                 return False, "Low confidence in frame edge detection", {
@@ -635,7 +636,8 @@ class FilmScanner:
 
             offset = detection.offset_px
             if abs(offset) <= stop_px:
-                self.status_msg = "✓ Auto-aligned"
+                with self.lock:
+                    self.status_msg = "✓ Auto-aligned"
                 return True, "Aligned", {
                     "confidence": detection.confidence,
                     "offset_px": offset,
@@ -647,7 +649,8 @@ class FilmScanner:
             if iteration == 0 and prefer_forward and offset < 0:
                 commanded_offset = abs(offset)
 
-            px_per_step = max(0.5, float(self.px_per_step))
+            with self.lock:
+                px_per_step = max(0.5, float(self.px_per_step))
             step_float = commanded_offset / px_per_step
             steps = int(round(step_float))
             if abs(steps) < min_step:
@@ -664,20 +667,23 @@ class FilmScanner:
                 }
 
             # Update px_per_step estimate from observed change once we have two offsets
-            if prev_offset is not None and last_move_steps:
+            if prev_offset is not None and last_move_steps is not None and last_move_steps != 0:
                 delta_px = prev_offset - offset
                 if delta_px != 0:
                     est = abs(delta_px) / abs(last_move_steps)
                     if 0.1 < est < 50:  # sanity bounds
-                        self.px_per_step = 0.7 * self.px_per_step + 0.3 * est
+                        with self.lock:
+                            self.px_per_step = 0.7 * self.px_per_step + 0.3 * est
 
             prev_offset = offset
             last_move_steps = steps
 
-        self.status_msg = "✗ Auto-align failed to converge"
+        with self.lock:
+            self.status_msg = "✗ Auto-align failed to converge"
+            alignment_conf = self.alignment_confidence
         return False, "Failed to converge", {
-            "confidence": getattr(self, "alignment_confidence", 0.0),
-            "offset_px": prev_offset if prev_offset is not None else 0,
+            "confidence": alignment_conf,
+            "offset_px": offset,
         }
     def save_state(self):
         """Save scanning state"""
@@ -746,27 +752,29 @@ class FilmScanner:
     
     def get_status(self):
         """Get current status as dictionary"""
-        status = {
-            'roll_name': self.roll_name,
-            'frame_count': self.frame_count,
-            'strip_count': self.strip_count,
-            'frames_in_strip': self.frames_in_strip,
-            'position': self.position,
-            'mode': self.mode,
-            'frame_advance': self.frame_advance,
-            'auto_advance': self.auto_advance,
-            'camera_connected': self.camera_connected,
-            'camera_model': self.camera_model,
-            'camera_error': self.camera_error,
-            'viewfinder_enabled': self.viewfinder_enabled,
-            'status_msg': self.status_msg,
-            'arduino_connected': self.arduino is not None,
-            'arduino_port': self.arduino_port,
-            'arduino_board': self.arduino_board,
-            'px_per_step': self.px_per_step,
-            'alignment_confidence': self.alignment_confidence,
-            'last_gap_px': self.last_gap_px
-        }
+        # Acquire lock to safely read shared state
+        with self.lock:
+            status = {
+                'roll_name': self.roll_name,
+                'frame_count': self.frame_count,
+                'strip_count': self.strip_count,
+                'frames_in_strip': self.frames_in_strip,
+                'position': self.position,
+                'mode': self.mode,
+                'frame_advance': self.frame_advance,
+                'auto_advance': self.auto_advance,
+                'camera_connected': self.camera_connected,
+                'camera_model': self.camera_model,
+                'camera_error': self.camera_error,
+                'viewfinder_enabled': self.viewfinder_enabled,
+                'status_msg': self.status_msg,
+                'arduino_connected': self.arduino is not None,
+                'arduino_port': self.arduino_port,
+                'arduino_board': self.arduino_board,
+                'px_per_step': self.px_per_step,
+                'alignment_confidence': self.alignment_confidence,
+                'last_gap_px': self.last_gap_px
+            }
         
         return status
     
@@ -1003,15 +1011,20 @@ def auto_align_route():
     try:
         success, msg, info = scanner.auto_align()
         scanner.broadcast_status()
+        # Read shared state under lock for thread safety
+        with scanner.lock:
+            px_per_step = scanner.px_per_step
+            confidence = scanner.alignment_confidence
         return jsonify({
             'success': success,
             'message': msg,
             'info': info,
-            'px_per_step': scanner.px_per_step,
-            'confidence': scanner.alignment_confidence,
+            'px_per_step': px_per_step,
+            'confidence': confidence,
         })
     except Exception as e:
-        scanner.status_msg = "✗ Auto-align error"
+        with scanner.lock:
+            scanner.status_msg = "✗ Auto-align error"
         scanner.broadcast_status()
         return jsonify({'success': False, 'message': str(e)})
 @app.route('/api/calibrate', methods=['POST'])

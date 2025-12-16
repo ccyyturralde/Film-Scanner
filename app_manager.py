@@ -103,7 +103,7 @@ class AppManager:
         self.auto_restart_delay = auto_restart_delay
         
         # Threading
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._stop_event = threading.Event()
         self._log_thread: Optional[threading.Thread] = None
         self._monitor_thread: Optional[threading.Thread] = None
@@ -180,23 +180,25 @@ class AppManager:
         # Remove ANSI escape codes
         message = re.sub(r'\x1b\[[0-9;]*m', '', message)
         
-        # Parse Arduino/Camera connection status
-        if 'arduino' in line_lower:
-            if 'connected' in line_lower or '✓' in line:
-                self.status.arduino_connected = True
-            elif 'not found' in line_lower or 'disconnected' in line_lower:
-                self.status.arduino_connected = False
-        
-        if 'camera' in line_lower:
-            if 'detected' in line_lower or 'connected' in line_lower:
-                self.status.camera_connected = True
-            elif 'not connected' in line_lower:
-                self.status.camera_connected = False
-        
-        # Extract web URL
-        url_match = re.search(r'http://[\d\.]+:\d+', line)
-        if url_match:
-            self.status.web_url = url_match.group(0)
+        # Parse Arduino/Camera connection status (protected by lock for thread safety)
+        # Note: Check negative cases FIRST since 'disconnected' contains 'connected'
+        with self._lock:
+            if 'arduino' in line_lower:
+                if 'not found' in line_lower or 'disconnected' in line_lower or 'not connected' in line_lower:
+                    self.status.arduino_connected = False
+                elif 'connected' in line_lower or '✓' in line:
+                    self.status.arduino_connected = True
+            
+            if 'camera' in line_lower:
+                if 'not connected' in line_lower or 'not found' in line_lower or 'disconnected' in line_lower:
+                    self.status.camera_connected = False
+                elif 'detected' in line_lower or 'connected' in line_lower:
+                    self.status.camera_connected = True
+            
+            # Extract web URL
+            url_match = re.search(r'http://[\d\.]+:\d+', line)
+            if url_match:
+                self.status.web_url = url_match.group(0)
         
         return LogEntry(
             timestamp=timestamp,
@@ -445,14 +447,25 @@ class AppManager:
             AppState.CRASHED: ("💥 Crashed", "App stopped unexpectedly"),
         }
         
-        icon, desc = state_messages.get(self.state, ("❓ Unknown", "Unknown state"))
+        # Read all shared state under lock for thread safety
+        with self._lock:
+            current_state = self.state
+            uptime_seconds = self.status.uptime_seconds
+            pid = self.status.pid
+            error_count = self.status.error_count
+            last_error = self.status.last_error
+            web_url = self.status.web_url
+            arduino_connected = self.status.arduino_connected
+            camera_connected = self.status.camera_connected
+        
+        icon, desc = state_messages.get(current_state, ("❓ Unknown", "Unknown state"))
         
         # Format uptime
         uptime = ""
-        if self.status.uptime_seconds > 0:
-            hours = int(self.status.uptime_seconds // 3600)
-            minutes = int((self.status.uptime_seconds % 3600) // 60)
-            seconds = int(self.status.uptime_seconds % 60)
+        if uptime_seconds > 0:
+            hours = int(uptime_seconds // 3600)
+            minutes = int((uptime_seconds % 3600) // 60)
+            seconds = int(uptime_seconds % 60)
             if hours > 0:
                 uptime = f"{hours}h {minutes}m {seconds}s"
             elif minutes > 0:
@@ -461,16 +474,16 @@ class AppManager:
                 uptime = f"{seconds}s"
         
         return {
-            'state': self.state.value,
+            'state': current_state.value,
             'icon': icon,
             'description': desc,
             'uptime': uptime,
-            'pid': self.status.pid,
-            'error_count': self.status.error_count,
-            'last_error': self.status.last_error,
-            'web_url': self.status.web_url or "http://localhost:5000",
-            'arduino_connected': self.status.arduino_connected,
-            'camera_connected': self.status.camera_connected,
+            'pid': pid,
+            'error_count': error_count,
+            'last_error': last_error,
+            'web_url': web_url or "http://localhost:5000",
+            'arduino_connected': arduino_connected,
+            'camera_connected': camera_connected,
         }
     
     def format_error_for_display(self, error: str) -> str:

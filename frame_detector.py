@@ -57,7 +57,10 @@ def _smooth_profile(profile: np.ndarray, ksize: int = 11) -> np.ndarray:
     """Gaussian smooth; ksize must be odd."""
 
     ksize = max(3, ksize | 1)  # force odd and >=3
-    return cv2.GaussianBlur(profile, (ksize, 1), 0, borderType=cv2.BORDER_REPLICATE)
+    # cv2.GaussianBlur requires 2D input; reshape 1D profile to single-row 2D array
+    profile_2d = profile.reshape(1, -1)
+    smoothed_2d = cv2.GaussianBlur(profile_2d, (ksize, 1), 0, borderType=cv2.BORDER_REPLICATE)
+    return smoothed_2d.flatten()
 
 
 def _find_gaps(smoothed: np.ndarray, min_prominence: float, min_distance: int) -> List[GapDetection]:

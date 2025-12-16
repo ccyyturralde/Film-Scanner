@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-Film Scanner Touch Screen UI
+Film Scanner Touch Screen UI - Scanner App
 A PyGame-based touch screen interface for 3.5" TFT displays.
+
+This is the main scanner control app, launched from touchscreen_launcher.py
 
 Features:
 - Launch/Stop/Restart the web application
 - View real-time logs with friendly error messages
 - Display connection status (Arduino, Camera)
-- System status and uptime
+- System status and uptime (CPU, RAM, temperature)
 - Touch-friendly large buttons
 """
 
@@ -20,6 +22,13 @@ import threading
 from datetime import datetime
 from typing import List, Tuple, Optional, Callable
 from enum import Enum, auto
+
+# Optional psutil for system stats (graceful fallback if not available)
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
 
 # Import our modules
 from app_manager import AppManager, AppState, LogEntry, get_app_manager
@@ -50,6 +59,99 @@ def setup_framebuffer_env():
 
 # Set up framebuffer environment
 _using_framebuffer = setup_framebuffer_env()
+
+
+class SystemStatsMonitor:
+    """
+    Efficient system stats monitor with caching.
+    Reads CPU usage, RAM usage, and CPU temperature without poll spam.
+    """
+    
+    # Path to CPU temperature on Raspberry Pi
+    CPU_TEMP_PATH = "/sys/class/thermal/thermal_zone0/temp"
+    
+    def __init__(self, update_interval: float = 3.0):
+        """
+        Args:
+            update_interval: How often to refresh stats (seconds). Default 3s.
+        """
+        self.update_interval = update_interval
+        self._last_update = 0
+        
+        # Cached values
+        self._cpu_percent = 0.0
+        self._ram_percent = 0.0
+        self._cpu_temp = 0.0
+        
+        # Track if we can read temperature
+        self._temp_available = os.path.exists(self.CPU_TEMP_PATH)
+        
+        # Initialize CPU percent measurement (first call returns 0)
+        if PSUTIL_AVAILABLE:
+            psutil.cpu_percent(interval=None)
+    
+    def _read_cpu_temp(self) -> float:
+        """Read CPU temperature from thermal zone (Raspberry Pi)."""
+        if not self._temp_available:
+            return 0.0
+        
+        try:
+            with open(self.CPU_TEMP_PATH, 'r') as f:
+                # Temperature is in millidegrees Celsius
+                temp_milli = int(f.read().strip())
+                return temp_milli / 1000.0
+        except (IOError, ValueError):
+            return 0.0
+    
+    def update(self) -> bool:
+        """
+        Update stats if enough time has passed.
+        Returns True if stats were refreshed, False if cached values used.
+        """
+        now = time.time()
+        if now - self._last_update < self.update_interval:
+            return False
+        
+        self._last_update = now
+        
+        if PSUTIL_AVAILABLE:
+            # Non-blocking CPU percent (uses delta from last call)
+            self._cpu_percent = psutil.cpu_percent(interval=None)
+            
+            # RAM usage
+            mem = psutil.virtual_memory()
+            self._ram_percent = mem.percent
+        
+        # CPU temperature (works on Pi even without psutil)
+        self._cpu_temp = self._read_cpu_temp()
+        
+        return True
+    
+    @property
+    def cpu_percent(self) -> float:
+        """CPU usage percentage (0-100)."""
+        return self._cpu_percent
+    
+    @property
+    def ram_percent(self) -> float:
+        """RAM usage percentage (0-100)."""
+        return self._ram_percent
+    
+    @property
+    def cpu_temp(self) -> float:
+        """CPU temperature in Celsius."""
+        return self._cpu_temp
+    
+    @property
+    def temp_available(self) -> bool:
+        """Whether CPU temperature reading is available."""
+        return self._temp_available
+    
+    @property
+    def is_available(self) -> bool:
+        """Whether system stats are available at all."""
+        return PSUTIL_AVAILABLE or self._temp_available
+
 
 class Screen(Enum):
     """Available screens/views"""
@@ -188,7 +290,7 @@ class StatusBar:
         
         # Camera indicator
         cam_color = colors.success if self.camera_connected else colors.error
-        cam_text = "📷" if self.camera_connected else "📷"
+        cam_text = "📷" if self.camera_connected else "🚫"
         cam_surface, cam_rect = font.render(cam_text, cam_color)
         cam_rect.midright = (x_pos, indicator_y)
         surface.blit(cam_surface, cam_rect)
@@ -322,7 +424,7 @@ class TouchScreenUI:
             (self.config.display.width, self.config.display.height),
             display_flags
         )
-        pygame.display.set_caption("Film Scanner Control")
+        pygame.display.set_caption("Scanner Control")
         
         # Load fonts
         self.font = pygame.freetype.SysFont(
@@ -354,6 +456,11 @@ class TouchScreenUI:
         self.toast_message = ""
         self.toast_time = 0
         self.toast_duration = 3.0
+        
+        # System stats monitor (CPU, RAM, temp) - uses configurable interval
+        self.system_stats = SystemStatsMonitor(
+            update_interval=self.config.app.system_stats_interval
+        )
         
     def _create_widgets(self):
         """Create all UI widgets"""
@@ -443,16 +550,16 @@ class TouchScreenUI:
         )
         self.home_buttons.append(self.btn_errors)
         
-        self.btn_settings = Button(
+        self.btn_back_home = Button(
             pygame.Rect(col2_x, row3_y, btn_full_w, btn_h),
-            "EXIT",
+            "BACK",
             self._on_exit,
             color=colors.btn_secondary,
             hover_color=colors.btn_secondary_hover,
-            icon="✖",
+            icon="←",
             config=self.config
         )
-        self.home_buttons.append(self.btn_settings)
+        self.home_buttons.append(self.btn_back_home)
         
         # Info panel area
         info_y = row3_y + btn_h + margin
@@ -611,8 +718,9 @@ class TouchScreenUI:
         pygame.draw.rect(self.screen, colors.bg_panel, self.info_rect, 
                         border_radius=ui.panel_radius)
         
-        # Draw status info
-        status = self._last_status
+        # Draw status info (copy under lock to avoid race condition)
+        with self._status_lock:
+            status = self._last_status.copy() if self._last_status else {}
         if status:
             y = self.info_rect.top + ui.panel_padding
             x = self.info_rect.left + ui.panel_padding
@@ -649,6 +757,97 @@ class TouchScreenUI:
                 surf, rect = self.font.render(f"Last: {err}", colors.error)
                 self.screen.blit(surf, (x, y))
     
+    def _draw_system_stats(self):
+        """Draw system stats (CPU, RAM, temp) in the bottom-right corner."""
+        if not self.system_stats.is_available:
+            return
+        
+        colors = self.config.colors
+        ui = self.config.ui
+        
+        # Update stats (uses internal caching, won't spam)
+        self.system_stats.update()
+        
+        # Build stats text lines
+        stats_lines = []
+        
+        if PSUTIL_AVAILABLE:
+            cpu = self.system_stats.cpu_percent
+            ram = self.system_stats.ram_percent
+            stats_lines.append(f"CPU: {cpu:4.1f}%")
+            stats_lines.append(f"RAM: {ram:4.1f}%")
+        
+        if self.system_stats.temp_available:
+            temp = self.system_stats.cpu_temp
+            stats_lines.append(f"TMP: {temp:4.1f}°C")
+        
+        if not stats_lines:
+            return
+        
+        # Calculate position (bottom-right corner)
+        self.font.size = ui.font_size_tiny
+        line_height = ui.font_size_tiny + 2
+        padding = 6
+        
+        # Measure text width for background
+        max_width = 0
+        for line in stats_lines:
+            surf, rect = self.font.render(line, colors.text_secondary)
+            max_width = max(max_width, rect.width)
+        
+        # Background box dimensions
+        box_width = max_width + padding * 2
+        box_height = len(stats_lines) * line_height + padding * 2
+        
+        # Position in bottom-right
+        box_x = self.config.display.width - box_width - ui.button_margin
+        box_y = self.config.display.height - box_height - ui.button_margin
+        
+        # Draw semi-transparent background
+        box_rect = pygame.Rect(box_x, box_y, box_width, box_height)
+        box_surf = pygame.Surface((box_width, box_height), pygame.SRCALPHA)
+        pygame.draw.rect(box_surf, (*colors.bg_secondary, 200), 
+                        box_surf.get_rect(), border_radius=4)
+        self.screen.blit(box_surf, box_rect)
+        
+        # Draw stats text
+        y = box_y + padding
+        for line in stats_lines:
+            # Color-code temperature if hot
+            if line.startswith("TMP:"):
+                temp = self.system_stats.cpu_temp
+                if temp > 80:
+                    text_color = colors.error
+                elif temp > 70:
+                    text_color = colors.warning
+                else:
+                    text_color = colors.text_secondary
+            # Color-code CPU if high
+            elif line.startswith("CPU:"):
+                cpu = self.system_stats.cpu_percent
+                if cpu > 90:
+                    text_color = colors.error
+                elif cpu > 75:
+                    text_color = colors.warning
+                else:
+                    text_color = colors.text_secondary
+            # Color-code RAM if high
+            elif line.startswith("RAM:"):
+                ram = self.system_stats.ram_percent
+                if ram > 90:
+                    text_color = colors.error
+                elif ram > 80:
+                    text_color = colors.warning
+                else:
+                    text_color = colors.text_secondary
+            else:
+                text_color = colors.text_secondary
+            
+            surf, rect = self.font.render(line, text_color)
+            rect.topleft = (box_x + padding, y)
+            self.screen.blit(surf, rect)
+            y += line_height
+    
     def _draw_logs_screen(self):
         """Draw the logs/errors screen"""
         colors = self.config.colors
@@ -661,8 +860,10 @@ class TouchScreenUI:
                        self.config.ui.status_bar_height + 5)
         self.screen.blit(surf, rect)
         
-        # Update logs
-        self.log_viewer.set_logs(self._last_logs)
+        # Update logs (copy under lock to avoid race condition)
+        with self._status_lock:
+            logs_copy = list(self._last_logs)
+        self.log_viewer.set_logs(logs_copy)
         
         # Draw log viewer (offset for title)
         original_rect = self.log_viewer.rect
@@ -737,6 +938,9 @@ class TouchScreenUI:
             self._draw_home_screen()
         elif self.current_screen in [Screen.LOGS, Screen.ERRORS]:
             self._draw_logs_screen()
+        
+        # Draw system stats overlay (bottom-right corner, all screens)
+        self._draw_system_stats()
         
         # Draw toast notification
         self._draw_toast()

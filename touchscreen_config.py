@@ -142,6 +142,7 @@ class AppConfig:
     # Refresh intervals (seconds)
     status_refresh_interval: float = 2.0
     log_refresh_interval: float = 1.0
+    system_stats_interval: float = 3.0  # CPU/RAM/temp refresh interval
     
     # Web app settings
     web_app_port: int = 5000
