@@ -939,7 +939,7 @@ class FilmScanner:
             "confidence": alignment_conf,
             "offset_px": offset,
         }
-    def detect_alignment_roi(self, padding: float = 0.02, min_area_ratio: float = 0.05):
+    def detect_alignment_roi(self, padding: float = 0.0, min_area_ratio: float = 0.05):
         """
         Capture a preview and auto-detect the bright region (film window) to set alignment ROI.
         Returns (roi dict or None).
@@ -1452,7 +1452,7 @@ def preview_roi_route():
     except Exception as e:
         return jsonify({'success': False, 'message': f'Preview failed: {e}'})
 
-    detected_roi = detect_bright_region_roi(preview_bytes)
+    detected_roi = detect_bright_region_roi(preview_bytes, padding=0.0)
 
     # Optionally persist detected ROI
     if apply_roi and detected_roi:

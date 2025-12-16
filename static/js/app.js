@@ -29,6 +29,7 @@ let alignmentSettings = {
     roi: null,
     minConfidence: 0.1
 };
+const alignmentInputEdits = {};
 
 // Connect to WebSocket
 socket.on('connect', () => {
@@ -352,24 +353,30 @@ function syncAlignmentInputs(roi, minConfidence) {
     const minConfInput = document.getElementById('align-min-confidence');
 
     const activeId = document.activeElement?.id;
-    const editing = ['align-x0', 'align-x1', 'align-y0', 'align-y1', 'align-min-confidence'].includes(activeId);
+    const editingIds = ['align-x0', 'align-x1', 'align-y0', 'align-y1', 'align-min-confidence'];
+    const editing = editingIds.includes(activeId);
+    const now = Date.now();
+    const recentlyEdited = (id) => {
+        const ts = alignmentInputEdits[id];
+        return ts && (now - ts < 2000);
+    };
 
     const toPct = (v) => (v * 100).toFixed(1);
 
     if (!editing) {
         if (roi) {
-            if (x0Input) x0Input.value = toPct(roi.x0);
-            if (x1Input) x1Input.value = toPct(roi.x1);
-            if (y0Input) y0Input.value = toPct(roi.y0);
-            if (y1Input) y1Input.value = toPct(roi.y1);
+            if (x0Input && !recentlyEdited('align-x0')) x0Input.value = toPct(roi.x0);
+            if (x1Input && !recentlyEdited('align-x1')) x1Input.value = toPct(roi.x1);
+            if (y0Input && !recentlyEdited('align-y0')) y0Input.value = toPct(roi.y0);
+            if (y1Input && !recentlyEdited('align-y1')) y1Input.value = toPct(roi.y1);
         } else {
-            if (x0Input && !x0Input.value) x0Input.value = '0';
-            if (x1Input && !x1Input.value) x1Input.value = '100';
-            if (y0Input && !y0Input.value) y0Input.value = '0';
-            if (y1Input && !y1Input.value) y1Input.value = '100';
+            if (x0Input && !x0Input.value && !recentlyEdited('align-x0')) x0Input.value = '0';
+            if (x1Input && !x1Input.value && !recentlyEdited('align-x1')) x1Input.value = '100';
+            if (y0Input && !y0Input.value && !recentlyEdited('align-y0')) y0Input.value = '0';
+            if (y1Input && !y1Input.value && !recentlyEdited('align-y1')) y1Input.value = '100';
         }
 
-        if (minConfInput && minConfidence !== undefined) {
+        if (minConfInput && minConfidence !== undefined && !recentlyEdited('align-min-confidence')) {
             minConfInput.value = (minConfidence * 100).toFixed(0);
         }
     }
@@ -780,5 +787,18 @@ document.addEventListener('DOMContentLoaded', () => {
     
     document.addEventListener('touchend', () => {
         stopMotorHold();
+    });
+
+    // Track user edits on alignment inputs to avoid overwriting while typing
+    const alignInputs = ['align-x0', 'align-x1', 'align-y0', 'align-y1', 'align-min-confidence']
+        .map(id => document.getElementById(id))
+        .filter(Boolean);
+    alignInputs.forEach(input => {
+        input.addEventListener('input', () => {
+            alignmentInputEdits[input.id] = Date.now();
+        });
+        input.addEventListener('focus', () => {
+            alignmentInputEdits[input.id] = Date.now();
+        });
     });
 });

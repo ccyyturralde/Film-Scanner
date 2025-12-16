@@ -149,8 +149,8 @@ def _normalize_roi(roi, width: int, height: int):
 
 def detect_frame_gap(
     jpeg_bytes: bytes,
-    smooth_ksize: int = 15,
-    min_prominence_ratio: float = 0.25,
+    smooth_ksize: int = 11,
+    min_prominence_ratio: float = 0.15,
     min_distance_ratio: float = 0.05,
     roi: Optional[dict] = None,
 ) -> DetectionResult:
@@ -215,7 +215,7 @@ def detect_frame_gap(
 def detect_bright_region_roi(
     jpeg_bytes: bytes,
     min_area_ratio: float = 0.05,
-    padding: float = 0.02,
+    padding: float = 0.0,
 ) -> Optional[dict]:
     """
     Detect the largest bright region (lit film window) within a mostly dark mask.
@@ -229,9 +229,10 @@ def detect_bright_region_roi(
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-    # Morphological close to fill small holes
+    # Morphological close to fill small holes, then a light erode to tighten edges
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
     binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=2)
+    binary = cv2.erode(binary, kernel, iterations=1)
 
     # Find largest contour
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -253,6 +254,14 @@ def detect_bright_region_roi(
         return None
 
     x, y, bw, bh = best_box
+
+    # Slightly shrink the detected box to avoid including mask edges
+    shrink_x = int(round(0.003 * w))
+    shrink_y = int(round(0.003 * h))
+    x += shrink_x
+    y += shrink_y
+    bw = max(1, bw - 2 * shrink_x)
+    bh = max(1, bh - 2 * shrink_y)
 
     # Add optional padding (as fraction of image size) and clamp
     pad_x = int(round(padding * w))
