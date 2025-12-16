@@ -66,7 +66,8 @@ class DisplayConfig:
     height: int = 320
     
     # Framebuffer device (for direct rendering)
-    framebuffer: str = "/dev/fb1"  # Usually fb1 for SPI displays
+    # Note: With vc4-kms-v3d overlay, FBTFT displays use /dev/fb0
+    framebuffer: str = "/dev/fb0"
     
     # Touch input device
     touch_device: str = "/dev/input/touchscreen"

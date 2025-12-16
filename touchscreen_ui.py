@@ -34,31 +34,16 @@ except ImportError:
 from app_manager import AppManager, AppState, LogEntry, get_app_manager
 from touchscreen_config import TouchScreenConfig, get_config, ColorTheme
 
-# Configure SDL for framebuffer rendering (Pi OS Lite compatible)
-# Only set these if not already set (allows override via environment)
-def setup_framebuffer_env():
-    """Configure environment for framebuffer/TFT display on Pi OS Lite"""
-    # Check if we're in windowed mode (via command line or environment)
-    if '--windowed' in sys.argv:
-        # Desktop/windowed mode - don't set framebuffer vars
-        return False
-    
-    # Framebuffer configuration for Pi OS Lite (no X11 required)
-    fb_env = {
-        'SDL_FBDEV': '/dev/fb1',
-        'SDL_VIDEODRIVER': 'fbcon',
-        'SDL_MOUSEDRV': 'TSLIB',
-        'SDL_MOUSEDEV': '/dev/input/touchscreen',
-    }
-    
-    for key, value in fb_env.items():
-        if key not in os.environ:
-            os.environ[key] = value
-    
-    return True
+# Try to import framebuffer display module
+try:
+    from framebuffer_display import FramebufferDisplay, init_display
+    FRAMEBUFFER_AVAILABLE = True
+except ImportError:
+    FRAMEBUFFER_AVAILABLE = False
 
-# Set up framebuffer environment
-_using_framebuffer = setup_framebuffer_env()
+def is_windowed_mode():
+    """Check if running in windowed/desktop mode"""
+    return '--windowed' in sys.argv
 
 
 class SystemStatsMonitor:
@@ -410,21 +395,54 @@ class TouchScreenUI:
         self.running = False
         self.current_screen = Screen.HOME
         
-        # Initialize pygame
+        # Initialize pygame (core modules, not display yet)
         pygame.init()
         pygame.freetype.init()
         
-        # Hide mouse cursor for touch screen
-        if not self.config.display.show_cursor:
-            pygame.mouse.set_visible(False)
+        # Determine display mode
+        windowed = is_windowed_mode()
+        self._using_framebuffer = False
+        self._fb_display = None
         
-        # Set up display
-        display_flags = pygame.FULLSCREEN if self.config.display.fullscreen else 0
-        self.screen = pygame.display.set_mode(
-            (self.config.display.width, self.config.display.height),
-            display_flags
-        )
-        pygame.display.set_caption("Scanner Control")
+        if not windowed and FRAMEBUFFER_AVAILABLE:
+            # Try direct framebuffer for TFT displays
+            fb_device = self.config.display.framebuffer
+            # Check for fb0 first (FBTFT uses fb0 with vc4-kms-v3d)
+            if not os.path.exists(fb_device):
+                for fb_path in ['/dev/fb0', '/dev/fb1']:
+                    if os.path.exists(fb_path):
+                        fb_device = fb_path
+                        break
+            
+            if os.path.exists(fb_device):
+                try:
+                    self._fb_display = FramebufferDisplay(
+                        fb_device,
+                        self.config.display.width,
+                        self.config.display.height
+                    )
+                    self.screen = self._fb_display.surface
+                    self._using_framebuffer = True
+                    print(f"Using direct framebuffer: {fb_device}")
+                except Exception as e:
+                    print(f"Framebuffer init failed: {e}, falling back to SDL")
+        
+        if not self._using_framebuffer:
+            # Fallback to SDL/pygame display (windowed mode or framebuffer failed)
+            # Hide mouse cursor for touch screen
+            if not self.config.display.show_cursor:
+                try:
+                    pygame.mouse.set_visible(False)
+                except pygame.error:
+                    pass  # May fail if no display
+            
+            display_flags = pygame.FULLSCREEN if self.config.display.fullscreen and not windowed else 0
+            self.screen = pygame.display.set_mode(
+                (self.config.display.width, self.config.display.height),
+                display_flags
+            )
+            pygame.display.set_caption("Scanner Control")
+            print("Using SDL display")
         
         # Load fonts
         self.font = pygame.freetype.SysFont(
@@ -946,7 +964,10 @@ class TouchScreenUI:
         self._draw_toast()
         
         # Update display
-        pygame.display.flip()
+        if self._using_framebuffer and self._fb_display:
+            self._fb_display.update()
+        else:
+            pygame.display.flip()
     
     def run(self):
         """Main application loop"""
@@ -978,6 +999,9 @@ class TouchScreenUI:
             self.clock.tick(30)
         
         # Cleanup
+        if self._using_framebuffer and self._fb_display:
+            self._fb_display.clear()
+            self._fb_display.update()
         pygame.quit()
     
     def cleanup(self):
