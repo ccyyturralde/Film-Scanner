@@ -742,7 +742,7 @@ class TouchScreenUI:
         )
         self.home_buttons.append(self.btn_logs)
         
-        # Row 3: Errors / Exit
+        # Row 3: Errors / Fix Camera
         row3_y = row2_y + btn_h + margin
         
         self.btn_errors = Button(
@@ -755,15 +755,15 @@ class TouchScreenUI:
         )
         self.home_buttons.append(self.btn_errors)
         
-        self.btn_back_home = Button(
+        self.btn_fix_camera = Button(
             pygame.Rect(col2_x, row3_y, btn_full_w, btn_h),
-            "EXIT",
-            self._on_exit,
-            color=colors.btn_secondary,
-            hover_color=colors.btn_secondary_hover,
+            "FIX CAM",
+            self._on_force_fix,
+            color=colors.btn_warning,
+            hover_color=colors.btn_warning_hover,
             config=self.config
         )
-        self.home_buttons.append(self.btn_back_home)
+        self.home_buttons.append(self.btn_fix_camera)
         
         # Info panel area
         info_y = row3_y + btn_h + margin
@@ -849,9 +849,76 @@ class TouchScreenUI:
         self._show_toast("Restarting app...")
         threading.Thread(target=self.app_manager.restart, daemon=True).start()
     
-    def _on_exit(self):
-        """Exit button handler"""
-        self.running = False
+    def _on_force_fix(self):
+        """Force fix camera and Arduino connections"""
+        self._show_toast("Fixing connections...")
+        
+        def do_fix():
+            try:
+                # Import the USB clearing function from web_app
+                import subprocess
+                import time
+                
+                # Stop the web app if running
+                was_running = self.app_manager.state == AppState.RUNNING
+                if was_running:
+                    self.app_manager.stop()
+                    time.sleep(1)
+                
+                # Kill any gphoto2 and gvfs processes that might be blocking
+                processes_to_kill = [
+                    "gphoto2", "gvfsd-gphoto2", "gvfs-gphoto2-volume-monitor",
+                    "gvfsd-mtp", "gvfsd-ptp", "PTPCamera"
+                ]
+                for proc in processes_to_kill:
+                    try:
+                        subprocess.run(["killall", "-9", proc], capture_output=True, timeout=2)
+                    except:
+                        pass
+                
+                # Kill any gvfsd processes
+                try:
+                    subprocess.run(["pkill", "-9", "-f", "gvfsd"], capture_output=True, timeout=2)
+                except:
+                    pass
+                
+                # Try to reset USB for Canon cameras
+                try:
+                    result = subprocess.run(["lsusb"], capture_output=True, text=True, timeout=5)
+                    if result.returncode == 0:
+                        for line in result.stdout.split('\n'):
+                            if 'canon' in line.lower():
+                                parts = line.split()
+                                if len(parts) >= 6:
+                                    bus = parts[1]
+                                    device = parts[3].rstrip(':')
+                                    usb_path = f"/dev/bus/usb/{bus}/{device}"
+                                    try:
+                                        subprocess.run(["usbreset", usb_path], capture_output=True, timeout=3)
+                                    except:
+                                        pass
+                except:
+                    pass
+                
+                # Unmount any gphoto2 auto-mounts
+                try:
+                    subprocess.run(["gio", "mount", "-u", "-f", "gphoto2://"], capture_output=True, timeout=5)
+                except:
+                    pass
+                
+                time.sleep(1)
+                
+                # Restart the web app (this will re-detect camera and Arduino)
+                if was_running or True:  # Always restart to apply fix
+                    self.app_manager.start()
+                
+                self._show_toast("Fix complete - check status")
+                
+            except Exception as e:
+                self._show_toast(f"Fix error: {str(e)[:20]}")
+        
+        # Run in background thread
+        threading.Thread(target=do_fix, daemon=True).start()
     
     def _show_logs(self):
         """Show logs screen"""
