@@ -120,14 +120,23 @@ apt-get install -y \
 # Note: We do NOT install tslib - it's not available on modern Debian
 # and we use evdev for touch input instead
 
-# Install Python packages
+# Install Python packages system-wide (simpler for touchscreen-only setup)
 print_step "Installing Python packages..."
-sudo -u $ACTUAL_USER pip3 install --break-system-packages --user \
+pip3 install --break-system-packages \
     pygame>=2.5.0 \
     numpy>=1.24.0 \
     pillow>=10.0.0 \
     evdev>=1.6.0 \
     psutil>=5.9.0 || true
+
+# Add user to hardware groups
+print_step "Adding $ACTUAL_USER to hardware access groups..."
+usermod -a -G video "$ACTUAL_USER" 2>/dev/null || true    # Framebuffer
+usermod -a -G input "$ACTUAL_USER" 2>/dev/null || true    # Touch input
+usermod -a -G dialout "$ACTUAL_USER" 2>/dev/null || true  # Serial
+usermod -a -G gpio "$ACTUAL_USER" 2>/dev/null || true     # GPIO
+usermod -a -G spi "$ACTUAL_USER" 2>/dev/null || true      # SPI
+usermod -a -G i2c "$ACTUAL_USER" 2>/dev/null || true      # I2C
 
 # ============================================================================
 # TFT Screen Driver Selection
@@ -226,14 +235,17 @@ fi
 # ============================================================================
 print_header "Configuring Touch Input"
 
-# Create udev rules for touch screen
-print_step "Creating udev rules for touch input..."
+# Create udev rules for touch screen and framebuffer access
+print_step "Creating udev rules for touch input and framebuffer..."
 cat > /etc/udev/rules.d/95-touchscreen.rules << 'EOF'
 # Touch screen rules - create symlink for easy access
-SUBSYSTEM=="input", ATTRS{name}=="*Touch*", SYMLINK+="input/touchscreen"
-SUBSYSTEM=="input", ATTRS{name}=="*touch*", SYMLINK+="input/touchscreen"
-SUBSYSTEM=="input", ATTRS{name}=="ADS7846*", SYMLINK+="input/touchscreen"
-SUBSYSTEM=="input", ATTRS{name}=="*ADS7846*", SYMLINK+="input/touchscreen"
+SUBSYSTEM=="input", ATTRS{name}=="*Touch*", SYMLINK+="input/touchscreen", MODE="0666"
+SUBSYSTEM=="input", ATTRS{name}=="*touch*", SYMLINK+="input/touchscreen", MODE="0666"
+SUBSYSTEM=="input", ATTRS{name}=="ADS7846*", SYMLINK+="input/touchscreen", MODE="0666"
+SUBSYSTEM=="input", ATTRS{name}=="*ADS7846*", SYMLINK+="input/touchscreen", MODE="0666"
+
+# Framebuffer access for video group
+SUBSYSTEM=="graphics", KERNEL=="fb*", MODE="0660", GROUP="video"
 EOF
 
 # Reload udev rules
@@ -342,12 +354,12 @@ Wants=systemd-udev-settle.service
 
 [Service]
 Type=simple
-User=$ACTUAL_USER
-Group=$ACTUAL_USER
+User=root
+Group=root
 WorkingDirectory=$REPO_ROOT
 Environment=PYTHONUNBUFFERED=1
 
-# Direct framebuffer mode - no SDL environment needed
+# Direct framebuffer mode - runs as root for /dev/fb0 and /dev/input access
 ExecStart=/usr/bin/python3 $REPO_ROOT/touchscreen_ui.py
 Restart=always
 RestartSec=5

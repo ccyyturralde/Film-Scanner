@@ -202,6 +202,15 @@ print_step "Installing Python packages..."
 # Set ownership
 chown -R "$APP_USER:$APP_USER" "$APP_DIR"
 
+# Add user to required groups for hardware access
+print_step "Adding $APP_USER to hardware access groups..."
+usermod -a -G video "$APP_USER" 2>/dev/null || true    # Framebuffer access
+usermod -a -G input "$APP_USER" 2>/dev/null || true    # Touch/input device access
+usermod -a -G dialout "$APP_USER" 2>/dev/null || true  # Serial port access (Arduino)
+usermod -a -G gpio "$APP_USER" 2>/dev/null || true     # GPIO access
+usermod -a -G spi "$APP_USER" 2>/dev/null || true      # SPI access
+usermod -a -G i2c "$APP_USER" 2>/dev/null || true      # I2C access
+
 print_header "Creating Directories"
 
 # Create data directories
@@ -383,6 +392,62 @@ systemctl status film-scanner-touchscreen.service --no-pager --lines=5
 EOF
 chmod +x /usr/local/bin/stop-touchscreen
 
+# Create scanner-run command to run any script with the venv
+cat > /usr/local/bin/scanner-run << EOF
+#!/usr/bin/env bash
+# Run a Python script using the Film Scanner virtual environment
+exec $APP_DIR/.venv/bin/python "\$@"
+EOF
+chmod +x /usr/local/bin/scanner-run
+
+# Create film-scanner command for direct access
+cat > /usr/local/bin/film-scanner << EOF
+#!/usr/bin/env bash
+# Film Scanner command-line interface
+APP_DIR="$APP_DIR"
+VENV_PYTHON="\$APP_DIR/.venv/bin/python"
+
+case "\$1" in
+    web)
+        echo "Starting web app..."
+        exec "\$VENV_PYTHON" "\$APP_DIR/web_app.py"
+        ;;
+    touch|touchscreen)
+        echo "Starting touchscreen UI..."
+        exec sudo "\$VENV_PYTHON" "\$APP_DIR/touchscreen_ui.py"
+        ;;
+    calibrate)
+        echo "Starting touch calibration..."
+        exec sudo "\$VENV_PYTHON" "\$APP_DIR/touch_calibrate.py" "\${@:2}"
+        ;;
+    status)
+        echo "=== Web App ==="
+        systemctl status film-scanner.service --no-pager --lines=3 2>/dev/null || echo "Not installed as service"
+        echo ""
+        echo "=== Touchscreen UI ==="
+        systemctl status film-scanner-touchscreen.service --no-pager --lines=3 2>/dev/null || echo "Not installed as service"
+        ;;
+    *)
+        echo "Film Scanner CLI"
+        echo ""
+        echo "Usage: film-scanner <command>"
+        echo ""
+        echo "Commands:"
+        echo "  web          Start the web application"
+        echo "  touch        Start the touchscreen UI (requires sudo)"
+        echo "  calibrate    Run touch calibration tool"
+        echo "  status       Show service status"
+        echo ""
+        echo "Service commands:"
+        echo "  start-scanner       Start web app service"
+        echo "  stop-scanner        Stop web app service"
+        echo "  start-touchscreen   Start touchscreen service"
+        echo "  stop-touchscreen    Stop touchscreen service"
+        ;;
+esac
+EOF
+chmod +x /usr/local/bin/film-scanner
+
 print_header "TFT Touchscreen Setup"
 
 echo ""
@@ -396,12 +461,15 @@ read -p "Enter choice [1/2]: " tft_choice
 if [[ "$tft_choice" == "1" ]]; then
     print_step "Setting up TFT touchscreen..."
     
-    # Create udev rules for touch input
+    # Create udev rules for touch input and framebuffer
     cat > /etc/udev/rules.d/95-touchscreen.rules << 'EOF'
 # Touch screen rules - create symlink for touch devices
-SUBSYSTEM=="input", ATTRS{name}=="*Touch*", SYMLINK+="input/touchscreen"
-SUBSYSTEM=="input", ATTRS{name}=="*touch*", SYMLINK+="input/touchscreen"
-SUBSYSTEM=="input", ATTRS{name}=="ADS7846*", SYMLINK+="input/touchscreen"
+SUBSYSTEM=="input", ATTRS{name}=="*Touch*", SYMLINK+="input/touchscreen", MODE="0666"
+SUBSYSTEM=="input", ATTRS{name}=="*touch*", SYMLINK+="input/touchscreen", MODE="0666"
+SUBSYSTEM=="input", ATTRS{name}=="ADS7846*", SYMLINK+="input/touchscreen", MODE="0666"
+
+# Framebuffer access for video group
+SUBSYSTEM=="graphics", KERNEL=="fb*", MODE="0660", GROUP="video"
 EOF
     udevadm control --reload-rules
     udevadm trigger

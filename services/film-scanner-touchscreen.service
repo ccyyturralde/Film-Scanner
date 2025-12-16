@@ -1,32 +1,39 @@
+# Film Scanner Touch Screen UI Service
+# 
+# NOTE: This is a template file. The actual service is created by setup_pi.sh
+# with the correct paths and username for your system.
+#
+# If you need to manually install, copy this file to /etc/systemd/system/
+# and update the following:
+#   - User and Group (your username)
+#   - WorkingDirectory (where Film-Scanner is installed)
+#   - ExecStart (path to python and touchscreen_ui.py)
+#
+# Then run:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable film-scanner-touchscreen.service
+
 [Unit]
 Description=Film Scanner Touch Screen UI
-Documentation=https://github.com/yourusername/Film-Scanner
 After=multi-user.target
 Wants=systemd-udev-settle.service
 
 [Service]
 Type=simple
-# Update User/Group to match your Pi username
-User=scanner
-Group=scanner
 
-# Working directory - update path as needed
-WorkingDirectory=/home/scanner/Film-Scanner
+# UPDATE THESE FOR YOUR SYSTEM:
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/Film-Scanner
 
-# Environment
 Environment=PYTHONUNBUFFERED=1
 
 # Direct framebuffer mode - no SDL/X11 environment needed
-# The application handles framebuffer access directly
-ExecStart=/usr/bin/python3 /home/scanner/Film-Scanner/touchscreen_ui.py
+# The application handles framebuffer access directly via evdev
+ExecStart=/usr/bin/python3 /home/pi/Film-Scanner/touchscreen_ui.py
 
-# Restart on failure
 Restart=always
 RestartSec=5
-StartLimitBurst=5
-StartLimitInterval=60
-
-# Logging
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=film-scanner-touchscreen
