@@ -139,8 +139,8 @@ class UIConfig:
 @dataclass 
 class AppConfig:
     """Application behavior configuration"""
-    # Auto-start web app on boot
-    auto_start_app: bool = True
+    # Auto-start web app when touchscreen UI launches (user can press START manually)
+    auto_start_app: bool = False
     
     # Auto-restart crashed app
     auto_restart: bool = True

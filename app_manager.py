@@ -315,7 +315,8 @@ class AppManager:
             self.status.arduino_connected = False
             self.status.camera_connected = False
             
-            # Start the process
+            # Start the process in its own process group
+            # This allows us to kill the entire group (Flask spawns child processes)
             env = os.environ.copy()
             env['PYTHONUNBUFFERED'] = '1'  # Force unbuffered output
             
@@ -326,7 +327,8 @@ class AppManager:
                 text=True,
                 bufsize=1,
                 env=env,
-                cwd=str(self.app_path.parent)
+                cwd=str(self.app_path.parent),
+                start_new_session=True  # Create new process group for clean shutdown
             )
             
             self.status.pid = self.process.pid
@@ -382,25 +384,62 @@ class AppManager:
         
         if self.process:
             try:
-                # Try graceful termination
-                self.process.terminate()
+                pid = self.process.pid
+                
+                # Kill the entire process group/tree (Flask spawns child processes)
+                try:
+                    # On Unix, kill the process group
+                    os.killpg(os.getpgid(pid), signal.SIGTERM)
+                except (OSError, ProcessLookupError):
+                    # Fallback: just terminate the main process
+                    self.process.terminate()
                 
                 try:
                     self.process.wait(timeout=timeout)
                 except subprocess.TimeoutExpired:
-                    # Force kill
-                    self.process.kill()
+                    # Force kill the process group
+                    try:
+                        os.killpg(os.getpgid(pid), signal.SIGKILL)
+                    except (OSError, ProcessLookupError):
+                        self.process.kill()
                     self.process.wait(timeout=5)
+                
+                # Also kill any remaining processes on port 5000
+                self._kill_port_processes(5000)
                 
                 self.process = None
                 self.status.pid = None
                 
             except Exception as e:
                 self.status.last_error = f"Stop error: {e}"
+                # Try to kill by port as last resort
+                self._kill_port_processes(5000)
                 return False
         
         self._set_state(AppState.STOPPED)
         return True
+    
+    def _kill_port_processes(self, port: int):
+        """Kill any processes using the specified port"""
+        try:
+            # Use fuser to find and kill processes on the port
+            subprocess.run(
+                ["fuser", "-k", f"{port}/tcp"],
+                capture_output=True,
+                timeout=5
+            )
+        except Exception:
+            pass
+        
+        try:
+            # Also try pkill for any remaining web_app processes
+            subprocess.run(
+                ["pkill", "-f", "web_app.py"],
+                capture_output=True,
+                timeout=5
+            )
+        except Exception:
+            pass
     
     def restart(self) -> bool:
         """Restart the web application"""
