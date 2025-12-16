@@ -1325,10 +1325,12 @@ def get_preview():
     # Create temp directory
     temp_dir = tempfile.mkdtemp()
     original_dir = os.getcwd()
+    lock_acquired = False
     
     try:
         # Ensure exclusive access to gphoto2 during preview
         scanner.camera_op_lock.acquire()
+        lock_acquired = True
         print("\n📷 Capturing live preview from camera...")
         scanner._kill_gphoto2()
         time.sleep(0.5)
@@ -1473,7 +1475,7 @@ def get_preview():
         return jsonify({'success': False, 'message': str(e)})
         
     finally:
-        if scanner.camera_op_lock.locked():
+        if lock_acquired:
             try:
                 scanner.camera_op_lock.release()
             except RuntimeError:
