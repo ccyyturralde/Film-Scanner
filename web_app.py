@@ -35,6 +35,8 @@ import glob
 from pathlib import Path
 from config_manager import ConfigManager
 from frame_detector import detect_frame_gap, detect_bright_region_roi
+import cv2
+import numpy as np
 try:
     from PIL import Image, ImageOps
     PIL_AVAILABLE = True
@@ -1429,6 +1431,64 @@ def set_alignment_config_route():
             })
     except ValueError as e:
         return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/preview_roi', methods=['POST'])
+def preview_roi_route():
+    """
+    Capture a raw (non-inverted) preview, run ROI detection, and return
+    a preview image with a red rectangle over the detected ROI.
+
+    Does not change the saved alignment ROI unless apply=true is passed.
+    """
+    apply_roi = False
+    data = request.json or {}
+    if isinstance(data, dict):
+        apply_roi = bool(data.get('apply'))
+
+    # Get a fresh preview (raw)
+    try:
+        preview_bytes = scanner.capture_preview_bytes()
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'Preview failed: {e}'})
+
+    detected_roi = detect_bright_region_roi(preview_bytes)
+
+    # Optionally persist detected ROI
+    if apply_roi and detected_roi:
+        with scanner.lock:
+            scanner.alignment_roi = detected_roi
+        scanner._save_alignment_config()
+
+    # Draw rectangle if detected
+    try:
+        arr = np.frombuffer(preview_bytes, dtype=np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img is None:
+            raise ValueError("Failed to decode preview")
+
+        if detected_roi:
+            h, w = img.shape[:2]
+            x0 = int(detected_roi['x0'] * w)
+            x1 = int(detected_roi['x1'] * w)
+            y0 = int(detected_roi['y0'] * h)
+            y1 = int(detected_roi['y1'] * h)
+            cv2.rectangle(img, (x0, y0), (x1, y1), (0, 0, 255), thickness=3)
+
+        # Encode back to JPEG
+        success, buf = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+        if not success:
+            raise ValueError("Failed to encode ROI preview")
+        image_data = base64.b64encode(buf.tobytes()).decode('utf-8')
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'ROI overlay failed: {e}', 'roi': detected_roi})
+
+    return jsonify({
+        'success': True,
+        'roi': detected_roi,
+        'applied': apply_roi and bool(detected_roi),
+        'image': image_data
+    })
 @app.route('/api/detect_alignment_roi', methods=['POST'])
 def detect_alignment_roi_route():
     """

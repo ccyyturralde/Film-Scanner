@@ -351,22 +351,27 @@ function syncAlignmentInputs(roi, minConfidence) {
     const y1Input = document.getElementById('align-y1');
     const minConfInput = document.getElementById('align-min-confidence');
 
+    const activeId = document.activeElement?.id;
+    const editing = ['align-x0', 'align-x1', 'align-y0', 'align-y1', 'align-min-confidence'].includes(activeId);
+
     const toPct = (v) => (v * 100).toFixed(1);
 
-    if (roi) {
-        if (x0Input) x0Input.value = toPct(roi.x0);
-        if (x1Input) x1Input.value = toPct(roi.x1);
-        if (y0Input) y0Input.value = toPct(roi.y0);
-        if (y1Input) y1Input.value = toPct(roi.y1);
-    } else {
-        if (x0Input && !x0Input.value) x0Input.value = '0';
-        if (x1Input && !x1Input.value) x1Input.value = '100';
-        if (y0Input && !y0Input.value) y0Input.value = '0';
-        if (y1Input && !y1Input.value) y1Input.value = '100';
-    }
+    if (!editing) {
+        if (roi) {
+            if (x0Input) x0Input.value = toPct(roi.x0);
+            if (x1Input) x1Input.value = toPct(roi.x1);
+            if (y0Input) y0Input.value = toPct(roi.y0);
+            if (y1Input) y1Input.value = toPct(roi.y1);
+        } else {
+            if (x0Input && !x0Input.value) x0Input.value = '0';
+            if (x1Input && !x1Input.value) x1Input.value = '100';
+            if (y0Input && !y0Input.value) y0Input.value = '0';
+            if (y1Input && !y1Input.value) y1Input.value = '100';
+        }
 
-    if (minConfInput && minConfidence !== undefined) {
-        minConfInput.value = (minConfidence * 100).toFixed(0);
+        if (minConfInput && minConfidence !== undefined) {
+            minConfInput.value = (minConfidence * 100).toFixed(0);
+        }
     }
 }
 
@@ -411,12 +416,24 @@ async function applyAlignmentConfig(clear = false) {
 async function detectAlignmentRoi() {
     const btn = event?.target;
     if (btn) setButtonProcessing(btn, true);
-    const result = await apiCall('detect_alignment_roi');
+    const result = await apiCall('preview_roi', { apply: false });
     if (btn) setButtonProcessing(btn, false);
 
     if (result.success && result.roi) {
         syncAlignmentInputs(result.roi, alignmentSettings.minConfidence);
-        alert('Detected ROI from preview.');
+        // Show image with ROI overlay if provided
+        if (result.image) {
+            const previewImg = document.getElementById('preview-image');
+            const previewContainer = document.getElementById('preview-container');
+            const timestamp = document.getElementById('preview-timestamp');
+            if (previewImg && previewContainer && timestamp) {
+                previewImg.src = 'data:image/jpeg;base64,' + result.image;
+                previewContainer.style.display = 'block';
+                const now = new Date();
+                timestamp.textContent = 'ROI preview at ' + now.toLocaleTimeString();
+            }
+        }
+        alert('Detected ROI from preview. Red box shown on preview.');
     } else {
         alert('Could not detect ROI automatically: ' + (result.message || 'Unknown error'));
     }
