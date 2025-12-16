@@ -31,7 +31,8 @@ class FramebufferDisplay:
     to the framebuffer in RGB565 format.
     """
     
-    def __init__(self, device: str = '/dev/fb0', width: int = 480, height: int = 320):
+    def __init__(self, device: str = '/dev/fb0', width: int = 480, height: int = 320, 
+                 bgr_mode: bool = None):
         """
         Initialize framebuffer display.
         
@@ -39,6 +40,7 @@ class FramebufferDisplay:
             device: Framebuffer device path (usually /dev/fb0 for FBTFT)
             width: Display width in pixels
             height: Display height in pixels
+            bgr_mode: Use BGR565 instead of RGB565 (auto-detect if None)
         """
         self.device = device
         self.width = width
@@ -47,6 +49,19 @@ class FramebufferDisplay:
         # Verify framebuffer exists
         if not os.path.exists(device):
             raise RuntimeError(f"Framebuffer device not found: {device}")
+        
+        # Detect framebuffer properties
+        self._bits_per_pixel = self._get_fb_bits_per_pixel()
+        
+        # BGR mode: some displays (like ILI9486) use BGR565 instead of RGB565
+        # Auto-detect based on common display drivers
+        if bgr_mode is None:
+            self._bgr_mode = self._detect_bgr_mode()
+        else:
+            self._bgr_mode = bgr_mode
+        
+        print(f"Framebuffer: {device}, {width}x{height}, {self._bits_per_pixel}bpp, "
+              f"{'BGR' if self._bgr_mode else 'RGB'}565")
         
         # Initialize pygame (but not the display subsystem)
         if not pygame.get_init():
@@ -65,6 +80,42 @@ class FramebufferDisplay:
         # Initial clear
         self.clear()
     
+    def _get_fb_bits_per_pixel(self) -> int:
+        """Read framebuffer bits per pixel from sysfs."""
+        try:
+            # Extract fb number from device path (e.g., /dev/fb0 -> fb0)
+            fb_name = os.path.basename(self.device)
+            bpp_path = f"/sys/class/graphics/{fb_name}/bits_per_pixel"
+            if os.path.exists(bpp_path):
+                with open(bpp_path, 'r') as f:
+                    return int(f.read().strip())
+        except (IOError, ValueError):
+            pass
+        return 16  # Default to 16bpp (RGB565)
+    
+    def _detect_bgr_mode(self) -> bool:
+        """
+        Detect if display uses BGR565 instead of RGB565.
+        
+        Many FBTFT displays (ILI9486, ILI9341) use BGR order.
+        """
+        try:
+            # Check driver name from sysfs
+            fb_name = os.path.basename(self.device)
+            name_path = f"/sys/class/graphics/{fb_name}/name"
+            if os.path.exists(name_path):
+                with open(name_path, 'r') as f:
+                    driver_name = f.read().strip().lower()
+                    # These drivers typically use BGR565
+                    if any(d in driver_name for d in ['ili9486', 'ili9341', 'piscreen', 'waveshare']):
+                        return True
+        except (IOError, ValueError):
+            pass
+        
+        # Default: try BGR mode for FBTFT displays (most common)
+        # This is because most TFT displays sold for Raspberry Pi use BGR order
+        return True
+    
     def clear(self, color: tuple = (0, 0, 0)):
         """Clear the display with a solid color."""
         self.surface.fill(color)
@@ -74,28 +125,38 @@ class FramebufferDisplay:
         """
         Write the current surface to the framebuffer.
         
-        Converts the pygame surface to RGB565 and writes to the device.
+        Converts the pygame surface to RGB565/BGR565 and writes to the device.
         """
         # Get pixel data from pygame surface (RGB format)
         # pygame.surfarray gives us (width, height, 3) array
         pixels = pygame.surfarray.pixels3d(self.surface)
         
-        # Convert RGB888 to RGB565
-        # RGB565: RRRRRGGGGGGBBBBB (5 bits red, 6 bits green, 5 bits blue)
-        r = (pixels[:, :, 0] >> 3).astype(np.uint16)  # 5 bits
-        g = (pixels[:, :, 1] >> 2).astype(np.uint16)  # 6 bits
-        b = (pixels[:, :, 2] >> 3).astype(np.uint16)  # 5 bits
-        
-        # Combine into RGB565 (note: need to transpose for correct orientation)
-        rgb565 = (r << 11) | (g << 5) | b
+        # Convert to 16-bit 565 format
+        # 565 format: 5 bits for first color, 6 bits for green, 5 bits for last color
+        if self._bgr_mode:
+            # BGR565: BBBBBGGGGGGRRRRR (blue in high bits, red in low bits)
+            b = (pixels[:, :, 2] >> 3).astype(np.uint16)  # 5 bits blue (high)
+            g = (pixels[:, :, 1] >> 2).astype(np.uint16)  # 6 bits green (middle)
+            r = (pixels[:, :, 0] >> 3).astype(np.uint16)  # 5 bits red (low)
+            pixel565 = (b << 11) | (g << 5) | r
+        else:
+            # RGB565: RRRRRGGGGGGBBBBB (red in high bits, blue in low bits)
+            r = (pixels[:, :, 0] >> 3).astype(np.uint16)  # 5 bits red (high)
+            g = (pixels[:, :, 1] >> 2).astype(np.uint16)  # 6 bits green (middle)
+            b = (pixels[:, :, 2] >> 3).astype(np.uint16)  # 5 bits blue (low)
+            pixel565 = (r << 11) | (g << 5) | b
         
         # Transpose because pygame surfarray is (width, height) but fb expects (height, width)
-        self._fb_buffer = rgb565.T
+        self._fb_buffer = pixel565.T
+        
+        # Ensure contiguous array in correct byte order for framebuffer
+        # FBTFT displays on Pi expect little-endian 16-bit pixels
+        fb_data = np.ascontiguousarray(self._fb_buffer, dtype='<u2')  # '<u2' = little-endian uint16
         
         # Write to framebuffer
         try:
             with open(self.device, 'r+b') as fb:
-                fb.write(self._fb_buffer.tobytes())
+                fb.write(fb_data.tobytes())
         except IOError as e:
             print(f"Error writing to framebuffer: {e}")
         
@@ -216,40 +277,61 @@ def init_display(width: int = 480, height: int = 320,
 # Simple test
 if __name__ == '__main__':
     import time
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Test framebuffer display')
+    parser.add_argument('--bgr', action='store_true', help='Force BGR565 mode')
+    parser.add_argument('--rgb', action='store_true', help='Force RGB565 mode')
+    parser.add_argument('--device', default='/dev/fb0', help='Framebuffer device')
+    parser.add_argument('--width', type=int, default=480, help='Display width')
+    parser.add_argument('--height', type=int, default=320, help='Display height')
+    args = parser.parse_args()
+    
+    # Determine BGR mode
+    bgr_mode = None  # Auto-detect
+    if args.bgr:
+        bgr_mode = True
+    elif args.rgb:
+        bgr_mode = False
     
     print("Testing direct framebuffer display...")
+    print(f"Device: {args.device}, Size: {args.width}x{args.height}")
+    if bgr_mode is not None:
+        print(f"Mode: {'BGR565 (forced)' if bgr_mode else 'RGB565 (forced)'}")
+    else:
+        print("Mode: Auto-detect")
     
     # Try to init display
     try:
-        fb = FramebufferDisplay('/dev/fb0', 480, 320)
+        fb = FramebufferDisplay(args.device, args.width, args.height, bgr_mode=bgr_mode)
         
-        # Test 1: Red screen
-        print("Test 1: Red screen")
+        # Test 1: Red screen (should appear RED if color order is correct)
+        print("Test 1: Red screen (should be RED)")
         fb.surface.fill((255, 0, 0))
         fb.update()
-        time.sleep(1)
+        time.sleep(2)
         
         # Test 2: Green screen
-        print("Test 2: Green screen")
+        print("Test 2: Green screen (should be GREEN)")
         fb.surface.fill((0, 255, 0))
         fb.update()
-        time.sleep(1)
+        time.sleep(2)
         
         # Test 3: Blue screen
-        print("Test 3: Blue screen")
+        print("Test 3: Blue screen (should be BLUE)")
         fb.surface.fill((0, 0, 255))
         fb.update()
-        time.sleep(1)
-        
-        # Test 4: Draw some shapes
-        print("Test 4: Shapes")
-        fb.surface.fill((20, 20, 40))
-        pygame.draw.rect(fb.surface, (255, 0, 0), (10, 10, 100, 80))
-        pygame.draw.rect(fb.surface, (0, 255, 0), (120, 10, 100, 80))
-        pygame.draw.rect(fb.surface, (0, 0, 255), (230, 10, 100, 80))
-        pygame.draw.circle(fb.surface, (255, 255, 0), (240, 200), 60)
-        fb.update()
         time.sleep(2)
+        
+        # Test 4: Draw colored boxes - left to right: RED, GREEN, BLUE
+        print("Test 4: Color boxes (R, G, B from left to right)")
+        fb.surface.fill((20, 20, 40))
+        pygame.draw.rect(fb.surface, (255, 0, 0), (10, 10, 100, 80))    # RED
+        pygame.draw.rect(fb.surface, (0, 255, 0), (120, 10, 100, 80))   # GREEN
+        pygame.draw.rect(fb.surface, (0, 0, 255), (230, 10, 100, 80))   # BLUE
+        pygame.draw.circle(fb.surface, (255, 255, 0), (240, 200), 60)   # YELLOW
+        fb.update()
+        time.sleep(3)
         
         # Test 5: Text (if freetype available)
         print("Test 5: Text")
@@ -257,10 +339,12 @@ if __name__ == '__main__':
             pygame.freetype.init()
             font = pygame.freetype.SysFont('DejaVu Sans', 32)
             fb.surface.fill((17, 24, 39))
-            font.render_to(fb.surface, (20, 140), "Film Scanner", (249, 250, 251))
-            font.render_to(fb.surface, (20, 180), "TFT Display OK!", (16, 185, 129))
+            font.render_to(fb.surface, (20, 100), "Film Scanner", (249, 250, 251))
+            font.render_to(fb.surface, (20, 150), "TFT Display OK!", (16, 185, 129))
+            mode_text = f"Mode: {'BGR565' if fb._bgr_mode else 'RGB565'}"
+            font.render_to(fb.surface, (20, 200), mode_text, (100, 149, 237))
             fb.update()
-            time.sleep(2)
+            time.sleep(3)
         except Exception as e:
             print(f"Text test skipped: {e}")
         
@@ -268,7 +352,10 @@ if __name__ == '__main__':
         fb.clear()
         fb.update()
         
-        print("All tests passed!")
+        print("\nAll tests passed!")
+        print("\nIf colors appeared wrong (e.g., red showed as blue):")
+        print("  - If using auto-detect, try: python framebuffer_display.py --rgb")
+        print("  - Or try: python framebuffer_display.py --bgr")
         
     except Exception as e:
         print(f"Error: {e}")
