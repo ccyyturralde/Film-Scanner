@@ -305,6 +305,13 @@ class AppManager:
             self._set_state(AppState.STARTING)
         
         try:
+            # Ensure no stray instances are holding the port or already running
+            # (e.g., systemd, lingering CLI launches, or crashed sessions).
+            # This prevents the touchscreen UI from failing to start the app
+            # because another web_app.py is still bound to port 5000.
+            self._kill_port_processes(5000)
+            time.sleep(0.3)
+
             # Clear stop event
             self._stop_event.clear()
             
