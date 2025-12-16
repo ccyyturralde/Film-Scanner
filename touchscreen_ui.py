@@ -380,8 +380,8 @@ class Button:
         
         # Determine button color
         if not self.enabled:
-            color = colors.btn_secondary
-            text_color = colors.text_muted
+            color = colors.bg_panel  # Use darker background for disabled
+            text_color = colors.text_muted  # Grey text is visible on darker bg
         elif self.pressed:
             color = self.hover_color
             text_color = self.text_color
