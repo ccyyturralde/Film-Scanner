@@ -51,7 +51,7 @@ apt install -y \
     libsdl2-image-dev \
     libsdl2-ttf-dev \
     libsdl2-mixer-dev \
-    libfreetype6-dev \
+    libfreetype-dev \
     libportmidi-dev \
     libjpeg-dev \
     libpng-dev \

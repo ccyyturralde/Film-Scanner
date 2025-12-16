@@ -37,7 +37,7 @@ sudo apt install -y \
     libsdl2-dev \
     libsdl2-image-dev \
     libsdl2-ttf-dev \
-    libfreetype6-dev
+    libfreetype-dev
 
 echo ""
 echo "Installing Python packages..."
