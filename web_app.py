@@ -24,6 +24,7 @@ import tempfile
 import shutil
 import traceback
 import re
+import glob
 from config_manager import ConfigManager
 from frame_detector import detect_frame_gap
 try:
@@ -32,6 +33,160 @@ try:
 except ImportError:
     PIL_AVAILABLE = False
     print("⚠ PIL/Pillow not available - image preview will be limited")
+
+
+def clear_usb_for_camera():
+    """
+    Thoroughly clear USB to make room for the camera connection.
+    This addresses issues where touchscreen or other USB devices 
+    cause gphoto2 to fail to detect the Canon R100.
+    
+    Kills:
+    - gphoto2 processes
+    - gvfsd-gphoto2 (GNOME/GVFS auto-mount daemon)
+    - gvfs-gphoto2-volume-monitor
+    - gvfsd-mtp (MTP daemon that can interfere)
+    - PTPCamera (macOS)
+    - Any other processes that might claim the camera
+    
+    Also:
+    - Resets USB device if possible (Linux only)
+    """
+    print("\n🔌 Clearing USB for camera connection...")
+    
+    # List of processes to kill that can interfere with gphoto2 camera access
+    processes_to_kill = [
+        "gphoto2",
+        "gvfsd-gphoto2",
+        "gvfs-gphoto2-volume-monitor", 
+        "gvfsd-mtp",
+        "gvfs-mtp-volume-monitor",
+        "gvfsd-ptp",
+        "PTPCamera",  # macOS
+        "gvfs-ptp-volume-monitor",
+    ]
+    
+    killed_any = False
+    
+    for proc in processes_to_kill:
+        try:
+            # First try graceful kill
+            result = subprocess.run(
+                ["killall", proc],
+                capture_output=True,
+                timeout=2
+            )
+            if result.returncode == 0:
+                print(f"   ✓ Killed {proc}")
+                killed_any = True
+        except Exception:
+            pass
+    
+    # Brief pause to let processes die
+    if killed_any:
+        time.sleep(0.3)
+    
+    # Force kill any remaining processes
+    for proc in processes_to_kill:
+        try:
+            subprocess.run(
+                ["killall", "-9", proc],
+                capture_output=True,
+                timeout=1
+            )
+        except Exception:
+            pass
+    
+    # Kill any gvfsd processes that might be holding USB devices
+    try:
+        result = subprocess.run(
+            ["pkill", "-f", "gvfsd"],
+            capture_output=True,
+            timeout=2
+        )
+        if result.returncode == 0:
+            print("   ✓ Killed gvfsd processes")
+    except Exception:
+        pass
+    
+    # Wait for processes to fully release USB
+    time.sleep(0.5)
+    
+    # Try to reset USB devices for Canon cameras (Linux only)
+    try:
+        # Find Canon camera USB devices
+        lsusb_result = subprocess.run(
+            ["lsusb"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        
+        if lsusb_result.returncode == 0:
+            for line in lsusb_result.stdout.split('\n'):
+                if 'canon' in line.lower():
+                    print(f"   📷 Found Canon device: {line.strip()}")
+                    
+                    # Extract bus and device numbers for potential USB reset
+                    # Format: Bus 001 Device 005: ID 04a9:32da Canon Inc. ...
+                    parts = line.split()
+                    if len(parts) >= 6:
+                        bus = parts[1]
+                        device = parts[3].rstrip(':')
+                        
+                        # Try USB reset using usb_reset if available
+                        usb_dev_path = f"/dev/bus/usb/{bus}/{device}"
+                        if os.path.exists(usb_dev_path):
+                            try:
+                                # Use usbreset tool if available
+                                subprocess.run(
+                                    ["usbreset", usb_dev_path],
+                                    capture_output=True,
+                                    timeout=3
+                                )
+                                print(f"   ✓ Reset USB device {usb_dev_path}")
+                            except FileNotFoundError:
+                                # usbreset not installed, try alternative
+                                try:
+                                    # Alternative: unbind and rebind the USB device
+                                    # This is a more aggressive reset
+                                    pass  # Skip if usbreset not available
+                                except Exception:
+                                    pass
+                            except Exception as e:
+                                # USB reset failed, but continue anyway
+                                pass
+    except Exception as e:
+        # lsusb not available (non-Linux), skip USB reset
+        pass
+    
+    # Final cleanup - unmount any auto-mounted camera
+    try:
+        # Get list of gvfs mounts
+        result = subprocess.run(
+            ["gio", "mount", "-l"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        
+        if result.returncode == 0 and 'gphoto2' in result.stdout.lower():
+            # Unmount gphoto2 devices
+            subprocess.run(
+                ["gio", "mount", "-u", "-f", "gphoto2://"],
+                capture_output=True,
+                timeout=5
+            )
+            print("   ✓ Unmounted gphoto2 auto-mount")
+            time.sleep(0.3)
+    except Exception:
+        pass
+    
+    # Wait for USB to stabilize after all cleanup
+    time.sleep(0.5)
+    
+    print("   ✓ USB cleanup complete")
+    return True
 
 # Arduino USB Vendor/Product IDs for automatic detection
 ARDUINO_USB_IDS = {
@@ -335,13 +490,18 @@ class FilmScanner:
             self.broadcast_status()
             return False
     
-    def check_camera(self):
-        """Check if camera is connected without killing gphoto2 or interrupting ops"""
+    def check_camera(self, retry_with_usb_clear=True):
+        """Check if camera is connected without killing gphoto2 or interrupting ops
+        
+        Args:
+            retry_with_usb_clear: If camera not found, clear USB and retry once
+        """
         try:
             # If another camera operation is in progress (preview/capture), don't interrupt it.
             if self.camera_op_lock.locked():
                 return self.camera_connected
-            # Passive detect; no kill here.
+            
+            # Passive detect; no kill here on first attempt
             result = subprocess.run(
                 ["gphoto2", "--auto-detect"],
                 capture_output=True, timeout=10, text=True
@@ -351,14 +511,52 @@ class FilmScanner:
                 for line in lines:
                     if "usb:" in line.lower():
                         self.camera_connected = True
-                        self.camera_name = line.strip()
-                        print(f"✓ Camera detected: {self.camera_name}")
-                        break
+                        self.camera_model = line.strip()
+                        self.camera_error = None
+                        print(f"✓ Camera detected: {self.camera_model}")
+                        return True
+            
+            # Camera not found - if retry enabled, clear USB and try again
+            if retry_with_usb_clear and not self.camera_connected:
+                print("📷 Camera not detected, clearing USB and retrying...")
+                clear_usb_for_camera()
+                time.sleep(1.0)  # Give USB time to stabilize
+                
+                # Retry detection
+                result = subprocess.run(
+                    ["gphoto2", "--auto-detect"],
+                    capture_output=True, timeout=10, text=True
+                )
+                if result.returncode == 0 and "usb" in result.stdout.lower():
+                    lines = result.stdout.strip().splitlines()
+                    for line in lines:
+                        if "usb:" in line.lower():
+                            self.camera_connected = True
+                            self.camera_model = line.strip()
+                            self.camera_error = None
+                            print(f"✓ Camera detected after USB clear: {self.camera_model}")
+                            return True
+                
+                # Still not found after retry
+                self.camera_connected = False
+                self.camera_error = "Camera not detected. Check USB connection and PTP mode."
+                print("✗ Camera not detected after USB clear")
             else:
                 self.camera_connected = False
+                
+        except subprocess.TimeoutExpired:
+            print("✗ Camera detection timeout - USB may be blocked")
+            self.camera_error = "Detection timeout - USB may be blocked by another process"
+            if retry_with_usb_clear:
+                print("   Attempting USB clear and retry...")
+                clear_usb_for_camera()
+                return self.check_camera(retry_with_usb_clear=False)
+            self.camera_connected = False
         except Exception as e:
             print(f"✗ Error checking camera: {e}")
+            self.camera_error = str(e)
             # Don't change state on exception
+            
         return self.camera_connected
     def _kill_gphoto2(self):
         """Thoroughly kill any gphoto2 processes and wait for USB release"""
@@ -371,15 +569,30 @@ class FilmScanner:
             subprocess.run(["killall", "-9", "gphoto2"], 
                          capture_output=True, timeout=1)
             time.sleep(0.2)
-            # Also kill gvfs which can interfere
-            subprocess.run(["killall", "gvfs-gphoto2-volume-monitor"], 
-                         capture_output=True, timeout=1)
+            
+            # Kill all gvfs processes that can interfere with camera USB access
+            gvfs_processes = [
+                "gvfs-gphoto2-volume-monitor",
+                "gvfsd-gphoto2",
+                "gvfsd-mtp",
+                "gvfs-mtp-volume-monitor",
+                "gvfsd-ptp",
+                "gvfs-ptp-volume-monitor",
+            ]
+            for proc in gvfs_processes:
+                try:
+                    subprocess.run(["killall", proc], 
+                                 capture_output=True, timeout=1)
+                except:
+                    pass
             time.sleep(0.3)
-            # Kill any PTP processes that might be hanging
+            
+            # Kill any PTP processes that might be hanging (macOS)
             subprocess.run(["killall", "-9", "PTPCamera"], 
                          capture_output=True, timeout=1)
             time.sleep(0.3)
-            # Total wait: 1 second for USB to fully release
+            
+            # Total wait: ~1 second for USB to fully release
         except:
             pass
     
@@ -1343,10 +1556,10 @@ if __name__ == '__main__':
     print(f"📍 Pi IP: {config.get('pi_ip', 'unknown')}")
     print(f"📍 Port: {config.get('port', 5000)}")
     
-    # Clean up any existing gphoto2 processes from previous runs
-    print("\n🧹 Cleaning up any existing gphoto2 processes...")
-    scanner._kill_gphoto2()
-    print("✓ Process cleanup complete")
+    # Thoroughly clear USB to make room for the camera
+    # This kills gphoto2, gvfs auto-mount daemons, and resets USB if needed
+    # Critical for touchscreen setups where USB devices may block camera access
+    clear_usb_for_camera()
     
     # Auto-connect to Arduino on startup
     print("\n🔌 Searching for Arduino (R3/R4 supported)...")

@@ -18,9 +18,10 @@
   - Torque: 40-50 N⋅cm minimum
   - Current: 1.0-1.5A per phase
 
-- **A4988 Stepper Driver**
-  - With heatsink
-  - Optional: DRV8825 for higher microstepping
+- **Stepper Driver** (one of the following):
+  - A4988 - Budget option, with heatsink
+  - **TMC2209** - Recommended, quieter and cooler operation
+  - DRV8825 - Higher microstepping option
 
 - **Power Supply**
   - 12V DC, 2A minimum
@@ -54,10 +55,20 @@ Arduino GND ───── A4988 GND
 
 A4988 TO MOTOR
 ==============
-A4988 1A ──── Motor Red    (Coil A)
-A4988 1B ──── Motor Green  (Coil A)
-A4988 2A ──── Motor Blue   (Coil B)
-A4988 2B ──── Motor Black  (Coil B)
+A4988 1A ──── Motor Red    (Coil B)
+A4988 1B ──── Motor Green  (Coil B)
+A4988 2A ──── Motor Blue   (Coil A)
+A4988 2B ──── Motor Black  (Coil A)
+
+TMC2209 TO MOTOR (different pin order!)
+=======================================
+TMC2209 A2 ──── Motor Black  (Coil A)
+TMC2209 A1 ──── Motor Blue   (Coil A)
+TMC2209 B1 ──── Motor Red    (Coil B)
+TMC2209 B2 ──── Motor Green  (Coil B)
+
+⚠️  TMC2209 is NOT a direct drop-in for motor wires!
+    Pin order: A2, A1, B1, B2 (vs A4988: 1B, 1A, 2A, 2B)
 
 RASPBERRY PI
 ============
@@ -80,20 +91,39 @@ pip3 install --break-system-packages pyserial flask flask-socketio pillow
 
 ### 2. Assemble Motor Driver
 
-1. Install heatsink on A4988 chip
-2. Insert A4988 into breadboard or shield
+1. Install heatsink on driver chip
+2. Insert driver into breadboard or shield
 3. Connect capacitor (100μF) across VMOT and GND
-4. Set current limit:
+4. Set current limit (Vref):
+
+   **A4988:**
    ```
    Vref = I_max × 8 × R_sense
-   For 1A: Vref = 1.0 × 8 × 0.05 = 0.4V
+   For 1A motor: Vref ≈ 0.4V
    ```
+
+   **TMC2209:** (much lower Vref!)
+   ```
+   Vref = I_rms × 2.5 × R_sense
+   For 1A motor: Vref ≈ 0.3-0.4V
+   ```
+   
+   | Driver  | Vref for 1A Motor |
+   |---------|-------------------|
+   | A4988   | ~0.4V (400mV)     |
+   | TMC2209 | ~0.3-0.4V (300-400mV) |
 
 ### 3. Connect Motor
 
-1. Identify coils with multimeter (pairs with 2-4Ω are same coil)
-2. Connect: Coil A → 1A/1B, Coil B → 2A/2B
-3. If motor runs backward, swap one coil pair
+1. Identify coils with multimeter (pairs with 2-4Ω are same coil):
+   - **Red + Green** = Coil B
+   - **Black + Blue** = Coil A
+   
+2. Connect based on your driver (see wiring diagram above):
+   - **A4988**: 1A=Red, 1B=Green, 2A=Blue, 2B=Black
+   - **TMC2209**: A2=Black, A1=Blue, B1=Red, B2=Green
+   
+3. If motor runs backward, swap one coil pair (e.g., swap Red↔Green)
 
 ### 4. Flash Arduino
 
@@ -148,10 +178,20 @@ screen /dev/ttyACM0 115200
 | Problem | Solution |
 |---------|----------|
 | Not moving | Check 12V power, verify ENABLE = LOW |
-| Vibrating only | Increase current (adjust Vref) |
+| Vibrating/buzzing only | Check coil wiring, increase Vref, verify common ground |
 | Missing steps | Reduce speed, increase current |
-| Getting hot | Reduce current, add cooling |
+| Getting hot | Reduce current (lower Vref), add cooling |
 | Wrong direction | Swap one motor coil pair |
+| Buzzing after driver swap | TMC2209 has different pinout - rewire motor! |
+
+### TMC2209 Specific Issues
+
+| Problem | Solution |
+|---------|----------|
+| Motor buzzes, won't move | Wrong motor pinout - TMC2209 uses A2,A1,B1,B2 order |
+| Different Vref readings from different grounds | Grounds not connected - tie Arduino GND to 12V PSU GND |
+| Very high Vref at minimum pot | Normal for some boards, start around 0.3-0.4V |
+| Motor very hot | Vref too high (>0.5V), turn pot counter-clockwise |
 
 ### Arduino Issues
 
@@ -173,7 +213,7 @@ screen /dev/ttyACM0 115200
 
 ## Microstepping Configuration
 
-A4988 microstepping jumpers (MS1, MS2, MS3):
+### A4988 microstepping (MS1, MS2, MS3):
 
 | MS1 | MS2 | MS3 | Resolution |
 |-----|-----|-----|------------|
@@ -183,7 +223,27 @@ A4988 microstepping jumpers (MS1, MS2, MS3):
 | HIGH | HIGH | LOW | 1/8 step |
 | HIGH | HIGH | HIGH | 1/16 step |
 
+### TMC2209 microstepping (MS1, MS2):
+
+| MS1 | MS2 | Resolution |
+|-----|-----|------------|
+| LOW | LOW | 8 microsteps (default) |
+| HIGH | LOW | 16 microsteps |
+| LOW | HIGH | 32 microsteps |
+| HIGH | HIGH | 64 microsteps |
+
 **Recommended**: 1/16 microstepping for smooth motion
+
+### Driver Comparison
+
+| Feature | A4988 | TMC2209 |
+|---------|-------|---------|
+| Noise | Audible whine | Near silent |
+| Heat | Runs warm | Runs cool |
+| Max current | 2A | 2.8A |
+| Microstepping | Up to 1/16 | Up to 1/256 |
+| Motor pin order | 1B, 1A, 2A, 2B | A2, A1, B1, B2 |
+| Vref for 1A | ~0.4V | ~0.3-0.4V |
 
 ## Motor Configuration
 
@@ -199,10 +259,13 @@ self.step_delay = 800     # Microseconds between steps
 ## Safety Notes
 
 ⚠️ **WARNING**: 
-- Always use common ground between 12V supply and Arduino
+- **CRITICAL: Always connect Arduino GND to 12V supply GND (common ground)**
+  - Without common ground, motor will buzz but not move
+  - Vref readings will be inconsistent from different ground points
 - Never disconnect motor while powered
 - Use appropriate wire gauge for motor current
 - Ensure proper ventilation for electronics
+- When swapping drivers (A4988 ↔ TMC2209), rewire motor - pinouts differ!
 
 ## Quick Test
 
