@@ -62,7 +62,8 @@ class TouchInputHandler:
     don't work. This class reads touch events directly from the input device.
     """
     
-    def __init__(self, device_path: str = None, width: int = 480, height: int = 320):
+    def __init__(self, device_path: str = None, width: int = 480, height: int = 320,
+                 swap_xy: bool = False, invert_x: bool = False, invert_y: bool = True):
         self.width = width
         self.height = height
         self.device = None
@@ -74,6 +75,11 @@ class TouchInputHandler:
         self._x_max = width
         self._y_min = 0
         self._y_max = height
+        
+        # Calibration settings
+        self.swap_xy = swap_xy
+        self.invert_x = invert_x
+        self.invert_y = invert_y  # Default True based on calibration
         
         if not EVDEV_AVAILABLE:
             print("evdev not available - touch input disabled")
@@ -146,13 +152,19 @@ class TouchInputHandler:
         """Scale raw X coordinate to screen width"""
         if not hasattr(self, '_x_max'):
             return raw_x
-        return int((raw_x - self._x_min) * self.width / (self._x_max - self._x_min))
+        x = int((raw_x - self._x_min) * self.width / (self._x_max - self._x_min))
+        if self.invert_x:
+            x = self.width - x
+        return max(0, min(self.width - 1, x))
     
     def _scale_y(self, raw_y: int) -> int:
         """Scale raw Y coordinate to screen height"""
         if not hasattr(self, '_y_max'):
             return raw_y
-        return int((raw_y - self._y_min) * self.height / (self._y_max - self._y_min))
+        y = int((raw_y - self._y_min) * self.height / (self._y_max - self._y_min))
+        if self.invert_y:
+            y = self.height - y
+        return max(0, min(self.height - 1, y))
     
     def poll(self) -> Optional[Tuple[str, int, int]]:
         """
@@ -618,7 +630,10 @@ class TouchScreenUI:
             self._touch_handler = TouchInputHandler(
                 touch_device,
                 self.config.display.width,
-                self.config.display.height
+                self.config.display.height,
+                swap_xy=self.config.display.touch_swap_xy,
+                invert_x=self.config.display.touch_invert_x,
+                invert_y=self.config.display.touch_invert_y
             )
         
         # Load fonts

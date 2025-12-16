@@ -78,9 +78,9 @@ class DisplayConfig:
     # Swap X/Y touch coordinates (some screens need this)
     touch_swap_xy: bool = False
     
-    # Invert touch coordinates
+    # Invert touch coordinates (invert_y=True is common for many TFT screens)
     touch_invert_x: bool = False
-    touch_invert_y: bool = False
+    touch_invert_y: bool = True
     
     # Use fullscreen mode
     fullscreen: bool = True
