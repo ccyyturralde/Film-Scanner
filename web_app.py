@@ -8,6 +8,14 @@ Supports:
 - Arduino Uno R4 Minima (Renesas RA4M1 with native USB)
 - Arduino Uno R4 WiFi (Renesas RA4M1 with ESP32-S3)
 """
+# CRITICAL: Prevent eventlet/gevent from being used even if installed
+# This avoids RLock errors when running via subprocess (touchscreen UI)
+import sys
+if 'eventlet' in sys.modules:
+    del sys.modules['eventlet']
+if 'gevent' in sys.modules:
+    del sys.modules['gevent']
+
 from flask import Flask, render_template, request, jsonify
 from flask_socketio import SocketIO, emit
 import serial
@@ -15,7 +23,6 @@ import serial.tools.list_ports
 import subprocess
 import time
 import os
-import sys
 from datetime import datetime
 import json
 import threading

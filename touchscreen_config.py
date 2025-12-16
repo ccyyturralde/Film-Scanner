@@ -222,6 +222,10 @@ class TouchScreenConfig:
             if 'app' in data:
                 for k, v in data['app'].items():
                     if hasattr(config.app, k):
+                        # NEVER load auto_start_app from saved config - it must be False by default
+                        # User can enable via --auto-start command line flag if needed
+                        if k == 'auto_start_app':
+                            continue  # Skip this setting - always use code default (False)
                         setattr(config.app, k, v)
             
             return config

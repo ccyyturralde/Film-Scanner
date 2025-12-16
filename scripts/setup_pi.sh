@@ -285,7 +285,7 @@ cat > "$CONFIG_DIR/touchscreen_config.json" << 'CONFIGEOF'
     "log_line_height": 20
   },
   "app": {
-    "auto_start_app": true,
+    "auto_start_app": false,
     "auto_restart": true,
     "auto_restart_delay": 5.0,
     "status_refresh_interval": 2.0,

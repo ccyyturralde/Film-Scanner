@@ -1311,8 +1311,8 @@ def main():
                        help='Screen size preset')
     parser.add_argument('--windowed', action='store_true',
                        help='Run in windowed mode (for testing)')
-    parser.add_argument('--no-auto-start', action='store_true',
-                       help="Don't auto-start the web app")
+    parser.add_argument('--auto-start', action='store_true',
+                       help="Auto-start the web app on launch (default: manual START button)")
     
     args = parser.parse_args()
     
@@ -1328,8 +1328,8 @@ def main():
         config.display.fullscreen = False
         config.display.show_cursor = True
     
-    if args.no_auto_start:
-        config.app.auto_start_app = False
+    if args.auto_start:
+        config.app.auto_start_app = True
     
     # Create and run UI
     ui = TouchScreenUI(config)
