@@ -1,5 +1,18 @@
+# Film Scanner - Python Dependencies
+# Install with: pip3 install -r requirements.txt
+
+# Web Application
 Flask>=2.3.0
 Flask-SocketIO>=5.3.0
-pyserial>=3.5
 python-socketio>=5.9.0
+
+# Hardware Communication
+pyserial>=3.5
+
+# Image Processing
 Pillow>=10.0.0
+opencv-python-headless>=4.8.0
+numpy>=1.24.0
+
+# Touch Screen UI (3.5" TFT Display)
+pygame>=2.5.0

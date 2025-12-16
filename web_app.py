@@ -25,6 +25,7 @@ import shutil
 import traceback
 import re
 from config_manager import ConfigManager
+from frame_detector import detect_frame_gap
 try:
     from PIL import Image, ImageOps
     PIL_AVAILABLE = True
@@ -77,6 +78,9 @@ class FilmScanner:
         # Calibration data
         self.frame_advance = None
         self.default_advance = 1200
+        self.px_per_step = 3.0  # adaptive estimate for auto-align
+        self.alignment_confidence = 0.0
+        self.last_gap_px = None
         
         # Position tracking
         self.position = 0
@@ -550,6 +554,131 @@ class FilmScanner:
                     self.camera_op_lock.release()
                 except RuntimeError:
                     pass
+
+    def capture_preview_bytes(self):
+        """Capture a preview image and return raw JPEG bytes (no inversion)."""
+        if not self.check_camera():
+            raise RuntimeError("Camera not connected")
+
+        temp_dir = tempfile.mkdtemp()
+        original_dir = os.getcwd()
+        try:
+            self.camera_op_lock.acquire()
+            self._kill_gphoto2()
+            time.sleep(0.5)
+
+            if not self.enable_viewfinder():
+                raise RuntimeError("Failed to enable viewfinder")
+
+            os.chdir(temp_dir)
+            result = subprocess.run(
+                ["gphoto2", "--capture-preview", "--force-overwrite"],
+                capture_output=True,
+                timeout=10,
+                text=True
+            )
+            os.chdir(original_dir)
+
+            if result.returncode != 0:
+                raise RuntimeError(f"Preview capture failed: {result.stderr.strip() if result.stderr else result.returncode}")
+
+            files = os.listdir(temp_dir)
+            preview_path = os.path.join(temp_dir, "preview.jpg")
+            if not os.path.exists(preview_path):
+                jpgs = [f for f in files if f.lower().endswith(('.jpg', '.jpeg'))]
+                if not jpgs:
+                    raise RuntimeError("No preview file created")
+                preview_path = os.path.join(temp_dir, jpgs[0])
+
+            with open(preview_path, "rb") as f:
+                data = f.read()
+
+            if len(data) < 1000:
+                raise RuntimeError("Preview image too small/corrupt")
+
+            return data
+        finally:
+            try:
+                os.chdir(original_dir)
+            except Exception:
+                pass
+            if self.camera_op_lock.locked():
+                try:
+                    self.camera_op_lock.release()
+                except RuntimeError:
+                    pass
+            try:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            except Exception:
+                pass
+
+    def auto_align(self, max_iters=5, stop_px=6, max_step=600, min_step=8, prefer_forward=True):
+        """
+        Closed-loop auto alignment using preview edge detection.
+        Returns (success, message, result_dict).
+        """
+        prev_offset = None
+        last_move_steps = None
+
+        for iteration in range(max_iters):
+            preview_bytes = self.capture_preview_bytes()
+            detection = detect_frame_gap(preview_bytes)
+
+            self.last_gap_px = detection.gap_x
+            self.alignment_confidence = detection.confidence
+
+            if detection.confidence < 0.15:
+                return False, "Low confidence in frame edge detection", {
+                    "confidence": detection.confidence,
+                    "offset_px": detection.offset_px,
+                }
+
+            offset = detection.offset_px
+            if abs(offset) <= stop_px:
+                self.status_msg = "✓ Auto-aligned"
+                return True, "Aligned", {
+                    "confidence": detection.confidence,
+                    "offset_px": offset,
+                    "gap_x": detection.gap_x,
+                }
+
+            # Bias first move forward to avoid pulling film back on first frame
+            commanded_offset = offset
+            if iteration == 0 and prefer_forward and offset < 0:
+                commanded_offset = abs(offset)
+
+            px_per_step = max(0.5, float(self.px_per_step))
+            step_float = commanded_offset / px_per_step
+            steps = int(round(step_float))
+            if abs(steps) < min_step:
+                steps = min_step if commanded_offset >= 0 else -min_step
+            if abs(steps) > max_step:
+                steps = max_step if steps > 0 else -max_step
+
+            direction_cmd = 'H' if steps >= 0 else 'h'
+            success = self.send(f"{direction_cmd}{abs(steps)}")
+            if not success:
+                return False, "Motor move failed during auto-align", {
+                    "confidence": detection.confidence,
+                    "offset_px": offset,
+                }
+
+            # Update px_per_step estimate from observed change once we have two offsets
+            if prev_offset is not None and last_move_steps:
+                delta_px = prev_offset - offset
+                if delta_px != 0:
+                    est = abs(delta_px) / abs(last_move_steps)
+                    if 0.1 < est < 50:  # sanity bounds
+                        self.px_per_step = 0.7 * self.px_per_step + 0.3 * est
+
+            prev_offset = offset
+            last_move_steps = steps
+
+        self.status_msg = "✗ Auto-align failed to converge"
+        return False, "Failed to converge", {
+            "confidence": getattr(self, "alignment_confidence", 0.0),
+            "offset_px": prev_offset if prev_offset is not None else 0,
+        }
     def save_state(self):
         """Save scanning state"""
         if not self.state_file:
@@ -633,7 +762,10 @@ class FilmScanner:
             'status_msg': self.status_msg,
             'arduino_connected': self.arduino is not None,
             'arduino_port': self.arduino_port,
-            'arduino_board': self.arduino_board
+            'arduino_board': self.arduino_board,
+            'px_per_step': self.px_per_step,
+            'alignment_confidence': self.alignment_confidence,
+            'last_gap_px': self.last_gap_px
         }
         
         return status
@@ -822,12 +954,26 @@ def test_capture():
 @app.route('/api/capture', methods=['POST'])
 def capture():
     """Capture image"""
+    data = request.json or {}
+    auto_align_before = data.get('auto_align', False)
+
     if not scanner.roll_name:
         return jsonify({'success': False, 'message': 'Create roll first'})
     
     if not scanner.check_camera():
         return jsonify({'success': False, 'message': 'Camera not connected'})
     
+    if auto_align_before:
+        try:
+            success, msg, info = scanner.auto_align()
+            scanner.broadcast_status()
+            if not success:
+                return jsonify({'success': False, 'message': f'Auto-align failed: {msg}', 'info': info})
+        except Exception as e:
+            scanner.status_msg = "✗ Auto-align error"
+            scanner.broadcast_status()
+            return jsonify({'success': False, 'message': f'Auto-align error: {str(e)}'})
+
     scanner.status_msg = "Capturing..."
     scanner.broadcast_status()
     
@@ -849,6 +995,25 @@ def capture():
     
     scanner.broadcast_status()
     return jsonify({'success': success})
+
+
+@app.route('/api/auto_align', methods=['POST'])
+def auto_align_route():
+    """Automatically align to nearest frame gap using preview edge detection."""
+    try:
+        success, msg, info = scanner.auto_align()
+        scanner.broadcast_status()
+        return jsonify({
+            'success': success,
+            'message': msg,
+            'info': info,
+            'px_per_step': scanner.px_per_step,
+            'confidence': scanner.alignment_confidence,
+        })
+    except Exception as e:
+        scanner.status_msg = "✗ Auto-align error"
+        scanner.broadcast_status()
+        return jsonify({'success': False, 'message': str(e)})
 @app.route('/api/calibrate', methods=['POST'])
 def calibrate():
     """Start or continue calibration"""

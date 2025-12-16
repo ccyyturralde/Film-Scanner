@@ -54,6 +54,17 @@ function updateUI(status) {
         status.frame_advance ? `${status.frame_advance} steps` : 'Not set';
     document.getElementById('status-msg').textContent = status.status_msg;
     
+    // Auto-align status
+    const alignText = document.getElementById('auto-align-status');
+    if (alignText) {
+        if (status.alignment_confidence > 0 && status.last_gap_px != null) {
+            const conf = (status.alignment_confidence * 100).toFixed(0);
+            alignText.textContent = `Gap px: ${status.last_gap_px} | Confidence: ${conf}% | px/step: ${status.px_per_step?.toFixed(2) ?? 'n/a'}`;
+        } else {
+            alignText.textContent = 'Auto-align not run yet.';
+        }
+    }
+    
     // Mode and auto-advance displays
     document.getElementById('mode-display').textContent = status.mode.toUpperCase();
     document.getElementById('auto-advance').textContent = status.auto_advance ? 'ON' : 'OFF';
@@ -251,7 +262,8 @@ async function capture() {
     const btn = event.target;
     setButtonProcessing(btn, true);
     
-    const result = await apiCall('capture');
+    const autoAlignCheckbox = document.getElementById('auto-align-before-capture');
+    const result = await apiCall('capture', { auto_align: autoAlignCheckbox?.checked });
     
     setButtonProcessing(btn, false);
     
@@ -286,6 +298,23 @@ async function capturePreview() {
         timestamp.textContent = 'Updated at ' + now.toLocaleTimeString();
     } else {
         alert('Failed to get preview: ' + (result.message || 'Unknown error'));
+    }
+}
+
+async function autoAlign() {
+    const btn = event.target;
+    setButtonProcessing(btn, true);
+
+    const result = await apiCall('auto_align');
+
+    setButtonProcessing(btn, false);
+
+    if (!result.success) {
+        alert('Auto-align failed: ' + (result.message || 'Unknown error'));
+    } else {
+        const info = result.info || {};
+        const conf = info.confidence !== undefined ? (info.confidence * 100).toFixed(0) + '%' : 'n/a';
+        alert(`Auto-align OK\nConfidence: ${conf}\nOffset px: ${info.offset_px ?? 'n/a'}`);
     }
 }
 

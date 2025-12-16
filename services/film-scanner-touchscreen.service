@@ -1,0 +1,42 @@
+[Unit]
+Description=Film Scanner Touch Screen UI
+Documentation=https://github.com/yourusername/Film-Scanner
+After=multi-user.target
+Wants=systemd-udev-settle.service
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+
+# Framebuffer and SDL configuration for Pi OS Lite (no X11 required)
+Environment=SDL_FBDEV=/dev/fb1
+Environment=SDL_VIDEODRIVER=fbcon
+Environment=SDL_MOUSEDRV=TSLIB
+Environment=SDL_MOUSEDEV=/dev/input/touchscreen
+Environment=TSLIB_FBDEVICE=/dev/fb1
+Environment=TSLIB_TSDEVICE=/dev/input/touchscreen
+Environment=TSLIB_CALIBFILE=/etc/pointercal
+Environment=TSLIB_CONFFILE=/etc/ts.conf
+Environment=TSLIB_PLUGINDIR=/usr/lib/ts
+Environment=PYTHONUNBUFFERED=1
+
+# Working directory (update this path!)
+WorkingDirectory=/home/pi/Film-Scanner
+
+# Start the touch screen UI
+ExecStart=/usr/bin/python3 /home/pi/Film-Scanner/touchscreen_ui.py
+
+# Restart on failure
+Restart=always
+RestartSec=5
+StartLimitBurst=5
+StartLimitInterval=60
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=film-scanner-touchscreen
+
+[Install]
+WantedBy=multi-user.target
