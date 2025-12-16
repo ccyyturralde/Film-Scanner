@@ -498,8 +498,12 @@ class FilmScanner:
         """
         try:
             # If another camera operation is in progress (preview/capture), don't interrupt it.
-            if self.camera_op_lock.locked():
+            # Use non-blocking acquire to check if lock is held
+            if not self.camera_op_lock.acquire(blocking=False):
+                # Lock is held by another operation, return cached state
                 return self.camera_connected
+            # We got the lock, release it immediately - we just wanted to check
+            self.camera_op_lock.release()
             
             # Passive detect; no kill here on first attempt
             result = subprocess.run(
