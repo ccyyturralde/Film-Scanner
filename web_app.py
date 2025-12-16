@@ -8,14 +8,6 @@ Supports:
 - Arduino Uno R4 Minima (Renesas RA4M1 with native USB)
 - Arduino Uno R4 WiFi (Renesas RA4M1 with ESP32-S3)
 """
-# CRITICAL: Eventlet monkey-patching MUST happen before any other imports
-# This fixes thread.RLock errors when launched via subprocess (e.g., touchscreen UI)
-try:
-    import eventlet
-    eventlet.monkey_patch()
-except ImportError:
-    pass  # eventlet not installed, will use default threading
-
 from flask import Flask, render_template, request, jsonify
 from flask_socketio import SocketIO, emit
 import serial
@@ -215,7 +207,8 @@ ARDUINO_USB_IDS = {
 }
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'film-scanner-secret-key'
-socketio = SocketIO(app, cors_allowed_origins="*")
+# Use threading mode (not eventlet/gevent) for compatibility when launched via subprocess
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 class FilmScanner:
     def __init__(self):
         self.arduino = None

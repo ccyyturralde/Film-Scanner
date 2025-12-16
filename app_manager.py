@@ -108,6 +108,10 @@ class AppManager:
         self._log_thread: Optional[threading.Thread] = None
         self._monitor_thread: Optional[threading.Thread] = None
         
+        # Log file (output from web app goes here instead of pipes)
+        self._log_file = None
+        self._log_file_path: Optional[Path] = None
+        
         # Callbacks
         self._state_callbacks: List[Callable[[AppState], None]] = []
         self._log_callbacks: List[Callable[[LogEntry], None]] = []
@@ -208,19 +212,28 @@ class AppManager:
             raw=line
         )
     
-    def _log_reader_thread(self):
-        """Thread to read stdout/stderr from the process"""
-        if not self.process:
+    def _log_file_reader_thread(self):
+        """Thread to read logs from log file (simpler than pipe threading)"""
+        if not hasattr(self, '_log_file_path') or not self._log_file_path:
             return
         
-        def read_stream(stream, source):
-            try:
-                for line in iter(stream.readline, ''):
-                    if self._stop_event.is_set():
-                        break
-                    
+        # Wait for log file to be created
+        log_path = self._log_file_path
+        for _ in range(10):
+            if os.path.exists(log_path):
+                break
+            time.sleep(0.5)
+        
+        if not os.path.exists(log_path):
+            return
+        
+        try:
+            with open(log_path, 'r') as f:
+                # Start at beginning of file
+                while not self._stop_event.is_set():
+                    line = f.readline()
                     if line:
-                        entry = self._parse_log_line(line, source)
+                        entry = self._parse_log_line(line, 'logfile')
                         
                         with self._lock:
                             self.log_buffer.append(entry)
@@ -243,26 +256,11 @@ class AppManager:
                                     callback(entry.message)
                                 except:
                                     pass
-            except Exception as e:
-                print(f"Log reader error ({source}): {e}")
-        
-        # Start threads for both streams
-        stdout_thread = threading.Thread(
-            target=read_stream, 
-            args=(self.process.stdout, 'stdout'),
-            daemon=True
-        )
-        stderr_thread = threading.Thread(
-            target=read_stream,
-            args=(self.process.stderr, 'stderr'),
-            daemon=True
-        )
-        
-        stdout_thread.start()
-        stderr_thread.start()
-        
-        stdout_thread.join()
-        stderr_thread.join()
+                    else:
+                        # No new content, wait a bit
+                        time.sleep(0.5)
+        except Exception as e:
+            print(f"Log file reader error: {e}")
     
     def _monitor_thread_func(self):
         """Thread to monitor process health"""
@@ -315,17 +313,23 @@ class AppManager:
             self.status.arduino_connected = False
             self.status.camera_connected = False
             
+            # Set up log file for web app output
+            log_dir = Path.home() / ".film_scanner"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            self._log_file_path = log_dir / "web_app.log"
+            
+            # Open log file for writing (truncate on start)
+            self._log_file = open(self._log_file_path, 'w')
+            
             # Start the process in its own process group
-            # This allows us to kill the entire group (Flask spawns child processes)
+            # Output goes to log file instead of pipes (avoids threading issues)
             env = os.environ.copy()
             env['PYTHONUNBUFFERED'] = '1'  # Force unbuffered output
             
             self.process = subprocess.Popen(
                 [sys.executable, str(self.app_path)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
+                stdout=self._log_file,
+                stderr=subprocess.STDOUT,  # Combine stderr with stdout
                 env=env,
                 cwd=str(self.app_path.parent),
                 start_new_session=True  # Create new process group for clean shutdown
@@ -334,19 +338,19 @@ class AppManager:
             self.status.pid = self.process.pid
             self._start_time = datetime.now()
             
-            # Start log reader thread
-            self._log_thread = threading.Thread(
-                target=self._log_reader_thread,
-                daemon=True
-            )
-            self._log_thread.start()
-            
-            # Start monitor thread
+            # Start simple monitor thread (no pipe reading)
             self._monitor_thread = threading.Thread(
                 target=self._monitor_thread_func,
                 daemon=True
             )
             self._monitor_thread.start()
+            
+            # Start log file reader thread
+            self._log_thread = threading.Thread(
+                target=self._log_file_reader_thread,
+                daemon=True
+            )
+            self._log_thread.start()
             
             # Wait a moment and check if it started
             time.sleep(2)
@@ -415,6 +419,14 @@ class AppManager:
                 # Try to kill by port as last resort
                 self._kill_port_processes(5000)
                 return False
+        
+        # Close log file if open
+        if self._log_file:
+            try:
+                self._log_file.close()
+            except:
+                pass
+            self._log_file = None
         
         self._set_state(AppState.STOPPED)
         return True
