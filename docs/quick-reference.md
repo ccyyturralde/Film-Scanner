@@ -96,3 +96,37 @@ For direct serial testing via `screen /dev/ttyACM0 115200`:
 | Camera not found | Check USB, ensure PTP mode |
 | Preview fails | Run `killall gphoto2` on Pi |
 | Position wrong | Use fine arrows to adjust |
+| Something broken | Run `python3 health_check.py` |
+
+## Health Check & Auto-Repair
+
+The `health_check.py` utility compares your installation against GitHub and fixes issues automatically:
+
+```bash
+# Full check and automatic repair
+python3 health_check.py
+
+# Check only (don't fix anything)
+python3 health_check.py --check
+
+# Verbose output (show all details)
+python3 health_check.py --verbose
+```
+
+### What it checks:
+- Git repository status (compares with GitHub)
+- Core files (missing or corrupted)
+- Deprecated files (old files that should be removed)
+- Python dependencies (missing or outdated)
+- System packages (gphoto2, etc.)
+- Banned packages (eventlet - causes conflicts)
+- Serial permissions (dialout group)
+- Systemd services
+
+### What it fixes:
+- Pulls latest code from GitHub
+- Removes deprecated files
+- Installs/upgrades Python packages
+- Uninstalls conflicting packages
+- Adds user to dialout group
+- Restarts systemd services

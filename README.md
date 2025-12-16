@@ -108,7 +108,8 @@ Film-Scanner/
 ├── scripts/              # Setup utilities
 │   ├── setup.sh          # Manual dependency install
 │   ├── setup_pi.sh       # Automated Pi install + service
-│   └── flash_arduino.sh
+│   ├── flash_arduino.sh
+│   └── health_check.sh   # Wrapper for health_check.py
 ├── static/               # Web assets
 │   ├── css/style.css
 │   └── js/app.js
@@ -116,6 +117,7 @@ Film-Scanner/
 │   └── index.html
 ├── web_app.py            # Main application
 ├── config_manager.py     # Configuration handling
+├── health_check.py       # Auto-repair utility
 ├── requirements.txt      # Python dependencies
 └── README.md
 ```
@@ -165,6 +167,23 @@ killall gphoto2 gvfs-gphoto2-volume-monitor
 - Check 12V power supply
 - Verify common ground between Arduino and driver
 - Check A4988 current setting (Vref ~0.4V)
+
+### Quick Fix: Health Check
+
+If something isn't working, run the automatic health check and repair utility:
+
+```bash
+python3 health_check.py
+```
+
+This will:
+- Compare your installation against GitHub
+- Pull the latest code
+- Fix missing/outdated dependencies
+- Remove deprecated files
+- Restart services
+
+Run with `--check` to see issues without fixing them.
 
 ## Documentation
 
