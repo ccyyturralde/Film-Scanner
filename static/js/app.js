@@ -408,6 +408,20 @@ async function applyAlignmentConfig(clear = false) {
     }
 }
 
+async function detectAlignmentRoi() {
+    const btn = event?.target;
+    if (btn) setButtonProcessing(btn, true);
+    const result = await apiCall('detect_alignment_roi');
+    if (btn) setButtonProcessing(btn, false);
+
+    if (result.success && result.roi) {
+        syncAlignmentInputs(result.roi, alignmentSettings.minConfidence);
+        alert('Detected ROI from preview.');
+    } else {
+        alert('Could not detect ROI automatically: ' + (result.message || 'Unknown error'));
+    }
+}
+
 function clearAlignmentConfig() {
     applyAlignmentConfig(true);
 }

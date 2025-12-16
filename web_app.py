@@ -34,7 +34,7 @@ import re
 import glob
 from pathlib import Path
 from config_manager import ConfigManager
-from frame_detector import detect_frame_gap
+from frame_detector import detect_frame_gap, detect_bright_region_roi
 try:
     from PIL import Image, ImageOps
     PIL_AVAILABLE = True
@@ -937,6 +937,18 @@ class FilmScanner:
             "confidence": alignment_conf,
             "offset_px": offset,
         }
+    def detect_alignment_roi(self, padding: float = 0.02, min_area_ratio: float = 0.05):
+        """
+        Capture a preview and auto-detect the bright region (film window) to set alignment ROI.
+        Returns (roi dict or None).
+        """
+        preview = self.capture_preview_bytes()
+        roi = detect_bright_region_roi(preview, min_area_ratio=min_area_ratio, padding=padding)
+        if roi:
+            with self.lock:
+                self.alignment_roi = roi
+            self._save_alignment_config()
+        return roi
     def _normalize_alignment_roi(self, roi):
         """
         Normalize ROI dict to 0-1 fractions with sanity checks.
@@ -1416,6 +1428,18 @@ def set_alignment_config_route():
                 'min_confidence': scanner.alignment_min_confidence,
             })
     except ValueError as e:
+        return jsonify({'success': False, 'message': str(e)})
+@app.route('/api/detect_alignment_roi', methods=['POST'])
+def detect_alignment_roi_route():
+    """
+    Auto-detect bright region (film window) from a live preview and set as alignment ROI.
+    """
+    try:
+        roi = scanner.detect_alignment_roi()
+        if roi:
+            return jsonify({'success': True, 'roi': roi})
+        return jsonify({'success': False, 'message': 'Unable to detect ROI from preview'})
+    except Exception as e:
         return jsonify({'success': False, 'message': str(e)})
 @app.route('/api/calibrate', methods=['POST'])
 def calibrate():

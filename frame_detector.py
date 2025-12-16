@@ -8,7 +8,7 @@ score. Inspired by the negative_scanner project.
 """
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -210,3 +210,64 @@ def detect_frame_gap(
         smoothed=smoothed,
         gaps=gaps,
     )
+
+
+def detect_bright_region_roi(
+    jpeg_bytes: bytes,
+    min_area_ratio: float = 0.05,
+    padding: float = 0.02,
+) -> Optional[dict]:
+    """
+    Detect the largest bright region (lit film window) within a mostly dark mask.
+
+    Returns ROI as normalized fractions {x0,x1,y0,y1} or None if not found.
+    """
+    gray = jpeg_bytes_to_gray(jpeg_bytes)
+    h, w = gray.shape[:2]
+
+    # Smooth to reduce noise, then Otsu threshold to separate bright/dark
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    # Morphological close to fill small holes
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+    # Find largest contour
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+
+    area_threshold = min_area_ratio * w * h
+    best_box: Optional[Tuple[int, int, int, int]] = None  # x, y, bw, bh
+    best_area = 0
+
+    for c in contours:
+        x, y, bw, bh = cv2.boundingRect(c)
+        area = bw * bh
+        if area >= area_threshold and area > best_area:
+            best_area = area
+            best_box = (x, y, bw, bh)
+
+    if not best_box:
+        return None
+
+    x, y, bw, bh = best_box
+
+    # Add optional padding (as fraction of image size) and clamp
+    pad_x = int(round(padding * w))
+    pad_y = int(round(padding * h))
+    x0 = max(0, x - pad_x)
+    y0 = max(0, y - pad_y)
+    x1 = min(w, x + bw + pad_x)
+    y1 = min(h, y + bh + pad_y)
+
+    if x1 <= x0 or y1 <= y0:
+        return None
+
+    return {
+        "x0": round(x0 / w, 4),
+        "x1": round(x1 / w, 4),
+        "y0": round(y0 / h, 4),
+        "y1": round(y1 / h, 4),
+    }
