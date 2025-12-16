@@ -2,10 +2,10 @@
 # Film Scanner - One-Line Installer
 # 
 # Run with:
-#   curl -sSL https://raw.githubusercontent.com/YOUR_USERNAME/Film-Scanner/Web-app-automated-edge-detection/scripts/install.sh | bash
+#   curl -sSL https://raw.githubusercontent.com/ccyyturralde/Film-Scanner/Web-app-automated-edge-detection/scripts/install.sh | bash
 #
 # Or with wget:
-#   wget -qO- https://raw.githubusercontent.com/YOUR_USERNAME/Film-Scanner/Web-app-automated-edge-detection/scripts/install.sh | bash
+#   wget -qO- https://raw.githubusercontent.com/ccyyturralde/Film-Scanner/Web-app-automated-edge-detection/scripts/install.sh | bash
 #
 # Supports: Raspberry Pi OS Lite/Desktop (32/64-bit), Pi 3/4/5
 
@@ -58,7 +58,7 @@ echo ""
 # Installation directory
 INSTALL_DIR="$HOME/Film-Scanner"
 BRANCH="Web-app-automated-edge-detection"
-REPO_URL="https://github.com/YOUR_USERNAME/Film-Scanner.git"
+REPO_URL="https://github.com/ccyyturralde/Film-Scanner.git"
 
 # Check for existing installation
 if [ -d "$INSTALL_DIR" ]; then
