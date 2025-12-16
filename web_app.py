@@ -490,11 +490,12 @@ class FilmScanner:
             self.broadcast_status()
             return False
     
-    def check_camera(self, retry_with_usb_clear=True):
-        """Check if camera is connected without killing gphoto2 or interrupting ops
+    def check_camera(self, retry_with_usb_clear=True, max_retries=3):
+        """Check if camera is connected with detailed logging
         
         Args:
-            retry_with_usb_clear: If camera not found, clear USB and retry once
+            retry_with_usb_clear: If camera not found, clear USB and retry
+            max_retries: Number of retry attempts (Canon cameras need multiple tries)
         """
         try:
             # If another camera operation is in progress (preview/capture), don't interrupt it.
@@ -505,32 +506,44 @@ class FilmScanner:
             # We got the lock, release it immediately - we just wanted to check
             self.camera_op_lock.release()
             
-            # Passive detect; no kill here on first attempt
-            result = subprocess.run(
-                ["gphoto2", "--auto-detect"],
-                capture_output=True, timeout=10, text=True
-            )
-            if result.returncode == 0 and "usb" in result.stdout.lower():
-                lines = result.stdout.strip().splitlines()
-                for line in lines:
-                    if "usb:" in line.lower():
-                        self.camera_connected = True
-                        self.camera_model = line.strip()
-                        self.camera_error = None
-                        print(f"✓ Camera detected: {self.camera_model}")
-                        return True
+            print("\n📷 Checking camera connection...")
             
-            # Camera not found - if retry enabled, clear USB and try again
-            if retry_with_usb_clear and not self.camera_connected:
-                print("📷 Camera not detected, clearing USB and retrying...")
-                clear_usb_for_camera()
-                time.sleep(1.0)  # Give USB time to stabilize
+            # First, check if Canon is visible on USB at all
+            try:
+                lsusb_result = subprocess.run(
+                    ["lsusb"],
+                    capture_output=True, text=True, timeout=5
+                )
+                canon_on_usb = False
+                if lsusb_result.returncode == 0:
+                    for line in lsusb_result.stdout.split('\n'):
+                        if 'canon' in line.lower():
+                            print(f"   USB: {line.strip()}")
+                            canon_on_usb = True
+                    if not canon_on_usb:
+                        print("   USB: No Canon device found on USB bus")
+            except Exception as e:
+                print(f"   USB check error: {e}")
+            
+            # Try detection with retries (Canon R100 is finicky)
+            for attempt in range(max_retries):
+                if attempt > 0:
+                    print(f"   Retry {attempt}/{max_retries-1}...")
+                    time.sleep(1.5)  # Canon needs time between attempts
                 
-                # Retry detection
+                # Run gphoto2 --auto-detect
                 result = subprocess.run(
                     ["gphoto2", "--auto-detect"],
-                    capture_output=True, timeout=10, text=True
+                    capture_output=True, timeout=15, text=True
                 )
+                
+                # Log the full output for debugging
+                print(f"   gphoto2 --auto-detect (attempt {attempt+1}):")
+                for line in result.stdout.strip().split('\n'):
+                    print(f"      {line}")
+                if result.stderr:
+                    print(f"   stderr: {result.stderr.strip()}")
+                
                 if result.returncode == 0 and "usb" in result.stdout.lower():
                     lines = result.stdout.strip().splitlines()
                     for line in lines:
@@ -538,28 +551,30 @@ class FilmScanner:
                             self.camera_connected = True
                             self.camera_model = line.strip()
                             self.camera_error = None
-                            print(f"✓ Camera detected after USB clear: {self.camera_model}")
+                            print(f"✓ Camera detected: {self.camera_model}")
                             return True
                 
-                # Still not found after retry
-                self.camera_connected = False
-                self.camera_error = "Camera not detected. Check USB connection and PTP mode."
-                print("✗ Camera not detected after USB clear")
-            else:
-                self.camera_connected = False
+                # If first attempt failed and retry enabled, clear USB
+                if attempt == 0 and retry_with_usb_clear:
+                    print("   Camera not detected, clearing USB...")
+                    clear_usb_for_camera()
+            
+            # All retries failed
+            self.camera_connected = False
+            self.camera_error = "Camera not detected after multiple attempts. Check USB and PTP mode."
+            print("✗ Camera not detected after all attempts")
+            print("   Troubleshooting:")
+            print("   - Ensure camera is ON and in PTP mode")
+            print("   - Try unplugging and replugging USB cable")
+            print("   - Press FIX CAM on touchscreen")
                 
         except subprocess.TimeoutExpired:
             print("✗ Camera detection timeout - USB may be blocked")
-            self.camera_error = "Detection timeout - USB may be blocked by another process"
-            if retry_with_usb_clear:
-                print("   Attempting USB clear and retry...")
-                clear_usb_for_camera()
-                return self.check_camera(retry_with_usb_clear=False)
+            self.camera_error = "Detection timeout"
             self.camera_connected = False
         except Exception as e:
             print(f"✗ Error checking camera: {e}")
             self.camera_error = str(e)
-            # Don't change state on exception
             
         return self.camera_connected
     def _kill_gphoto2(self):
@@ -1576,11 +1591,17 @@ if __name__ == '__main__':
         print("✗ Arduino not found (you can connect later via the web interface)")
         print("   Supported boards: Arduino Uno R3, R4 Minima, R4 WiFi")
     
-    # Check for camera
-    print("\n📷 Camera Setup")
-    print("  • USB Camera: gphoto2 for capture and preview")
-    print("  • Autofocus: Automatic during capture")
-    print("  • Preview: On-demand via web interface")
+    # Check for camera - do actual detection at startup
+    print("\n📷 Camera Detection")
+    print("  • Connection: USB via gphoto2")
+    print("  • Supported: Canon R100 and other PTP cameras")
+    
+    # Actually check for camera at startup
+    if scanner.check_camera(retry_with_usb_clear=True, max_retries=3):
+        print(f"✓ Camera ready: {scanner.camera_model}")
+    else:
+        print("⚠ Camera not detected at startup")
+        print("  Press FIX CAM on touchscreen or reconnect USB")
     
     # Start web server
     host = '0.0.0.0'
