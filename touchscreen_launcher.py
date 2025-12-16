@@ -134,22 +134,22 @@ class LauncherApp(BaseTouchApp):
             self.app_icons.append(icon)
     
     def _create_power_button(self):
-        """Create shutdown/exit button"""
+        """Create fix camera button (replaces exit - use ESC/Q to exit if needed)"""
         ui = self.config.ui
         colors = self.config.colors
         
-        btn_w = 80
+        btn_w = 100
         btn_h = 36
         margin = ui.button_margin
         
-        self.power_button = Button(
+        self.fix_camera_button = Button(
             rect=pygame.Rect(margin, self.config.display.height - btn_h - margin, 
                            btn_w, btn_h),
-            text="Exit",
-            callback=self._on_exit,
-            color=colors.btn_danger,
-            hover_color=colors.btn_danger_hover,
-            icon="⏻",
+            text="FIX CAM",
+            callback=self._on_fix_camera,
+            color=colors.btn_warning,
+            hover_color=colors.btn_warning_hover,
+            icon="📷",
             font_size=ui.font_size_small,
             config=self.config
         )
@@ -213,9 +213,39 @@ class LauncherApp(BaseTouchApp):
         # Reset clock
         self.clock = pygame.time.Clock()
     
-    def _on_exit(self):
-        """Exit the launcher"""
-        self.running = False
+    def _on_fix_camera(self):
+        """Fix camera connection by killing gphoto2/gvfs processes"""
+        self._show_toast("Fixing camera...")
+        
+        import subprocess as sp
+        import time as t
+        
+        # Kill processes that can block camera access
+        processes_to_kill = [
+            "gphoto2", "gvfsd-gphoto2", "gvfs-gphoto2-volume-monitor",
+            "gvfsd-mtp", "gvfsd-ptp", "PTPCamera"
+        ]
+        
+        for proc in processes_to_kill:
+            try:
+                sp.run(["killall", "-9", proc], capture_output=True, timeout=2)
+            except:
+                pass
+        
+        # Kill any gvfsd processes
+        try:
+            sp.run(["pkill", "-9", "-f", "gvfsd"], capture_output=True, timeout=2)
+        except:
+            pass
+        
+        # Unmount any auto-mounted camera
+        try:
+            sp.run(["gio", "mount", "-u", "-f", "gphoto2://"], capture_output=True, timeout=5)
+        except:
+            pass
+        
+        t.sleep(1)
+        self._show_toast("Camera reset - restart Scanner app")
     
     def handle_events(self):
         """Handle pygame events"""
@@ -230,8 +260,8 @@ class LauncherApp(BaseTouchApp):
             for icon in self.app_icons:
                 icon.handle_event(event)
             
-            # Handle power button
-            self.power_button.handle_event(event)
+            # Handle fix camera button
+            self.fix_camera_button.handle_event(event)
     
     def draw(self):
         """Draw the launcher screen"""
@@ -248,8 +278,8 @@ class LauncherApp(BaseTouchApp):
         for icon in self.app_icons:
             icon.draw(self.screen, self.font)
         
-        # Draw power button
-        self.power_button.draw(self.screen, self.font)
+        # Draw fix camera button
+        self.fix_camera_button.draw(self.screen, self.font)
         
         # Draw date in footer area
         date_str = datetime.now().strftime("%A, %B %d")
