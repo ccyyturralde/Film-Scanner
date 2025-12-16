@@ -1,27 +1,28 @@
 [Unit]
 Description=Film Scanner Web Application
 Documentation=https://github.com/yourusername/Film-Scanner
-After=network.target
+After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=pi
-Group=pi
+# Update User/Group to match your Pi username
+User=scanner
+Group=scanner
 
 # Environment
 Environment=PYTHONUNBUFFERED=1
 
-# Working directory (update this path!)
-WorkingDirectory=/home/pi/Film-Scanner
+# Working directory - update path as needed
+WorkingDirectory=/home/scanner/Film-Scanner
 
 # Start the web application
-ExecStart=/usr/bin/python3 /home/pi/Film-Scanner/web_app.py
+ExecStart=/usr/bin/python3 /home/scanner/Film-Scanner/web_app.py
 
-# Restart on failure (but not always - touch screen UI manages this)
+# Restart on failure
 Restart=on-failure
-RestartSec=10
-StartLimitBurst=3
+RestartSec=5
+StartLimitBurst=5
 StartLimitInterval=60
 
 # Logging

@@ -2,6 +2,11 @@
 """
 Film Scanner - Touch Screen Common Components
 Shared UI components and utilities for all touchscreen apps.
+
+Updated for Pi OS Bookworm/Trixie:
+- Uses direct framebuffer rendering (not SDL fbcon)
+- Uses evdev for touch input (not tslib)
+- Compatible with vc4-kms-v3d DRM driver
 """
 
 import pygame
@@ -19,30 +24,39 @@ try:
 except ImportError:
     PSUTIL_AVAILABLE = False
 
+# Optional evdev for direct touch input
+try:
+    import evdev
+    from evdev import InputDevice, ecodes
+    EVDEV_AVAILABLE = True
+except ImportError:
+    EVDEV_AVAILABLE = False
+
+# Import framebuffer display for direct rendering
+try:
+    from framebuffer_display import FramebufferDisplay
+    FRAMEBUFFER_AVAILABLE = True
+except ImportError:
+    FRAMEBUFFER_AVAILABLE = False
+
 from touchscreen_config import TouchScreenConfig, get_config, ColorTheme
 
 
 # ============================================================================
-# Framebuffer Setup
+# Helper Functions
 # ============================================================================
 
-def setup_framebuffer_env() -> bool:
-    """Configure environment for framebuffer/TFT display on Pi OS Lite"""
-    if '--windowed' in sys.argv:
-        return False
-    
-    fb_env = {
-        'SDL_FBDEV': '/dev/fb1',
-        'SDL_VIDEODRIVER': 'fbcon',
-        'SDL_MOUSEDRV': 'TSLIB',
-        'SDL_MOUSEDEV': '/dev/input/touchscreen',
-    }
-    
-    for key, value in fb_env.items():
-        if key not in os.environ:
-            os.environ[key] = value
-    
-    return True
+def is_windowed_mode() -> bool:
+    """Check if running in windowed/desktop mode"""
+    return '--windowed' in sys.argv
+
+
+def find_framebuffer() -> str:
+    """Find the framebuffer device (fb0 or fb1)"""
+    for fb in ['/dev/fb0', '/dev/fb1']:
+        if os.path.exists(fb):
+            return fb
+    return '/dev/fb0'  # Default
 
 
 # ============================================================================
@@ -174,8 +188,10 @@ class Button:
         """Draw the button"""
         colors = self.config.colors
         
+        # Determine button color
         if not self.enabled:
-            color = colors.btn_secondary
+            # Use darker background for disabled buttons so text is visible
+            color = colors.bg_panel
             text_color = colors.text_muted
         elif self.pressed:
             color = self.hover_color
@@ -190,7 +206,8 @@ class Button:
         if self.pressed:
             pygame.draw.rect(surface, colors.border_active, self.rect, 2, border_radius=radius)
         
-        display_text = f"{self.icon} {self.text}" if self.icon else self.text
+        # Draw text (icon support removed - use plain text for font compatibility)
+        display_text = self.text
         
         font.size = self.font_size
         text_surface, text_rect = font.render(display_text, text_color)
@@ -242,18 +259,10 @@ class AppIcon:
         if self.pressed:
             pygame.draw.rect(surface, colors.border_active, self.rect, 3, border_radius=12)
         
-        # Icon (large, centered upper portion)
-        font.size = ui.font_size_large + 10
-        icon_surf, icon_rect = font.render(self.icon, colors.text_primary)
-        icon_rect.centerx = self.rect.centerx
-        icon_rect.centery = self.rect.centery - 12
-        surface.blit(icon_surf, icon_rect)
-        
-        # Name (below icon)
-        font.size = ui.font_size_small
+        # Name (centered - no icon to avoid font compatibility issues)
+        font.size = ui.font_size_medium
         name_surf, name_rect = font.render(self.name, colors.text_primary)
-        name_rect.centerx = self.rect.centerx
-        name_rect.bottom = self.rect.bottom - 8
+        name_rect.center = self.rect.center
         surface.blit(name_surf, name_rect)
 
 
@@ -262,7 +271,12 @@ class AppIcon:
 # ============================================================================
 
 class BaseTouchApp:
-    """Base class for touchscreen applications"""
+    """
+    Base class for touchscreen applications.
+    
+    Uses direct framebuffer rendering on TFT displays (when not in windowed mode).
+    Falls back to SDL/pygame display for windowed/desktop testing.
+    """
     
     APP_NAME = "Base App"
     
@@ -271,21 +285,45 @@ class BaseTouchApp:
         self.running = False
         self.exit_to_launcher = True  # If True, return to launcher on exit
         
-        # Initialize pygame
+        # Initialize pygame (core modules)
         pygame.init()
         pygame.freetype.init()
         
-        # Hide mouse cursor for touch screen
-        if not self.config.display.show_cursor:
-            pygame.mouse.set_visible(False)
+        # Determine display mode
+        windowed = is_windowed_mode()
+        self._using_framebuffer = False
+        self._fb_display = None
         
-        # Set up display
-        display_flags = pygame.FULLSCREEN if self.config.display.fullscreen else 0
-        self.screen = pygame.display.set_mode(
-            (self.config.display.width, self.config.display.height),
-            display_flags
-        )
-        pygame.display.set_caption(self.APP_NAME)
+        if not windowed and FRAMEBUFFER_AVAILABLE:
+            # Try direct framebuffer for TFT displays
+            fb_device = find_framebuffer()
+            try:
+                self._fb_display = FramebufferDisplay(
+                    fb_device,
+                    self.config.display.width,
+                    self.config.display.height
+                )
+                self.screen = self._fb_display.surface
+                self._using_framebuffer = True
+                print(f"Using direct framebuffer: {fb_device}")
+            except Exception as e:
+                print(f"Framebuffer init failed: {e}, falling back to SDL")
+        
+        if not self._using_framebuffer:
+            # Fallback to SDL/pygame display
+            if not self.config.display.show_cursor:
+                try:
+                    pygame.mouse.set_visible(False)
+                except pygame.error:
+                    pass
+            
+            display_flags = pygame.FULLSCREEN if self.config.display.fullscreen and not windowed else 0
+            self.screen = pygame.display.set_mode(
+                (self.config.display.width, self.config.display.height),
+                display_flags
+            )
+            pygame.display.set_caption(self.APP_NAME)
+            print("Using SDL display")
         
         # Load fonts
         self.font = pygame.freetype.SysFont(
@@ -488,8 +526,19 @@ class BaseTouchApp:
             self.draw()
             self._draw_system_stats()
             self._draw_toast()
-            pygame.display.flip()
+            
+            # Update display
+            if self._using_framebuffer and self._fb_display:
+                self._fb_display.update()
+            else:
+                pygame.display.flip()
+            
             self.clock.tick(30)
+        
+        # Cleanup
+        if self._using_framebuffer and self._fb_display:
+            self._fb_display.clear()
+            self._fb_display.update()
         
         pygame.quit()
         return self.exit_to_launcher

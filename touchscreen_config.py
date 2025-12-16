@@ -7,6 +7,12 @@ Supports common 3.5" TFT screens:
 - 480x320 resolution (most common)
 - 320x240 resolution (older screens)
 - Various drivers (ILI9486, ILI9341, etc.)
+
+Updated for Pi OS Bookworm/Trixie (Debian 12/13):
+- Uses direct framebuffer rendering (not SDL fbcon)
+- Uses evdev for touch input (not tslib)
+- Default framebuffer is /dev/fb0 (with vc4-kms-v3d)
+- Default touch_invert_y=True (common for most TFT screens)
 """
 
 import json

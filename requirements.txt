@@ -1,10 +1,13 @@
 # Film Scanner - Python Dependencies
-# Install with: pip3 install -r requirements.txt
+# Install with: pip3 install --break-system-packages -r requirements.txt
+# Or use system packages on Debian: sudo apt install python3-flask python3-pygame etc.
 
 # Web Application
 Flask>=2.3.0
 Flask-SocketIO>=5.3.0
 python-socketio>=5.9.0
+simple-websocket>=0.10.0
+eventlet>=0.33.0
 
 # Hardware Communication
 pyserial>=3.5
@@ -16,6 +19,9 @@ numpy>=1.24.0
 
 # Touch Screen UI (3.5" TFT Display)
 pygame>=2.5.0
+
+# Touch Input (evdev for direct touch input on TFT screens)
+evdev>=1.6.0
 
 # System Monitoring (CPU, RAM, temperature stats)
 psutil>=5.9.0
