@@ -32,6 +32,7 @@ import shutil
 import traceback
 import re
 import glob
+from pathlib import Path
 from config_manager import ConfigManager
 from frame_detector import detect_frame_gap
 try:
@@ -244,6 +245,8 @@ class FilmScanner:
         self.px_per_step = 3.0  # adaptive estimate for auto-align
         self.alignment_confidence = 0.0
         self.last_gap_px = None
+        self.alignment_roi = None  # normalized ROI (fractions 0-1)
+        self.alignment_min_confidence = 0.10
         
         # Position tracking
         self.position = 0
@@ -255,12 +258,19 @@ class FilmScanner:
         
         # State persistence
         self.state_file = None
+        self.settings_dir = Path.home() / ".film_scanner"
         
         # Lock for thread safety
         self.lock = threading.Lock()
     
         # RLock to prevent gphoto2 conflicts across routes (reentrant for recursive calls)
         self.camera_op_lock = threading.RLock()
+
+        # Load persisted alignment settings (best-effort)
+        try:
+            self._load_alignment_config()
+        except Exception as e:
+            print(f"⚠ Failed to load alignment config: {e}")
     
     def identify_arduino_board(self, port_info):
         """Identify Arduino board type from USB port info"""
@@ -861,17 +871,19 @@ class FilmScanner:
 
         for iteration in range(max_iters):
             preview_bytes = self.capture_preview_bytes()
-            detection = detect_frame_gap(preview_bytes)
+            detection = detect_frame_gap(preview_bytes, roi=self.alignment_roi)
 
             # Update shared state under lock for thread safety
             with self.lock:
                 self.last_gap_px = detection.gap_x
                 self.alignment_confidence = detection.confidence
 
-            if detection.confidence < 0.15:
-                return False, "Low confidence in frame edge detection", {
+            min_conf = self.alignment_min_confidence
+            if detection.confidence < min_conf:
+                return False, f"Low confidence ({detection.confidence:.2f} < {min_conf:.2f})", {
                     "confidence": detection.confidence,
                     "offset_px": detection.offset_px,
+                    "min_confidence": min_conf,
                 }
 
             offset = detection.offset_px
@@ -925,6 +937,101 @@ class FilmScanner:
             "confidence": alignment_conf,
             "offset_px": offset,
         }
+    def _normalize_alignment_roi(self, roi):
+        """
+        Normalize ROI dict to 0-1 fractions with sanity checks.
+        Allows 0-1 or 0-100 inputs. Ensures minimum usable width/height.
+        """
+        if roi is None:
+            return None
+
+        if not isinstance(roi, dict):
+            raise ValueError("ROI must be an object with x0/x1/y0/y1")
+
+        try:
+            x0 = float(roi.get("x0", 0.0))
+            x1 = float(roi.get("x1", 1.0))
+            y0 = float(roi.get("y0", 0.0))
+            y1 = float(roi.get("y1", 1.0))
+        except Exception:
+            raise ValueError("ROI values must be numbers")
+
+        if max(x0, x1, y0, y1) > 1.5:
+            x0, x1, y0, y1 = x0 / 100.0, x1 / 100.0, y0 / 100.0, y1 / 100.0
+
+        x0 = max(0.0, min(1.0, x0))
+        x1 = max(0.0, min(1.0, x1))
+        y0 = max(0.0, min(1.0, y0))
+        y1 = max(0.0, min(1.0, y1))
+
+        if x1 <= x0 or y1 <= y0:
+            raise ValueError("ROI end must be greater than start for both axes")
+        if (x1 - x0) < 0.02:
+            raise ValueError("ROI width too small (needs at least 2% of frame)")
+        if (y1 - y0) < 0.05:
+            raise ValueError("ROI height too small (needs at least 5% of frame)")
+
+        return {
+            "x0": round(x0, 4),
+            "x1": round(x1, 4),
+            "y0": round(y0, 4),
+            "y1": round(y1, 4),
+        }
+
+    def _alignment_config_path(self):
+        return self.settings_dir / "alignment_config.json"
+
+    def _load_alignment_config(self):
+        cfg_path = self._alignment_config_path()
+        if not cfg_path.exists():
+            return False
+        with cfg_path.open("r") as f:
+            data = json.load(f)
+
+        roi = data.get("roi")
+        min_conf = data.get("min_confidence", self.alignment_min_confidence)
+
+        with self.lock:
+            if roi:
+                try:
+                    self.alignment_roi = self._normalize_alignment_roi(roi)
+                except ValueError as e:
+                    print(f"⚠ Ignoring saved ROI: {e}")
+                    self.alignment_roi = None
+
+            try:
+                self.alignment_min_confidence = float(min_conf)
+                self.alignment_min_confidence = max(0.01, min(0.9, self.alignment_min_confidence))
+            except Exception:
+                pass
+        return True
+
+    def _save_alignment_config(self):
+        try:
+            self.settings_dir.mkdir(parents=True, exist_ok=True)
+            data = {
+                "roi": self.alignment_roi,
+                "min_confidence": self.alignment_min_confidence,
+            }
+            with self._alignment_config_path().open("w") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            print(f"⚠ Failed to save alignment config: {e}")
+
+    def set_alignment_config(self, roi=None, min_confidence=None, clear=False):
+        """Update ROI/min confidence and persist to disk."""
+        with self.lock:
+            if clear:
+                self.alignment_roi = None
+            if roi is not None:
+                self.alignment_roi = self._normalize_alignment_roi(roi)
+            if min_confidence is not None:
+                try:
+                    conf = float(min_confidence)
+                except Exception:
+                    raise ValueError("min_confidence must be a number")
+                self.alignment_min_confidence = max(0.01, min(0.9, conf))
+        self._save_alignment_config()
     def save_state(self):
         """Save scanning state"""
         if not self.state_file:
@@ -1013,7 +1120,9 @@ class FilmScanner:
                 'arduino_board': self.arduino_board,
                 'px_per_step': self.px_per_step,
                 'alignment_confidence': self.alignment_confidence,
-                'last_gap_px': self.last_gap_px
+                'last_gap_px': self.last_gap_px,
+                'alignment_roi': self.alignment_roi,
+                'alignment_min_confidence': self.alignment_min_confidence,
             }
         
         return status
@@ -1261,11 +1370,52 @@ def auto_align_route():
             'info': info,
             'px_per_step': px_per_step,
             'confidence': confidence,
+            'alignment_roi': scanner.alignment_roi,
+            'min_confidence': scanner.alignment_min_confidence,
         })
     except Exception as e:
         with scanner.lock:
             scanner.status_msg = "✗ Auto-align error"
         scanner.broadcast_status()
+        return jsonify({'success': False, 'message': str(e)})
+@app.route('/api/get_alignment_config', methods=['POST'])
+def get_alignment_config_route():
+    """Return current alignment ROI and confidence threshold."""
+    with scanner.lock:
+        return jsonify({
+            'success': True,
+            'roi': scanner.alignment_roi,
+            'min_confidence': scanner.alignment_min_confidence,
+        })
+
+
+@app.route('/api/set_alignment_config', methods=['POST'])
+def set_alignment_config_route():
+    """
+    Update alignment ROI and/or minimum confidence.
+    Accepts either a nested roi object or flat x0/x1/y0/y1 keys.
+    Values may be 0-1 fractions or 0-100 percentages.
+    """
+    data = request.json or {}
+    clear = bool(data.get('clear'))
+
+    roi = data.get('roi')
+    if roi is None:
+        flat_roi = {k: data.get(k) for k in ("x0", "x1", "y0", "y1") if data.get(k) is not None}
+        if flat_roi:
+            roi = flat_roi
+
+    min_conf = data.get('min_confidence')
+
+    try:
+        scanner.set_alignment_config(roi=roi, min_confidence=min_conf, clear=clear)
+        with scanner.lock:
+            return jsonify({
+                'success': True,
+                'roi': scanner.alignment_roi,
+                'min_confidence': scanner.alignment_min_confidence,
+            })
+    except ValueError as e:
         return jsonify({'success': False, 'message': str(e)})
 @app.route('/api/calibrate', methods=['POST'])
 def calibrate():

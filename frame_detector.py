@@ -104,11 +104,55 @@ def _find_gaps(smoothed: np.ndarray, min_prominence: float, min_distance: int) -
     return kept
 
 
+def _normalize_roi(roi, width: int, height: int):
+    """
+    Normalize ROI dictionary into pixel coordinates.
+
+    ROI may be provided as 0-1 floats or 0-100 percentages. Values are clamped
+    to [0, 1]. Returns (x0, x1, y0, y1) ints or None if invalid.
+    """
+    try:
+        if not isinstance(roi, dict):
+            return None
+
+        x0 = float(roi.get("x0", 0.0))
+        x1 = float(roi.get("x1", 1.0))
+        y0 = float(roi.get("y0", 0.0))
+        y1 = float(roi.get("y1", 1.0))
+
+        # Allow percentage input
+        if max(x0, x1, y0, y1) > 1.5:
+            x0, x1, y0, y1 = x0 / 100.0, x1 / 100.0, y0 / 100.0, y1 / 100.0
+
+        # Clamp to [0, 1]
+        x0 = max(0.0, min(1.0, x0))
+        x1 = max(0.0, min(1.0, x1))
+        y0 = max(0.0, min(1.0, y0))
+        y1 = max(0.0, min(1.0, y1))
+
+        # Ensure valid ordering and minimum width/height
+        if x1 <= x0 or y1 <= y0:
+            return None
+
+        x0_px = int(round(x0 * width))
+        x1_px = int(round(x1 * width))
+        y0_px = int(round(y0 * height))
+        y1_px = int(round(y1 * height))
+
+        if x1_px - x0_px < 8 or y1_px - y0_px < 4:
+            return None
+
+        return x0_px, x1_px, y0_px, y1_px
+    except Exception:
+        return None
+
+
 def detect_frame_gap(
     jpeg_bytes: bytes,
     smooth_ksize: int = 15,
     min_prominence_ratio: float = 0.25,
     min_distance_ratio: float = 0.05,
+    roi: Optional[dict] = None,
 ) -> DetectionResult:
     """
     Detect brightest gap and return offset from image center.
@@ -118,9 +162,24 @@ def detect_frame_gap(
         smooth_ksize: gaussian kernel width for smoothing (pixels).
         min_prominence_ratio: fraction of (max - min) used as minimum peak prominence.
         min_distance_ratio: fraction of image width for minimum gap separation.
+        roi: Optional dict specifying region of interest:
+             {"x0": start, "x1": end, "y0": start, "y1": end}
+             Values may be 0-1 fractions or 0-100 percentages.
     """
 
     gray = jpeg_bytes_to_gray(jpeg_bytes)
+    full_height, full_width = gray.shape[:2]
+
+    roi_bounds = _normalize_roi(roi, width=full_width, height=full_height) if roi else None
+    roi_x_offset = 0
+    if roi_bounds:
+        x0, x1, y0, y1 = roi_bounds
+        gray = gray[y0:y1, x0:x1]
+        roi_x_offset = x0
+
+    if gray.size == 0:
+        return DetectionResult(offset_px=0, confidence=0.0, gap_x=None, profile=None, smoothed=None, gaps=[])
+
     profile = vertical_profile(gray)
     smoothed = _smooth_profile(profile, smooth_ksize)
 
@@ -134,8 +193,9 @@ def detect_frame_gap(
 
     # Choose strongest peak (highest prominence)
     best = max(gaps, key=lambda g: g.prominence)
-    center = len(smoothed) // 2
-    offset = best.x - center
+    center = full_width // 2
+    gap_global_x = roi_x_offset + best.x
+    offset = gap_global_x - center
 
     # Confidence: normalized prominence * width factor
     prominence_norm = best.prominence / span
@@ -145,7 +205,7 @@ def detect_frame_gap(
     return DetectionResult(
         offset_px=int(offset),
         confidence=confidence,
-        gap_x=best.x,
+        gap_x=int(gap_global_x),
         profile=profile,
         smoothed=smoothed,
         gaps=gaps,

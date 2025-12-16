@@ -25,6 +25,11 @@ let settingsState = {
     coarseStep: 192
 };
 
+let alignmentSettings = {
+    roi: null,
+    minConfidence: 0.1
+};
+
 // Connect to WebSocket
 socket.on('connect', () => {
     console.log('Connected to server');
@@ -64,6 +69,26 @@ function updateUI(status) {
             alignText.textContent = 'Auto-align not run yet.';
         }
     }
+
+    // Alignment ROI + threshold display
+    const roiDisplay = document.getElementById('alignment-roi-display');
+    const minConfDisplay = document.getElementById('alignment-min-confidence-display');
+    const roi = status.alignment_roi || null;
+    const minConf = status.alignment_min_confidence ?? alignmentSettings.minConfidence;
+    alignmentSettings.roi = roi;
+    alignmentSettings.minConfidence = minConf;
+    if (roiDisplay) {
+        if (roi) {
+            const toPct = (v) => Math.round(v * 1000) / 10;
+            roiDisplay.textContent = `ROI X: ${toPct(roi.x0)}% → ${toPct(roi.x1)}%, Y: ${toPct(roi.y0)}% → ${toPct(roi.y1)}%`;
+        } else {
+            roiDisplay.textContent = 'ROI: full frame';
+        }
+    }
+    if (minConfDisplay) {
+        minConfDisplay.textContent = `Min confidence: ${(minConf * 100).toFixed(0)}%`;
+    }
+    syncAlignmentInputs(roi, minConf);
     
     // Mode and auto-advance displays
     document.getElementById('mode-display').textContent = status.mode.toUpperCase();
@@ -316,6 +341,75 @@ async function autoAlign() {
         const conf = info.confidence !== undefined ? (info.confidence * 100).toFixed(0) + '%' : 'n/a';
         alert(`Auto-align OK\nConfidence: ${conf}\nOffset px: ${info.offset_px ?? 'n/a'}`);
     }
+}
+
+// Alignment ROI helpers
+function syncAlignmentInputs(roi, minConfidence) {
+    const x0Input = document.getElementById('align-x0');
+    const x1Input = document.getElementById('align-x1');
+    const y0Input = document.getElementById('align-y0');
+    const y1Input = document.getElementById('align-y1');
+    const minConfInput = document.getElementById('align-min-confidence');
+
+    const toPct = (v) => (v * 100).toFixed(1);
+
+    if (roi) {
+        if (x0Input) x0Input.value = toPct(roi.x0);
+        if (x1Input) x1Input.value = toPct(roi.x1);
+        if (y0Input) y0Input.value = toPct(roi.y0);
+        if (y1Input) y1Input.value = toPct(roi.y1);
+    } else {
+        if (x0Input && !x0Input.value) x0Input.value = '0';
+        if (x1Input && !x1Input.value) x1Input.value = '100';
+        if (y0Input && !y0Input.value) y0Input.value = '0';
+        if (y1Input && !y1Input.value) y1Input.value = '100';
+    }
+
+    if (minConfInput && minConfidence !== undefined) {
+        minConfInput.value = (minConfidence * 100).toFixed(0);
+    }
+}
+
+async function loadAlignmentConfig() {
+    const result = await apiCall('get_alignment_config');
+    if (result.success) {
+        syncAlignmentInputs(result.roi, result.min_confidence);
+    }
+}
+
+async function applyAlignmentConfig(clear = false) {
+    const btn = event?.target;
+    if (btn) setButtonProcessing(btn, true);
+
+    const payload = {};
+    const minConfInput = document.getElementById('align-min-confidence');
+    if (minConfInput && minConfInput.value) {
+        payload.min_confidence = parseFloat(minConfInput.value) / 100;
+    }
+
+    if (clear) {
+        payload.clear = true;
+    } else {
+        const x0 = parseFloat(document.getElementById('align-x0')?.value || '0');
+        const x1 = parseFloat(document.getElementById('align-x1')?.value || '100');
+        const y0 = parseFloat(document.getElementById('align-y0')?.value || '0');
+        const y1 = parseFloat(document.getElementById('align-y1')?.value || '100');
+        payload.roi = { x0, x1, y0, y1 };
+    }
+
+    const result = await apiCall('set_alignment_config', payload);
+    if (btn) setButtonProcessing(btn, false);
+
+    if (!result.success) {
+        alert('Failed to update alignment settings: ' + (result.message || 'Unknown error'));
+    } else {
+        syncAlignmentInputs(result.roi, result.min_confidence);
+        alert(clear ? 'Alignment ROI cleared (full frame).' : 'Alignment ROI updated.');
+    }
+}
+
+function clearAlignmentConfig() {
+    applyAlignmentConfig(true);
 }
 
 // Auto-refresh preview
@@ -605,6 +699,7 @@ setInterval(() => {
 // Initial status request
 window.addEventListener('load', () => {
     socket.emit('request_status');
+    loadAlignmentConfig();
 });
 
 // Setup motor button press-and-hold functionality
