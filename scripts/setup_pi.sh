@@ -118,12 +118,18 @@ apt-get install -y \
 # Image processing libraries
 print_step "Installing image processing libraries..."
 apt-get install -y \
-    libatlas-base-dev \
     libjpeg-dev \
     libtiff-dev \
     libopenjp2-7 \
     libpng-dev \
-    libfreetype-dev
+    libfreetype-dev \
+    || true
+
+# Try alternative package names for different Debian versions
+apt-get install -y libatlas-base-dev 2>/dev/null \
+    || apt-get install -y libatlas3-base 2>/dev/null \
+    || apt-get install -y libopenblas-dev 2>/dev/null \
+    || true
 
 # SDL2 and pygame dependencies
 print_step "Installing SDL2 and display libraries..."
