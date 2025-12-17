@@ -248,7 +248,7 @@ class FilmScanner:
         self.alignment_confidence = 0.0
         self.last_gap_px = None
         self.alignment_roi = None  # normalized ROI (fractions 0-1)
-        self.alignment_min_confidence = 0.10
+        self.alignment_min_confidence = 0.03
         
         # Position tracking
         self.position = 0
@@ -880,15 +880,18 @@ class FilmScanner:
                 self.last_gap_px = detection.gap_x
                 self.alignment_confidence = detection.confidence
 
+            offset = detection.offset_px
             min_conf = self.alignment_min_confidence
             if detection.confidence < min_conf:
-                return False, f"Low confidence ({detection.confidence:.2f} < {min_conf:.2f})", {
-                    "confidence": detection.confidence,
-                    "offset_px": detection.offset_px,
-                    "min_confidence": min_conf,
-                }
-
-            offset = detection.offset_px
+                # Allow a small exploratory move on the first iteration if we have some signal
+                if iteration == 0 and detection.confidence >= 0.4 * min_conf:
+                    pass  # continue with minimal move below
+                else:
+                    return False, f"Low confidence ({detection.confidence:.2f} < {min_conf:.2f})", {
+                        "confidence": detection.confidence,
+                        "offset_px": offset,
+                        "min_confidence": min_conf,
+                    }
             if abs(offset) <= stop_px:
                 with self.lock:
                     self.status_msg = "✓ Auto-aligned"
@@ -907,7 +910,10 @@ class FilmScanner:
                 px_per_step = max(0.5, float(self.px_per_step))
             step_float = commanded_offset / px_per_step
             steps = int(round(step_float))
-            if abs(steps) < min_step:
+            if iteration == 0 and detection.confidence < min_conf:
+                # Exploratory nudge only
+                steps = min_step if commanded_offset >= 0 else -min_step
+            elif abs(steps) < min_step:
                 steps = min_step if commanded_offset >= 0 else -min_step
             if abs(steps) > max_step:
                 steps = max_step if steps > 0 else -max_step

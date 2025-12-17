@@ -150,7 +150,7 @@ def _normalize_roi(roi, width: int, height: int):
 def detect_frame_gap(
     jpeg_bytes: bytes,
     smooth_ksize: int = 11,
-    min_prominence_ratio: float = 0.15,
+    min_prominence_ratio: float = 0.10,
     min_distance_ratio: float = 0.05,
     roi: Optional[dict] = None,
 ) -> DetectionResult:
@@ -197,9 +197,9 @@ def detect_frame_gap(
     gap_global_x = roi_x_offset + best.x
     offset = gap_global_x - center
 
-    # Confidence: normalized prominence * width factor
+    # Confidence: normalized prominence * width factor with a floor to avoid vanishing confidence
     prominence_norm = best.prominence / span
-    width_norm = min(1.0, best.width / max(1.0, 0.1 * len(smoothed)))
+    width_norm = max(0.35, min(1.0, best.width / max(1.0, 0.1 * len(smoothed))))
     confidence = float(np.clip(prominence_norm * (0.5 + 0.5 * width_norm), 0.0, 1.0))
 
     return DetectionResult(

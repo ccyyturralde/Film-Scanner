@@ -27,7 +27,7 @@ let settingsState = {
 
 let alignmentSettings = {
     roi: null,
-    minConfidence: 0.1
+    minConfidence: 0.03
 };
 const alignmentInputEdits = {};
 
