@@ -33,6 +33,7 @@ class DetectionResult:
     profile: Optional[np.ndarray] = None
     smoothed: Optional[np.ndarray] = None
     gaps: Optional[List[GapDetection]] = None
+    polarity: str = "bright"  # whether we locked onto a bright or dark gap
 
 
 def jpeg_bytes_to_gray(jpeg_bytes: bytes) -> np.ndarray:
@@ -187,28 +188,48 @@ def detect_frame_gap(
     min_prominence = min_prominence_ratio * span
     min_distance = max(8, int(len(smoothed) * min_distance_ratio))
 
-    gaps = _find_gaps(smoothed, min_prominence=min_prominence, min_distance=min_distance)
-    if not gaps:
+    def _confidence_from_gap(gap: GapDetection, signal_len: int) -> float:
+        """Convert a gap prominence/width into a 0-1 confidence score."""
+        prominence_norm = gap.prominence / max(span, 1e-6)
+        width_norm = max(0.35, min(1.0, gap.width / max(1.0, 0.1 * signal_len)))
+        return float(np.clip(prominence_norm * (0.5 + 0.5 * width_norm), 0.0, 1.0))
+
+    def _best_gap_for_signal(signal: np.ndarray, polarity: str):
+        """Return best gap candidate (bright or dark) for a given 1D signal."""
+        found = _find_gaps(signal, min_prominence=min_prominence, min_distance=min_distance)
+        if not found:
+            return None
+        best_gap = max(found, key=lambda g: g.prominence)
+        confidence = _confidence_from_gap(best_gap, len(signal))
+        gap_global_x = roi_x_offset + best_gap.x
+        return {
+            "gap": best_gap,
+            "confidence": confidence,
+            "gap_x": gap_global_x,
+            "polarity": polarity,
+            "gaps": found,
+        }
+
+    # Try both bright gaps (normal) and dark gaps (inverted signal)
+    bright_candidate = _best_gap_for_signal(smoothed, "bright")
+    dark_candidate = _best_gap_for_signal(-smoothed, "dark")
+
+    candidates = [c for c in (bright_candidate, dark_candidate) if c]
+    if not candidates:
         return DetectionResult(offset_px=0, confidence=0.0, gap_x=None, profile=profile, smoothed=smoothed, gaps=[])
 
-    # Choose strongest peak (highest prominence)
-    best = max(gaps, key=lambda g: g.prominence)
+    best = max(candidates, key=lambda c: c["confidence"])
     center = full_width // 2
-    gap_global_x = roi_x_offset + best.x
-    offset = gap_global_x - center
-
-    # Confidence: normalized prominence * width factor with a floor to avoid vanishing confidence
-    prominence_norm = best.prominence / span
-    width_norm = max(0.35, min(1.0, best.width / max(1.0, 0.1 * len(smoothed))))
-    confidence = float(np.clip(prominence_norm * (0.5 + 0.5 * width_norm), 0.0, 1.0))
+    offset = best["gap_x"] - center
 
     return DetectionResult(
         offset_px=int(offset),
-        confidence=confidence,
-        gap_x=int(gap_global_x),
+        confidence=float(best["confidence"]),
+        gap_x=int(best["gap_x"]),
         profile=profile,
         smoothed=smoothed,
-        gaps=gaps,
+        gaps=best["gaps"],
+        polarity=best["polarity"],
     )
 
 
@@ -216,6 +237,7 @@ def detect_bright_region_roi(
     jpeg_bytes: bytes,
     min_area_ratio: float = 0.05,
     padding: float = 0.0,
+    inner_shrink: float = 0.05,
 ) -> Optional[dict]:
     """
     Detect the largest bright region (lit film window) within a mostly dark mask.
@@ -262,6 +284,16 @@ def detect_bright_region_roi(
     y += shrink_y
     bw = max(1, bw - 2 * shrink_x)
     bh = max(1, bh - 2 * shrink_y)
+
+    # Further crop inward within the bright region so we ignore mask edges
+    if inner_shrink > 0:
+        inner_x = int(round(inner_shrink * bw))
+        inner_y = int(round(inner_shrink * bh))
+        if bw - 2 * inner_x >= 8 and bh - 2 * inner_y >= 4:
+            x += inner_x
+            y += inner_y
+            bw -= 2 * inner_x
+            bh -= 2 * inner_y
 
     # Add optional padding (as fraction of image size) and clamp
     pad_x = int(round(padding * w))

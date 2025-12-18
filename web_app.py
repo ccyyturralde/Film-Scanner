@@ -879,26 +879,34 @@ class FilmScanner:
             with self.lock:
                 self.last_gap_px = detection.gap_x
                 self.alignment_confidence = detection.confidence
-
             offset = detection.offset_px
             min_conf = self.alignment_min_confidence
-            if detection.confidence < min_conf:
-                # Allow a small exploratory move on the first iteration if we have some signal
-                if iteration == 0 and detection.confidence >= 0.4 * min_conf:
-                    pass  # continue with minimal move below
+            low_conf = detection.confidence < min_conf
+            exploratory = False
+            if low_conf:
+                # Take one exploratory nudge on the first iteration to hunt for the gap
+                if iteration == 0:
+                    exploratory = True
                 else:
                     return False, f"Low confidence ({detection.confidence:.2f} < {min_conf:.2f})", {
                         "confidence": detection.confidence,
                         "offset_px": offset,
                         "min_confidence": min_conf,
+                        "polarity": getattr(detection, "polarity", None),
                     }
-            if abs(offset) <= stop_px:
+
+            print(f"[auto-align] iter {iteration} offset={offset:.1f}px "
+                  f"conf={detection.confidence:.3f} (min {min_conf:.3f}) "
+                  f"polarity={getattr(detection, 'polarity', '?')} gap={detection.gap_x}")
+
+            if abs(offset) <= stop_px and not exploratory:
                 with self.lock:
                     self.status_msg = "✓ Auto-aligned"
                 return True, "Aligned", {
                     "confidence": detection.confidence,
                     "offset_px": offset,
                     "gap_x": detection.gap_x,
+                    "polarity": getattr(detection, "polarity", None),
                 }
 
             # Bias first move forward to avoid pulling film back on first frame
@@ -910,7 +918,7 @@ class FilmScanner:
                 px_per_step = max(0.5, float(self.px_per_step))
             step_float = commanded_offset / px_per_step
             steps = int(round(step_float))
-            if iteration == 0 and detection.confidence < min_conf:
+            if exploratory:
                 # Exploratory nudge only
                 steps = min_step if commanded_offset >= 0 else -min_step
             elif abs(steps) < min_step:
