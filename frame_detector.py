@@ -168,40 +168,73 @@ def detect_frame_gap(
              Values may be 0-1 fractions or 0-100 percentages.
     """
 
-    gray = jpeg_bytes_to_gray(jpeg_bytes)
-    full_height, full_width = gray.shape[:2]
+    # Decode color to allow channel selection; fall back to gray if needed
+    arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+    color = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if color is None:
+        raise ValueError("Failed to decode preview image")
 
+    base_gray = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY)
+    full_height, full_width = base_gray.shape[:2]
+
+    # Apply ROI crop in both color and gray space
     roi_bounds = _normalize_roi(roi, width=full_width, height=full_height) if roi else None
     roi_x_offset = 0
     if roi_bounds:
         x0, x1, y0, y1 = roi_bounds
-        gray = gray[y0:y1, x0:x1]
+        color = color[y0:y1, x0:x1]
+        base_gray = base_gray[y0:y1, x0:x1]
         roi_x_offset = x0
 
-    if gray.size == 0:
+    if color.size == 0 or base_gray.size == 0:
         return DetectionResult(offset_px=0, confidence=0.0, gap_x=None, profile=None, smoothed=None, gaps=[])
 
-    profile = vertical_profile(gray)
-    smoothed = _smooth_profile(profile, smooth_ksize)
+    # Pick the strongest color channel (highest variance) to maximize contrast
+    channel_stds = [color[..., i].std() for i in range(3)]
+    best_ch = int(np.argmax(channel_stds))
+    working = color[..., best_ch]
 
-    span = float(smoothed.max() - smoothed.min() + 1e-6)
-    min_prominence = min_prominence_ratio * span
-    min_distance = max(8, int(len(smoothed) * min_distance_ratio))
+    # Contrast enhancement (CLAHE) to make gaps stand out on flat scans
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    working = clahe.apply(working)
 
-    def _confidence_from_gap(gap: GapDetection, signal_len: int) -> float:
-        """Convert a gap prominence/width into a 0-1 confidence score."""
+    # Downsample horizontally for stability and speed
+    target_width = 512
+    h, w = working.shape[:2]
+    if w > target_width:
+        scale = target_width / float(w)
+        new_h = max(1, int(round(h * scale)))
+        working = cv2.resize(working, (target_width, new_h), interpolation=cv2.INTER_AREA)
+        width_scale = w / float(target_width)
+    else:
+        width_scale = 1.0
+
+    # Intensity profile
+    profile = vertical_profile(working)
+    smoothed_intensity = _smooth_profile(profile, smooth_ksize)
+
+    # Gradient-based profile (strong for sharp vertical bars)
+    blurred = cv2.GaussianBlur(working, (5, 5), 0)
+    sobel = cv2.Sobel(blurred, cv2.CV_32F, 1, 0, ksize=3)
+    grad = np.abs(sobel)
+    grad_profile = grad.mean(axis=0).astype(np.float32)
+    smoothed_grad = _smooth_profile(grad_profile, smooth_ksize)
+
+    def _confidence_from_gap(gap: GapDetection, span: float, signal_len: int) -> float:
         prominence_norm = gap.prominence / max(span, 1e-6)
         width_norm = max(0.35, min(1.0, gap.width / max(1.0, 0.1 * signal_len)))
         return float(np.clip(prominence_norm * (0.5 + 0.5 * width_norm), 0.0, 1.0))
 
     def _best_gap_for_signal(signal: np.ndarray, polarity: str):
-        """Return best gap candidate (bright or dark) for a given 1D signal."""
+        span = float(signal.max() - signal.min() + 1e-6)
+        min_prominence = min_prominence_ratio * span
+        min_distance = max(8, int(len(signal) * min_distance_ratio))
         found = _find_gaps(signal, min_prominence=min_prominence, min_distance=min_distance)
         if not found:
             return None
         best_gap = max(found, key=lambda g: g.prominence)
-        confidence = _confidence_from_gap(best_gap, len(signal))
-        gap_global_x = roi_x_offset + best_gap.x
+        confidence = _confidence_from_gap(best_gap, span, len(signal))
+        gap_global_x = roi_x_offset + int(round(best_gap.x * width_scale))
         return {
             "gap": best_gap,
             "confidence": confidence,
@@ -210,13 +243,15 @@ def detect_frame_gap(
             "gaps": found,
         }
 
-    # Try both bright gaps (normal) and dark gaps (inverted signal)
-    bright_candidate = _best_gap_for_signal(smoothed, "bright")
-    dark_candidate = _best_gap_for_signal(-smoothed, "dark")
+    candidates = []
+    candidates.append(_best_gap_for_signal(smoothed_intensity, "intensity-bright"))
+    candidates.append(_best_gap_for_signal(-smoothed_intensity, "intensity-dark"))
+    candidates.append(_best_gap_for_signal(smoothed_grad, "gradient-bright"))
+    candidates.append(_best_gap_for_signal(-smoothed_grad, "gradient-dark"))
+    candidates = [c for c in candidates if c]
 
-    candidates = [c for c in (bright_candidate, dark_candidate) if c]
     if not candidates:
-        return DetectionResult(offset_px=0, confidence=0.0, gap_x=None, profile=profile, smoothed=smoothed, gaps=[])
+        return DetectionResult(offset_px=0, confidence=0.0, gap_x=None, profile=profile, smoothed=smoothed_intensity, gaps=[])
 
     best = max(candidates, key=lambda c: c["confidence"])
     center = full_width // 2
@@ -227,7 +262,7 @@ def detect_frame_gap(
         confidence=float(best["confidence"]),
         gap_x=int(best["gap_x"]),
         profile=profile,
-        smoothed=smoothed,
+        smoothed=smoothed_intensity,
         gaps=best["gaps"],
         polarity=best["polarity"],
     )
