@@ -64,6 +64,7 @@ function updateUI(status) {
     if (alignModeEl && status.alignment_mode) {
         alignModeEl.textContent = `Mode: ${status.alignment_mode}`;
     }
+    // camera settings display is fetched separately via refreshCameraSettings()
     
     // Auto-align status
     const alignText = document.getElementById('auto-align-status');
@@ -305,6 +306,33 @@ async function testCapture() {
         alert('✓ Test capture successful!\n\nCamera is working. Check camera SD card for test image.\n\n(Frame count was NOT incremented)');
     } else {
         alert('✗ Test capture failed\n\n' + (result.message || 'Check console for details'));
+    }
+}
+
+async function triggerAutofocus() {
+    const btn = event && event.target ? event.target : null;
+    if (btn) setButtonProcessing(btn, true);
+    const result = await apiCall('autofocus', {});
+    if (btn) setButtonProcessing(btn, false);
+    if (!result.success) {
+        alert(result.message || 'Autofocus failed');
+    } else {
+        alert('Autofocus triggered');
+    }
+}
+
+async function refreshCameraSettings() {
+    const result = await apiCall('camera_settings', {});
+    if (result.success && result.settings) {
+        const s = result.settings;
+        const ap = document.getElementById('cam-aperture');
+        const iso = document.getElementById('cam-iso');
+        const sh = document.getElementById('cam-shutter');
+        if (ap) ap.textContent = s.aperture || 'n/a';
+        if (iso) iso.textContent = s.iso || 'n/a';
+        if (sh) sh.textContent = s.shutterspeed || 'n/a';
+    } else {
+        alert(result.message || 'Unable to read camera settings');
     }
 }
 
@@ -856,6 +884,8 @@ setInterval(() => {
 window.addEventListener('load', () => {
     socket.emit('request_status');
     loadAlignmentConfig();
+    // Best-effort fetch camera settings on load (non-blocking)
+    refreshCameraSettings();
 });
 
 // Setup motor button press-and-hold functionality

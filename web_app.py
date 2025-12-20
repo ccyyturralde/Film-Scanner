@@ -932,6 +932,36 @@ class FilmScanner:
             print(f"✗ Autofocus error: {e}")
             return False
     
+    def get_camera_settings(self):
+        """Fetch basic exposure settings (best-effort; keys may vary by camera)."""
+        keys = {
+            "aperture": "aperture",
+            "iso": "iso",
+            "shutterspeed": "shutterspeed",
+        }
+        values = {}
+
+        def read_config(cfg_key):
+            try:
+                result = subprocess.run(
+                    ["gphoto2", "--get-config", cfg_key],
+                    capture_output=True,
+                    text=True,
+                    timeout=8,
+                )
+                if result.returncode == 0 and result.stdout:
+                    for line in result.stdout.splitlines():
+                        if "Current:" in line:
+                            return line.split("Current:", 1)[1].strip()
+            except Exception:
+                return None
+            return None
+
+        for name, key in keys.items():
+            values[name] = read_config(key)
+
+        return values
+    
     def check_viewfinder_state(self):
         """Query viewfinder state without killing other gphoto2 ops"""
         try:
@@ -2027,6 +2057,26 @@ def preview_video_stream():
                 continue
 
     return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+
+@app.route('/api/autofocus', methods=['POST'])
+def autofocus_route():
+    """Trigger autofocus (best-effort)."""
+    if not scanner.check_camera():
+        return jsonify({'success': False, 'message': 'Camera not connected'})
+    success = scanner.autofocus()
+    if success:
+        return jsonify({'success': True, 'message': 'Autofocus triggered'})
+    return jsonify({'success': False, 'message': 'Autofocus failed (see logs)'})
+
+
+@app.route('/api/camera_settings', methods=['POST'])
+def camera_settings_route():
+    """Return basic exposure settings (aperture/iso/shutter) if available."""
+    if not scanner.check_camera():
+        return jsonify({'success': False, 'message': 'Camera not connected'})
+    settings = scanner.get_camera_settings()
+    return jsonify({'success': True, 'settings': settings})
 @app.route('/api/update_step_sizes', methods=['POST'])
 def update_step_sizes():
     """Update motor step sizes"""

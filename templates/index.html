@@ -203,6 +203,9 @@
                 <button class="btn btn-success btn-large btn-capture" onclick="capture()">
                     📸 CAPTURE
                 </button>
+                <button class="btn btn-secondary btn-large" onclick="triggerAutofocus()">
+                    🔍 Autofocus
+                </button>
             </div>
             <div class="control-options">
                 <button class="btn btn-secondary" onclick="toggleMode()">
@@ -211,6 +214,18 @@
                 <button class="btn btn-secondary" onclick="toggleAutoAdvance()">
                     Auto-Advance: <span id="auto-advance">ON</span>
                 </button>
+            </div>
+            <div class="camera-settings">
+                <div class="setting-group inline">
+                    <strong>Aperture:</strong> <span id="cam-aperture">n/a</span>
+                </div>
+                <div class="setting-group inline">
+                    <strong>ISO:</strong> <span id="cam-iso">n/a</span>
+                </div>
+                <div class="setting-group inline">
+                    <strong>Shutter:</strong> <span id="cam-shutter">n/a</span>
+                </div>
+                <button class="btn btn-secondary" onclick="refreshCameraSettings()">Refresh Settings</button>
             </div>
         </section>
 
