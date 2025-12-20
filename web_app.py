@@ -48,6 +48,24 @@ except ImportError:
     print("⚠ PIL/Pillow not available - image preview will be limited")
 
 
+def encode_preview_bytes(preview_bytes: bytes, invert: bool = False) -> str:
+    """
+    Encode preview bytes to base64 JPEG. Optional pure inversion for visualization.
+    Inversion is for UI only and is never fed into alignment.
+    """
+    if not preview_bytes:
+        raise ValueError("Empty preview")
+    if invert and PIL_AVAILABLE:
+        img = Image.open(io.BytesIO(preview_bytes))
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        img_inverted = ImageOps.invert(img)
+        buf = io.BytesIO()
+        img_inverted.save(buf, format='JPEG', quality=85)
+        return base64.b64encode(buf.getvalue()).decode('utf-8')
+    return base64.b64encode(preview_bytes).decode('utf-8')
+
+
 def clear_usb_for_camera():
     """
     Thoroughly clear USB to make room for the camera connection.
@@ -1886,6 +1904,8 @@ def new_strip():
 @app.route('/api/get_preview', methods=['POST'])
 def get_preview():
     """Get live preview from camera - Canon R100 requires viewfinder enabled first"""
+    data = request.json or {}
+    invert = bool(data.get('invert')) if isinstance(data, dict) else False
     if not scanner.check_camera():
         return jsonify({
             'success': False,
@@ -1895,19 +1915,6 @@ def get_preview():
 
     scanner.status_msg = "Getting live preview..."
     scanner.broadcast_status()
-
-    def encode_preview_bytes(preview_bytes: bytes) -> str:
-        if not preview_bytes:
-            raise ValueError("Empty preview")
-        if PIL_AVAILABLE:
-            img = Image.open(io.BytesIO(preview_bytes))
-            if img.mode != 'RGB':
-                img = img.convert('RGB')
-            img_inverted = ImageOps.invert(img)
-            buf = io.BytesIO()
-            img_inverted.save(buf, format='JPEG', quality=85)
-            return base64.b64encode(buf.getvalue()).decode('utf-8')
-        return base64.b64encode(preview_bytes).decode('utf-8')
 
     # Prefer live stream (no extra gphoto2 spawn)
     stream_frame = None
@@ -1919,7 +1926,7 @@ def get_preview():
 
     if stream_frame:
         try:
-            image_data = encode_preview_bytes(stream_frame)
+            image_data = encode_preview_bytes(stream_frame, invert=invert)
             scanner.status_msg = "✓ Live preview (stream)"
             scanner.broadcast_status()
             return jsonify({'success': True, 'image': image_data})
@@ -1935,7 +1942,7 @@ def get_preview():
                 scanner.preview_stream.start()
             except Exception as e:
                 scanner.log(f"⚠ Preview stream restart failed: {e}")
-        image_data = encode_preview_bytes(preview_bytes)
+        image_data = encode_preview_bytes(preview_bytes, invert=invert)
         scanner.status_msg = "✓ Live preview"
         scanner.broadcast_status()
         return jsonify({'success': True, 'image': image_data})
@@ -1948,6 +1955,48 @@ def get_preview():
         scanner._kill_gphoto2()
         scanner.status_msg = "✗ Preview error"
         scanner.broadcast_status()
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/get_preview_video', methods=['POST'])
+def get_preview_video():
+    """
+    Get a single frame from the live video stream for testing.
+    Optional invert (UI-only) via JSON {invert: true}.
+    """
+    data = request.json or {}
+    invert = bool(data.get('invert')) if isinstance(data, dict) else False
+
+    if not scanner.check_camera():
+        return jsonify({
+            'success': False,
+            'message': 'Camera not connected',
+            'error': scanner.camera_error
+        })
+
+    if not scanner.ensure_preview_stream():
+        return jsonify({'success': False, 'message': 'Unable to start preview stream'})
+
+    frame = scanner.preview_stream.get_frame(timeout=1.5)
+    if not frame:
+        # Best-effort fallback to a capture preview to return something
+        try:
+            paused_stream = scanner.preview_stream.pause_for_capture()
+            frame = scanner.capture_preview_bytes()
+            if paused_stream:
+                try:
+                    scanner.preview_stream.start()
+                except Exception:
+                    scanner.log("⚠ Preview stream restart failed after fallback frame")
+        except Exception as e:
+            return jsonify({'success': False, 'message': f'No stream frame: {e}'})
+
+    try:
+        image_data = encode_preview_bytes(frame, invert=invert)
+        scanner.status_msg = "✓ Video preview frame"
+        scanner.broadcast_status()
+        return jsonify({'success': True, 'image': image_data, 'source': 'stream'})
+    except Exception as e:
         return jsonify({'success': False, 'message': str(e)})
 @app.route('/api/update_step_sizes', methods=['POST'])
 def update_step_sizes():
