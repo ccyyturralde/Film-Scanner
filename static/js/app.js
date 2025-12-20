@@ -543,18 +543,6 @@ async function setAlignmentMode(mode) {
     }
 }
 
-// Auto-refresh preview
-function toggleAutoRefresh() {
-    const checkbox = document.getElementById('auto-refresh-toggle');
-    previewState.autoRefresh = checkbox.checked;
-    
-    if (previewState.autoRefresh) {
-        startAutoRefresh();
-    } else {
-        stopAutoRefresh();
-    }
-}
-
 function togglePreviewInvert() {
     const checkbox = document.getElementById('preview-invert-toggle');
     previewState.inverted = checkbox?.checked || false;
