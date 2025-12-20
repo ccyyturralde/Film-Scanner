@@ -138,12 +138,12 @@
                 <button class="btn btn-secondary" onclick="zeroPosition()">
                     Zero Position
                 </button>
-                <button class="btn btn-primary" onclick="autoAlign()">
+                <button class="btn btn-primary" onclick="autoAlign()" id="auto-align-btn">
                     🎯 Auto Align Frame
                 </button>
             </div>
             <div class="control-options">
-                <label>
+                <label id="auto-align-checkbox-wrapper">
                     <input type="checkbox" id="auto-align-before-capture">
                     Auto-align before capture
                 </label>
@@ -274,7 +274,7 @@
                 <div class="help-text" id="alignment-mode-display">Mode: stream</div>
             </div>
 
-            <div class="settings-section">
+            <div class="settings-section" id="alignment-roi-section">
                 <h3>Alignment ROI</h3>
                 <p class="help-text">ROI and Detect/Save are still used by stream auto-align to focus on the film window.</p>
             </div>
