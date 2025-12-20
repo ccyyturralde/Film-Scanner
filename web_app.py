@@ -2013,33 +2013,16 @@ def preview_video_stream():
     invert = request.args.get('invert', '0') in ('1', 'true', 'True', 'yes')
 
     def generate():
-        # Try to start the stream; if unavailable, we will fall back to capture_preview_bytes
+        # Start the stream once; avoid repeated restarts that can spam the camera
         scanner.ensure_preview_stream()
-        consecutive_misses = 0
         while True:
             try:
-                # Prefer stream frame
+                # Only use the live stream; do NOT fall back to capture_preview to avoid camera spam
                 frame = scanner.preview_stream.get_frame(timeout=0.5)
                 if frame is None:
-                    consecutive_misses += 1
-                    if consecutive_misses >= 20:
-                        # Try to restart stream once after many misses
-                        try:
-                            scanner.preview_stream.stop()
-                            scanner.preview_stream.start()
-                        except Exception:
-                            pass
-                        # Best-effort fallback to single preview to keep client from hanging
-                        try:
-                            frame = scanner.capture_preview_bytes()
-                            consecutive_misses = 0
-                        except Exception:
-                            frame = None
                     time.sleep(0.05)
                     if frame is None:
                         continue
-                else:
-                    consecutive_misses = 0
 
                 out = frame
                 if invert:
