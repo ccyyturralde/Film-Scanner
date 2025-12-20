@@ -231,7 +231,7 @@ class LivePreviewStream:
     - Designed to avoid blocking main threads; only stores the latest frame.
     """
 
-    def __init__(self, scanner, target_width: int = 960, max_age: float = 1.5):
+    def __init__(self, scanner, target_width: int = 640, max_age: float = 1.5):
         self.scanner = scanner
         self.target_width = target_width
         self.max_age = max_age
@@ -311,7 +311,10 @@ class LivePreviewStream:
                 "-lc",
                 (
                     "gphoto2 --stdout --capture-movie 2>/dev/null | "
-                    f"ffmpeg -hide_banner -loglevel error -i - -vf scale={self.target_width}:-1 "
+                    f"ffmpeg -hide_banner -loglevel error "
+                    "-fflags nobuffer -flags low_delay -probesize 32k -analyzeduration 0 "
+                    "-rtbufsize 8M "
+                    "-i - -vf scale={self.target_width}:-1 "
                     "-f mjpeg -q:v 5 -"
                 ),
             ]
@@ -2015,20 +2018,9 @@ def preview_video_stream():
         while True:
             try:
                 # Prefer stream frame
-                frame = scanner.preview_stream.get_frame(timeout=1.0)
-                # Fallback to a single preview capture if stream is not delivering frames
+                frame = scanner.preview_stream.get_frame(timeout=0.5)
                 if frame is None:
-                    paused = scanner.preview_stream.pause_for_capture()
-                    try:
-                        frame = scanner.capture_preview_bytes()
-                    finally:
-                        if paused:
-                            try:
-                                scanner.preview_stream.start()
-                            except Exception:
-                                pass
-                if frame is None:
-                    time.sleep(0.1)
+                    time.sleep(0.05)
                     continue
 
                 out = frame
