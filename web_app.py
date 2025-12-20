@@ -24,6 +24,7 @@ import subprocess
 import time
 import os
 from datetime import datetime
+from typing import Optional, Tuple
 from collections import deque
 import json
 import threading
@@ -33,6 +34,7 @@ import shutil
 import traceback
 import re
 import glob
+import io
 from pathlib import Path
 from config_manager import ConfigManager
 from frame_detector import detect_frame_gap, detect_bright_region_roi
@@ -199,6 +201,162 @@ def clear_usb_for_camera():
     print("   ✓ USB cleanup complete")
     return True
 
+class LivePreviewStream:
+    """
+    Lightweight live-preview reader that keeps a gphoto2/ffmpeg pipeline open
+    and exposes the latest JPEG frame for fast alignment.
+
+    Notes:
+    - Uses gphoto2 --capture-movie piped to ffmpeg to transcode to MJPEG.
+    - If the stream dies, consumers fall back to on-demand previews.
+    - Designed to avoid blocking main threads; only stores the latest frame.
+    """
+
+    def __init__(self, scanner, target_width: int = 960, max_age: float = 1.5):
+        self.scanner = scanner
+        self.target_width = target_width
+        self.max_age = max_age
+        self.latest_frame: Optional[bytes] = None
+        self.last_frame_ts: float = 0.0
+        self.thread: Optional[threading.Thread] = None
+        self.stop_event = threading.Event()
+        self.process: Optional[subprocess.Popen] = None
+        self.lock = threading.Lock()
+        self.last_error: Optional[str] = None
+
+    def is_running(self) -> bool:
+        return self.thread is not None and self.thread.is_alive()
+
+    def start(self) -> bool:
+        """Start stream if not already running."""
+        with self.lock:
+            if self.is_running():
+                return True
+            self.stop_event.clear()
+            self.thread = threading.Thread(target=self._run_stream, daemon=True)
+            self.thread.start()
+        return True
+
+    def pause_for_capture(self) -> bool:
+        """Stop stream before a still capture, returning whether it was running."""
+        was_running = self.is_running()
+        if was_running:
+            self.stop()
+            time.sleep(0.25)
+        return was_running
+
+    def stop(self):
+        """Stop stream and clean up process."""
+        with self.lock:
+            self.stop_event.set()
+            proc = self.process
+            self.process = None
+        if proc:
+            try:
+                proc.terminate()
+                proc.wait(timeout=1.0)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        # Allow thread to exit
+        if self.thread:
+            self.thread.join(timeout=1.0)
+        self.thread = None
+
+    def get_frame(self, timeout: float = 0.8) -> Optional[bytes]:
+        """Return latest fresh frame (<= max_age seconds) or None."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with self.lock:
+                frame = self.latest_frame
+                ts = self.last_frame_ts
+            if frame and (time.time() - ts) <= self.max_age:
+                return frame
+            time.sleep(0.05)
+        return None
+
+    def _run_stream(self):
+        try:
+            if not self.scanner.check_camera():
+                self.last_error = "Camera not connected"
+                return
+            if not self.scanner.enable_viewfinder():
+                self.last_error = "Viewfinder enable failed"
+                return
+
+            # Build pipeline: gphoto2 stream -> ffmpeg -> MJPEG frames
+            cmd = [
+                "bash",
+                "-lc",
+                (
+                    "gphoto2 --stdout --capture-movie 2>/dev/null | "
+                    f"ffmpeg -hide_banner -loglevel error -i - -vf scale={self.target_width}:-1 "
+                    "-f mjpeg -q:v 5 -"
+                ),
+            ]
+
+            self.scanner.log("▶ Starting live preview stream (gphoto2 → ffmpeg)")
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0
+            )
+            with self.lock:
+                self.process = proc
+
+            buffer = bytearray()
+            while not self.stop_event.is_set():
+                chunk = proc.stdout.read(4096)
+                if not chunk:
+                    break
+                buffer.extend(chunk)
+
+                # Extract JPEG frames delineated by SOI/EOI markers
+                while True:
+                    soi = buffer.find(b"\xff\xd8")
+                    if soi == -1:
+                        # Keep buffer small to avoid runaway growth
+                        if len(buffer) > 8192:
+                            buffer = buffer[-4096:]
+                        break
+                    eoi = buffer.find(b"\xff\xd9", soi + 2)
+                    if eoi == -1:
+                        if soi > 0:
+                            buffer = buffer[soi:]
+                        break
+
+                    frame = bytes(buffer[soi : eoi + 2])
+                    buffer = buffer[eoi + 2 :]
+
+                    with self.lock:
+                        self.latest_frame = frame
+                        self.last_frame_ts = time.time()
+
+                # Avoid busy loop
+                if not buffer:
+                    time.sleep(0.01)
+
+        except Exception as e:
+            self.last_error = str(e)
+            try:
+                self.scanner.log(f"✗ Live preview stream error: {e}")
+            except Exception:
+                pass
+        finally:
+            with self.lock:
+                proc = self.process
+                self.process = None
+            if proc:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=0.5)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+
+
 # Arduino USB Vendor/Product IDs for automatic detection
 ARDUINO_USB_IDS = {
     # Arduino Uno R3 and compatible
@@ -259,6 +417,7 @@ class FilmScanner:
         # Mode control
         self.mode = 'manual'
         self.auto_advance = True
+        self.alignment_mode = "stream"  # stream (auto) or calibration (distance-only)
         
         # State persistence
         self.state_file = None
@@ -269,6 +428,9 @@ class FilmScanner:
     
         # RLock to prevent gphoto2 conflicts across routes (reentrant for recursive calls)
         self.camera_op_lock = threading.RLock()
+
+        # Live preview stream for fast alignment (continuous latest frame)
+        self.preview_stream = LivePreviewStream(self)
 
         # Load persisted alignment settings (best-effort)
         try:
@@ -295,6 +457,52 @@ class FilmScanner:
         except Exception:
             limit = 200
         return list(self.log_buffer)[-limit:]
+
+    def ensure_preview_stream(self) -> bool:
+        """
+        Ensure live preview stream is running.
+
+        Returns True if stream is running or successfully started, False otherwise.
+        """
+        try:
+            return self.preview_stream.start()
+        except Exception as e:
+            self.log(f"✗ Failed to start preview stream: {e}")
+            return False
+
+    def stop_preview_stream(self):
+        """Stop live preview stream (safe to call even if not running)."""
+        try:
+            self.preview_stream.stop()
+        except Exception as e:
+            self.log(f"✗ Failed to stop preview stream: {e}")
+
+    def get_alignment_frame(self, timeout: float = 1.0) -> Tuple[Optional[bytes], bool]:
+        """
+        Return (frame_bytes, used_stream_flag).
+        Tries live stream first, falls back to on-demand preview capture.
+        """
+        used_stream = False
+
+        if self.ensure_preview_stream():
+            frame = self.preview_stream.get_frame(timeout=timeout)
+            if frame:
+                return frame, True
+
+        paused_stream = False
+        try:
+            paused_stream = self.preview_stream.pause_for_capture()
+            frame = self.capture_preview_bytes()
+            return frame, used_stream
+        except Exception as e:
+            self.log(f"✗ Alignment preview failed: {e}")
+            return None, False
+        finally:
+            if paused_stream:
+                try:
+                    self.preview_stream.start()
+                except Exception:
+                    self.log("✗ Failed to restart preview stream after fallback capture")
     
     def identify_arduino_board(self, port_info):
         """Identify Arduino board type from USB port info"""
@@ -786,6 +994,12 @@ class FilmScanner:
     
     def capture_image(self, retry=True):
         """Capture image to camera SD card with exclusive access"""
+        stream_was_running = False
+        try:
+            stream_was_running = self.preview_stream.pause_for_capture()
+        except Exception:
+            pass
+
         # Ensure exclusive access - RLock allows recursive acquisition by same thread
         with self.camera_op_lock:
             try:
@@ -822,6 +1036,12 @@ class FilmScanner:
                 print(f"✗ Capture error: {e}")
                 self._kill_gphoto2()
                 return False
+            finally:
+                if stream_was_running:
+                    try:
+                        self.preview_stream.start()
+                    except Exception:
+                        self.log("✗ Failed to restart preview stream after capture")
 
     def capture_preview_bytes(self):
         """Capture a preview image and return raw JPEG bytes (no inversion)."""
@@ -889,12 +1109,25 @@ class FilmScanner:
         Closed-loop auto alignment using preview edge detection.
         Returns (success, message, result_dict).
         """
+        if self.alignment_mode != "stream":
+            return False, "Alignment mode is set to calibration", {
+                "mode": self.alignment_mode,
+            }
         prev_offset = None
         last_move_steps = None
         offset = 0  # Initialize to handle max_iters=0 edge case
+        used_stream = self.ensure_preview_stream()
 
         for iteration in range(max_iters):
-            preview_bytes = self.capture_preview_bytes()
+            preview_bytes, from_stream = self.get_alignment_frame(timeout=1.2)
+            used_stream = used_stream or from_stream
+            if not preview_bytes:
+                return False, "No preview frame available", {
+                    "confidence": 0.0,
+                    "offset_px": 0,
+                    "source": "stream" if from_stream else "capture",
+                }
+
             detection = detect_frame_gap(preview_bytes, roi=self.alignment_roi)
 
             # Update shared state under lock for thread safety
@@ -919,7 +1152,8 @@ class FilmScanner:
 
             self.log(f"[auto-align] iter {iteration} offset={offset:.1f}px "
                      f"conf={detection.confidence:.3f} (min {min_conf:.3f}) "
-                     f"polarity={getattr(detection, 'polarity', '?')} gap={detection.gap_x}")
+                     f"polarity={getattr(detection, 'polarity', '?')} gap={detection.gap_x} "
+                     f"src={'stream' if from_stream else 'capture'}")
 
             if abs(offset) <= stop_px and not exploratory:
                 with self.lock:
@@ -1082,6 +1316,21 @@ class FilmScanner:
                     raise ValueError("min_confidence must be a number")
                 self.alignment_min_confidence = max(0.01, min(0.9, conf))
         self._save_alignment_config()
+
+    def set_alignment_mode(self, mode: str):
+        """
+        Set alignment mode:
+        - "stream": live auto-detect using preview stream
+        - "calibration": distance-only using calibrated frame_advance
+        """
+        if not isinstance(mode, str):
+            raise ValueError("mode must be a string")
+        normalized = mode.strip().lower()
+        if normalized not in ("stream", "calibration"):
+            raise ValueError("mode must be 'stream' or 'calibration'")
+        with self.lock:
+            self.alignment_mode = normalized
+        self.save_state()
     def save_state(self):
         """Save scanning state"""
         if not self.state_file:
@@ -1097,6 +1346,7 @@ class FilmScanner:
             'frame_positions': self.frame_positions,
             'mode': self.mode,
             'auto_advance': self.auto_advance,
+            'alignment_mode': self.alignment_mode,
             'updated': datetime.now().isoformat()
         }
         
@@ -1118,6 +1368,7 @@ class FilmScanner:
                 self.frame_positions = state.get('frame_positions', [])
                 self.mode = state.get('mode', 'manual')
                 self.auto_advance = state.get('auto_advance', True)
+                self.alignment_mode = state.get('alignment_mode', self.alignment_mode)
                 return True
         return False
     
@@ -1160,6 +1411,7 @@ class FilmScanner:
                 'mode': self.mode,
                 'frame_advance': self.frame_advance,
                 'auto_advance': self.auto_advance,
+                'alignment_mode': self.alignment_mode,
                 'camera_connected': self.camera_connected,
                 'camera_model': self.camera_model,
                 'camera_error': self.camera_error,
@@ -1371,15 +1623,19 @@ def capture():
         return jsonify({'success': False, 'message': 'Camera not connected'})
     
     if auto_align_before:
-        try:
-            success, msg, info = scanner.auto_align()
+        if scanner.alignment_mode != "stream":
+            scanner.status_msg = "Skipping auto-align (calibration mode)"
             scanner.broadcast_status()
-            if not success:
-                return jsonify({'success': False, 'message': f'Auto-align failed: {msg}', 'info': info})
-        except Exception as e:
-            scanner.status_msg = "✗ Auto-align error"
-            scanner.broadcast_status()
-            return jsonify({'success': False, 'message': f'Auto-align error: {str(e)}'})
+        else:
+            try:
+                success, msg, info = scanner.auto_align()
+                scanner.broadcast_status()
+                if not success:
+                    return jsonify({'success': False, 'message': f'Auto-align failed: {msg}', 'info': info})
+            except Exception as e:
+                scanner.status_msg = "✗ Auto-align error"
+                scanner.broadcast_status()
+                return jsonify({'success': False, 'message': f'Auto-align error: {str(e)}'})
 
     scanner.status_msg = "Capturing..."
     scanner.broadcast_status()
@@ -1436,6 +1692,7 @@ def get_alignment_config_route():
             'success': True,
             'roi': scanner.alignment_roi,
             'min_confidence': scanner.alignment_min_confidence,
+            'alignment_mode': scanner.alignment_mode,
         })
 
 
@@ -1464,6 +1721,24 @@ def set_alignment_config_route():
                 'success': True,
                 'roi': scanner.alignment_roi,
                 'min_confidence': scanner.alignment_min_confidence,
+            })
+    except ValueError as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/set_alignment_mode', methods=['POST'])
+def set_alignment_mode_route():
+    """Set alignment mode: stream (auto-detect) or calibration (distance-only)."""
+    data = request.json or {}
+    mode = data.get('mode')
+    try:
+        scanner.set_alignment_mode(mode)
+        scanner.status_msg = f"Alignment mode: {scanner.alignment_mode}"
+        scanner.broadcast_status()
+        with scanner.lock:
+            return jsonify({
+                'success': True,
+                'alignment_mode': scanner.alignment_mode,
             })
     except ValueError as e:
         return jsonify({'success': False, 'message': str(e)})
@@ -1617,176 +1892,63 @@ def get_preview():
             'message': 'Camera not connected',
             'error': scanner.camera_error
         })
-    
+
     scanner.status_msg = "Getting live preview..."
     scanner.broadcast_status()
-    
-    # Create temp directory
-    temp_dir = tempfile.mkdtemp()
-    original_dir = os.getcwd()
-    lock_acquired = False
-    
-    try:
-        # Ensure exclusive access to gphoto2 during preview
-        scanner.camera_op_lock.acquire()
-        lock_acquired = True
-        print("\n📷 Capturing live preview from camera...")
-        scanner._kill_gphoto2()
-        time.sleep(0.5)
-        
-        # CRITICAL: Enable viewfinder first (Canon R100 requirement)
-        # Per r100-liveview-testing.md: viewfinder MUST be enabled for --capture-preview to work
-        print("   Step 1: Checking/enabling viewfinder...")
-        if not scanner.enable_viewfinder():
-            print("✗ Failed to enable viewfinder")
-            scanner.status_msg = "✗ Cannot enable viewfinder"
-            scanner.broadcast_status()
-            return jsonify({
-                'success': False,
-                'message': 'Failed to enable viewfinder. Required for live preview.'
-            })
-        
-        # Change to temp directory
-        os.chdir(temp_dir)
-        print(f"   Working directory: {temp_dir}")
-        
-        # Step 2: Capture preview with viewfinder enabled
-        print("   Step 2: Capturing preview (viewfinder enabled)...")
-        print("   Running: gphoto2 --capture-preview --force-overwrite")
-        result = subprocess.run(
-            ["gphoto2", "--capture-preview", "--force-overwrite"],
-            capture_output=True,
-            timeout=10,
-            text=True
-        )
-        
-        # Restore directory
-        os.chdir(original_dir)
-        
-        print(f"   Return code: {result.returncode}")
-        if result.stdout:
-            print(f"   stdout: {result.stdout.strip()}")
-        if result.stderr:
-            print(f"   stderr: {result.stderr.strip()}")
-        
-        time.sleep(0.2)
-        
-        # Check what files were created
-        files = os.listdir(temp_dir)
-        print(f"   Files in directory: {files}")
-        
-        # Look for preview.jpg (default name for --capture-preview)
-        preview_path = os.path.join(temp_dir, "preview.jpg")
-        
-        if not os.path.exists(preview_path):
-            # Look for any JPG files
-            preview_files = [f for f in files if f.lower().endswith(('.jpg', '.jpeg'))]
-            
-            if not preview_files:
-                print("✗ No preview file created")
-                print("   → This shouldn't happen if viewfinder was enabled")
-                print("   → Check camera is in PTP mode")
-                scanner.status_msg = "✗ No preview file"
-                scanner.broadcast_status()
-                return jsonify({
-                    'success': False,
-                    'message': 'No preview file created despite viewfinder being enabled.'
-                })
-            
-            preview_path = os.path.join(temp_dir, preview_files[0])
-            print(f"   Using: {preview_files[0]}")
-        else:
-            print(f"   Found: preview.jpg")
-        
-        # Read the image
-        file_size = os.path.getsize(preview_path)
-        print(f"   Image size: {file_size} bytes")
-        
-        # Check minimum size
-        if file_size < 1000:
-            print("✗ Image too small (corrupt)")
-            scanner.status_msg = "✗ Preview corrupt"
-            scanner.broadcast_status()
-            return jsonify({'success': False, 'message': 'Preview image corrupt or too small'})
-        
-        # Convert negative to positive if PIL is available
+
+    def encode_preview_bytes(preview_bytes: bytes) -> str:
+        if not preview_bytes:
+            raise ValueError("Empty preview")
         if PIL_AVAILABLE:
-            try:
-                print("   Converting negative to positive...")
-                img = Image.open(preview_path)
-                
-                # Convert to RGB if needed
-                if img.mode != 'RGB':
-                    img = img.convert('RGB')
-                
-                # Invert the image (negative to positive)
-                img_inverted = ImageOps.invert(img)
-                
-                # Save as JPG to buffer
-                from io import BytesIO
-                buffer = BytesIO()
-                img_inverted.save(buffer, format='JPEG', quality=85)
-                image_data = base64.b64encode(buffer.getvalue()).decode('utf-8')
-                
-                print("   ✓ Converted to positive")
-                
-            except Exception as e:
-                print(f"   ⚠ Conversion failed: {e}, using original")
-                with open(preview_path, 'rb') as f:
-                    image_data = base64.b64encode(f.read()).decode('utf-8')
-        else:
-            # No PIL, just encode original
-            print("   (PIL not available, showing as negative)")
-            with open(preview_path, 'rb') as f:
-                image_data = base64.b64encode(f.read()).decode('utf-8')
-        
-        scanner.status_msg = "✓ Live preview ready"
-        scanner.broadcast_status()
-        
-        print(f"✓ Live preview successful")
-        
-        # Clean up any lingering gphoto2 processes after preview
-        scanner._kill_gphoto2()
-        
-        return jsonify({'success': True, 'image': image_data})
-        
-    except subprocess.TimeoutExpired:
-        scanner._kill_gphoto2()  # Clean up on timeout
+            img = Image.open(io.BytesIO(preview_bytes))
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            img_inverted = ImageOps.invert(img)
+            buf = io.BytesIO()
+            img_inverted.save(buf, format='JPEG', quality=85)
+            return base64.b64encode(buf.getvalue()).decode('utf-8')
+        return base64.b64encode(preview_bytes).decode('utf-8')
+
+    # Prefer live stream (no extra gphoto2 spawn)
+    stream_frame = None
+    try:
+        if scanner.ensure_preview_stream():
+            stream_frame = scanner.preview_stream.get_frame(timeout=1.2)
+    except Exception as e:
+        scanner.log(f"⚠ Live stream preview failed, falling back: {e}")
+
+    if stream_frame:
         try:
-            os.chdir(original_dir)
-        except:
-            pass
-        print("✗ Preview timeout")
+            image_data = encode_preview_bytes(stream_frame)
+            scanner.status_msg = "✓ Live preview (stream)"
+            scanner.broadcast_status()
+            return jsonify({'success': True, 'image': image_data})
+        except Exception as e:
+            scanner.log(f"⚠ Failed to encode stream frame: {e}")
+
+    # Fallback: single preview capture
+    try:
+        paused_stream = scanner.preview_stream.pause_for_capture()
+        preview_bytes = scanner.capture_preview_bytes()
+        if paused_stream:
+            try:
+                scanner.preview_stream.start()
+            except Exception as e:
+                scanner.log(f"⚠ Preview stream restart failed: {e}")
+        image_data = encode_preview_bytes(preview_bytes)
+        scanner.status_msg = "✓ Live preview"
+        scanner.broadcast_status()
+        return jsonify({'success': True, 'image': image_data})
+    except subprocess.TimeoutExpired:
+        scanner._kill_gphoto2()
         scanner.status_msg = "✗ Preview timeout"
         scanner.broadcast_status()
         return jsonify({'success': False, 'message': 'Preview capture timeout'})
-        
     except Exception as e:
-        try:
-            os.chdir(original_dir)
-        except:
-            pass
-        scanner._kill_gphoto2()  # Clean up on error
-        print(f"✗ Preview error: {e}")
-        traceback.print_exc()
-        scanner.status_msg = f"✗ Error"
+        scanner._kill_gphoto2()
+        scanner.status_msg = "✗ Preview error"
         scanner.broadcast_status()
         return jsonify({'success': False, 'message': str(e)})
-        
-    finally:
-        if lock_acquired:
-            try:
-                scanner.camera_op_lock.release()
-            except RuntimeError:
-                pass
-        try:
-            os.chdir(original_dir)
-        except:
-            pass
-        try:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-        except:
-            pass
 @app.route('/api/update_step_sizes', methods=['POST'])
 def update_step_sizes():
     """Update motor step sizes"""
