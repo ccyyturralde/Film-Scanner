@@ -18,6 +18,7 @@ if 'gevent' in sys.modules:
 
 from flask import Flask, render_template, request, jsonify
 from flask_socketio import SocketIO, emit
+from flask import Response
 import serial
 import serial.tools.list_ports
 import subprocess
@@ -1998,6 +1999,47 @@ def get_preview_video():
         return jsonify({'success': True, 'image': image_data, 'source': 'stream'})
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/preview_video_stream')
+def preview_video_stream():
+    """
+    MJPEG stream of live preview frames.
+    Optional query param ?invert=1 for UI-only inversion.
+    """
+    invert = request.args.get('invert', '0') in ('1', 'true', 'True', 'yes')
+
+    def generate():
+        if not scanner.ensure_preview_stream():
+            yield b''
+            return
+        while True:
+            frame = scanner.preview_stream.get_frame(timeout=1.0)
+            if not frame:
+                time.sleep(0.05)
+                continue
+            try:
+                if invert:
+                    arr = np.frombuffer(frame, dtype=np.uint8)
+                    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                    if img is None:
+                        continue
+                    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    pil_img = Image.fromarray(img)
+                    pil_img = ImageOps.invert(pil_img)
+                    buf = io.BytesIO()
+                    pil_img.save(buf, format='JPEG', quality=80)
+                    out = buf.getvalue()
+                else:
+                    out = frame
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + out + b'\r\n')
+            except GeneratorExit:
+                break
+            except Exception:
+                continue
+
+    return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
 @app.route('/api/update_step_sizes', methods=['POST'])
 def update_step_sizes():
     """Update motor step sizes"""

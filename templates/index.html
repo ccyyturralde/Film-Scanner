@@ -69,13 +69,17 @@
                     <button class="btn btn-primary btn-large" id="preview-btn" onclick="capturePreview()">
                         🖼️ Preview Image
                     </button>
-                    <button class="btn btn-secondary btn-large" id="preview-video-btn" onclick="capturePreviewVideo()">
-                        🎥 Preview Video Frame
+                    <button class="btn btn-secondary btn-large" id="preview-video-btn" onclick="startVideoStream()">
+                        🎥 Start Video Preview
+                    </button>
+                    <button class="btn btn-secondary btn-large" id="preview-video-stop-btn" onclick="stopVideoStream()">
+                        ⏹ Stop Video Preview
                     </button>
                 </div>
             </div>
             <div id="preview-container" style="display: none;">
                 <img id="preview-image" src="" alt="Live Preview">
+                <img id="preview-video-stream" src="" alt="Video Preview" style="display:none; margin-top:10px; max-width:100%; border:1px solid #444;">
                 <div class="preview-info">
                     <span id="preview-timestamp"></span>
                 </div>
@@ -244,6 +248,15 @@
                     <input type="range" id="refresh-interval" min="100" max="5000" step="100" value="1000">
                     <span id="refresh-interval-display">1000 ms</span>
                 </div>
+            </div>
+
+            <div class="settings-section">
+                <h3>Alignment Mode</h3>
+                <div class="preview-buttons">
+                    <button class="btn btn-secondary" onclick="setAlignmentMode('stream')">Stream Auto-Align</button>
+                    <button class="btn btn-secondary" onclick="setAlignmentMode('calibration')">Calibration Only</button>
+                </div>
+                <div class="help-text" id="alignment-mode-display">Mode: stream</div>
             </div>
 
             <div class="settings-section">

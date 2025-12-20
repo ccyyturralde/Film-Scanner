@@ -272,7 +272,7 @@ def detect_bright_region_roi(
     jpeg_bytes: bytes,
     min_area_ratio: float = 0.05,
     padding: float = 0.0,
-    inner_shrink: float = 0.05,
+    inner_shrink: float = 0.01,
 ) -> Optional[dict]:
     """
     Detect the largest bright region (lit film window) within a mostly dark mask.
@@ -313,8 +313,8 @@ def detect_bright_region_roi(
     x, y, bw, bh = best_box
 
     # Slightly shrink the detected box to avoid including mask edges
-    shrink_x = int(round(0.003 * w))
-    shrink_y = int(round(0.003 * h))
+    shrink_x = max(1, min(10, int(round(0.003 * w))))
+    shrink_y = max(1, min(10, int(round(0.003 * h))))
     x += shrink_x
     y += shrink_y
     bw = max(1, bw - 2 * shrink_x)

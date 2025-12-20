@@ -17,7 +17,8 @@ let previewState = {
     inverted: false,
     autoRefresh: false,
     refreshInterval: 1000,
-    refreshTimer: null
+    refreshTimer: null,
+    videoActive: false
 };
 
 let settingsState = {
@@ -59,6 +60,10 @@ function updateUI(status) {
     document.getElementById('frame-advance').textContent = 
         status.frame_advance ? `${status.frame_advance} steps` : 'Not set';
     document.getElementById('status-msg').textContent = status.status_msg;
+    const alignModeEl = document.getElementById('alignment-mode-display');
+    if (alignModeEl && status.alignment_mode) {
+        alignModeEl.textContent = `Mode: ${status.alignment_mode}`;
+    }
     
     // Auto-align status
     const alignText = document.getElementById('auto-align-status');
@@ -368,6 +373,23 @@ async function capturePreviewVideo() {
     }
 }
 
+function startVideoStream() {
+    const streamImg = document.getElementById('preview-video-stream');
+    const previewContainer = document.getElementById('preview-container');
+    const invertParam = previewState.inverted ? '1' : '0';
+    streamImg.src = `/api/preview_video_stream?invert=${invertParam}&t=${Date.now()}`;
+    streamImg.style.display = 'block';
+    previewContainer.style.display = 'block';
+    previewState.videoActive = true;
+}
+
+function stopVideoStream() {
+    const streamImg = document.getElementById('preview-video-stream');
+    streamImg.src = '';
+    streamImg.style.display = 'none';
+    previewState.videoActive = false;
+}
+
 async function autoAlign() {
     const btn = event.target;
     setButtonProcessing(btn, true);
@@ -427,6 +449,10 @@ async function loadAlignmentConfig() {
     const result = await apiCall('get_alignment_config');
     if (result.success) {
         syncAlignmentInputs(result.roi, result.min_confidence);
+        const alignModeEl = document.getElementById('alignment-mode-display');
+        if (alignModeEl && result.alignment_mode) {
+            alignModeEl.textContent = `Mode: ${result.alignment_mode}`;
+        }
     }
 }
 
@@ -491,6 +517,20 @@ function clearAlignmentConfig() {
     applyAlignmentConfig(true);
 }
 
+async function setAlignmentMode(mode) {
+    const result = await apiCall('set_alignment_mode', { mode });
+    if (!result.success) {
+        alert('Failed to set alignment mode: ' + (result.message || 'Unknown error'));
+    } else {
+        const alignModeEl = document.getElementById('alignment-mode-display');
+        if (alignModeEl) alignModeEl.textContent = `Mode: ${result.alignment_mode}`;
+        // If switching back to stream and video preview active, restart stream to ensure viewfinder is on
+        if (mode === 'stream' && previewState.videoActive) {
+            startVideoStream();
+        }
+    }
+}
+
 // Auto-refresh preview
 function toggleAutoRefresh() {
     const checkbox = document.getElementById('auto-refresh-toggle');
@@ -506,6 +546,10 @@ function toggleAutoRefresh() {
 function togglePreviewInvert() {
     const checkbox = document.getElementById('preview-invert-toggle');
     previewState.inverted = checkbox?.checked || false;
+    // Restart video stream with new invert state if active
+    if (previewState.videoActive) {
+        startVideoStream();
+    }
 }
 
 function startAutoRefresh() {
