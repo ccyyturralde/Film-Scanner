@@ -1920,32 +1920,9 @@ def get_preview():
     scanner.status_msg = "Getting live preview..."
     scanner.broadcast_status()
 
-    # Prefer live stream (no extra gphoto2 spawn)
-    stream_frame = None
+    # Single preview capture only (stream disabled to avoid camera spam)
     try:
-        if scanner.ensure_preview_stream():
-            stream_frame = scanner.preview_stream.get_frame(timeout=1.2)
-    except Exception as e:
-        scanner.log(f"⚠ Live stream preview failed, falling back: {e}")
-
-    if stream_frame:
-        try:
-            image_data = encode_preview_bytes(stream_frame, invert=invert)
-            scanner.status_msg = "✓ Live preview (stream)"
-            scanner.broadcast_status()
-            return jsonify({'success': True, 'image': image_data})
-        except Exception as e:
-            scanner.log(f"⚠ Failed to encode stream frame: {e}")
-
-    # Fallback: single preview capture
-    try:
-        paused_stream = scanner.preview_stream.pause_for_capture()
         preview_bytes = scanner.capture_preview_bytes()
-        if paused_stream:
-            try:
-                scanner.preview_stream.start()
-            except Exception as e:
-                scanner.log(f"⚠ Preview stream restart failed: {e}")
         image_data = encode_preview_bytes(preview_bytes, invert=invert)
         scanner.status_msg = "✓ Live preview"
         scanner.broadcast_status()
@@ -1970,6 +1947,9 @@ def get_preview_video():
     """
     data = request.json or {}
     invert = bool(data.get('invert')) if isinstance(data, dict) else False
+
+    if not scanner.stream_enabled:
+        return jsonify({'success': False, 'message': 'Live stream disabled (use capture card)'})
 
     if not scanner.check_camera():
         return jsonify({
@@ -2010,6 +1990,8 @@ def preview_video_stream():
     MJPEG stream of live preview frames.
     Optional query param ?invert=1 for UI-only inversion.
     """
+    if not scanner.stream_enabled:
+        return jsonify({'success': False, 'message': 'Live stream disabled (use capture card)'})
     invert = request.args.get('invert', '0') in ('1', 'true', 'True', 'yes')
 
     def generate():
