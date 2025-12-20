@@ -2010,17 +2010,32 @@ def preview_video_stream():
     invert = request.args.get('invert', '0') in ('1', 'true', 'True', 'yes')
 
     def generate():
-        if not scanner.ensure_preview_stream():
-            yield b''
-            return
+        # Try to start the stream; if unavailable, we will fall back to capture_preview_bytes
+        scanner.ensure_preview_stream()
         while True:
-            frame = scanner.preview_stream.get_frame(timeout=1.0)
-            if not frame:
-                time.sleep(0.05)
-                continue
+            frame = None
+            try:
+                # Prefer stream frame
+                frame = scanner.preview_stream.get_frame(timeout=1.0)
+                # Fallback to a single preview capture if stream is not delivering frames
+                if frame is None:
+                    paused = scanner.preview_stream.pause_for_capture()
+                    try:
+                        frame = scanner.capture_preview_bytes()
+                    finally:
+                        if paused:
+                            try:
+                                scanner.preview_stream.start()
+                            except Exception:
+                                pass
+                if frame is None:
+                    time.sleep(0.1)
+                    continue
+
+                out = frame
             try:
                 if invert:
-                    arr = np.frombuffer(frame, dtype=np.uint8)
+                    arr = np.frombuffer(out, dtype=np.uint8)
                     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
                     if img is None:
                         continue
@@ -2030,8 +2045,6 @@ def preview_video_stream():
                     buf = io.BytesIO()
                     pil_img.save(buf, format='JPEG', quality=80)
                     out = buf.getvalue()
-                else:
-                    out = frame
                 yield (b'--frame\r\n'
                        b'Content-Type: image/jpeg\r\n\r\n' + out + b'\r\n')
             except GeneratorExit:
