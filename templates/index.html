@@ -59,11 +59,20 @@
         <!-- Camera Preview -->
         <section class="panel">
             <h2>Live Preview</h2>
-            <p class="help-text">Live preview from camera (viewfinder enabled automatically), converted to positive</p>
+            <p class="help-text">Test still preview or grab a frame from the live video stream. Invert toggle is for viewing only (not used for alignment).</p>
             <div class="preview-controls">
-                <button class="btn btn-primary btn-large" id="preview-btn" onclick="capturePreview()">
-                    📷 Get Live Preview
-                </button>
+                <label style="display:flex;align-items:center;gap:8px;">
+                    <input type="checkbox" id="preview-invert-toggle" onchange="togglePreviewInvert()">
+                    Invert (view only)
+                </label>
+                <div class="preview-buttons">
+                    <button class="btn btn-primary btn-large" id="preview-btn" onclick="capturePreview()">
+                        🖼️ Preview Image
+                    </button>
+                    <button class="btn btn-secondary btn-large" id="preview-video-btn" onclick="capturePreviewVideo()">
+                        🎥 Preview Video Frame
+                    </button>
+                </div>
             </div>
             <div id="preview-container" style="display: none;">
                 <img id="preview-image" src="" alt="Live Preview">

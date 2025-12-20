@@ -326,7 +326,7 @@ async function capturePreview() {
     const btn = document.getElementById('preview-btn');
     setButtonProcessing(btn, true);
     
-    const result = await apiCall('get_preview');
+    const result = await apiCall('get_preview', { invert: previewState.inverted });
     
     setButtonProcessing(btn, false);
     
@@ -342,6 +342,29 @@ async function capturePreview() {
         timestamp.textContent = 'Updated at ' + now.toLocaleTimeString();
     } else {
         alert('Failed to get preview: ' + (result.message || 'Unknown error'));
+    }
+}
+
+async function capturePreviewVideo() {
+    const btn = document.getElementById('preview-video-btn');
+    setButtonProcessing(btn, true);
+
+    const result = await apiCall('get_preview_video', { invert: previewState.inverted });
+
+    setButtonProcessing(btn, false);
+
+    if (result.success && result.image) {
+        const previewImg = document.getElementById('preview-image');
+        const previewContainer = document.getElementById('preview-container');
+        const timestamp = document.getElementById('preview-timestamp');
+
+        previewImg.src = 'data:image/jpeg;base64,' + result.image;
+        previewContainer.style.display = 'block';
+
+        const now = new Date();
+        timestamp.textContent = `Video frame at ${now.toLocaleTimeString()}`;
+    } else {
+        alert('Failed to get video frame: ' + (result.message || 'Unknown error'));
     }
 }
 
@@ -478,6 +501,11 @@ function toggleAutoRefresh() {
     } else {
         stopAutoRefresh();
     }
+}
+
+function togglePreviewInvert() {
+    const checkbox = document.getElementById('preview-invert-toggle');
+    previewState.inverted = checkbox?.checked || false;
 }
 
 function startAutoRefresh() {
