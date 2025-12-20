@@ -70,7 +70,8 @@ function updateUI(status) {
     if (alignText) {
         if (status.alignment_confidence > 0 && status.last_gap_px != null) {
             const conf = (status.alignment_confidence * 100).toFixed(0);
-            alignText.textContent = `Gap px: ${status.last_gap_px} | Confidence: ${conf}% | px/step: ${status.px_per_step?.toFixed(2) ?? 'n/a'}`;
+            const pxPerStep = (status.px_per_step && !isNaN(status.px_per_step)) ? status.px_per_step.toFixed(2) : 'n/a';
+            alignText.textContent = `Gap px: ${status.last_gap_px} | Confidence: ${conf}% | px/step: ${pxPerStep}`;
         } else {
             alignText.textContent = 'Auto-align not run yet.';
         }
@@ -312,7 +313,7 @@ async function capture() {
     setButtonProcessing(btn, true);
     
     const autoAlignCheckbox = document.getElementById('auto-align-before-capture');
-    const result = await apiCall('capture', { auto_align: autoAlignCheckbox?.checked });
+    const result = await apiCall('capture', { auto_align: autoAlignCheckbox ? autoAlignCheckbox.checked : false });
     
     setButtonProcessing(btn, false);
     
@@ -379,7 +380,8 @@ function startVideoStream() {
     const invertParam = previewState.inverted ? '1' : '0';
     // Stop auto-refresh of stills while streaming
     previewState.autoRefresh = false;
-    document.getElementById('auto-refresh-toggle')?.checked = false;
+    const autoRefreshToggle = document.getElementById('auto-refresh-toggle');
+    if (autoRefreshToggle) autoRefreshToggle.checked = false;
     stopAutoRefresh();
 
     // Show stream element, hide still image to avoid confusion
@@ -427,7 +429,7 @@ function syncAlignmentInputs(roi, minConfidence) {
     const y1Input = document.getElementById('align-y1');
     const minConfInput = document.getElementById('align-min-confidence');
 
-    const activeId = document.activeElement?.id;
+    const activeId = document.activeElement && document.activeElement.id;
     const editingIds = ['align-x0', 'align-x1', 'align-y0', 'align-y1', 'align-min-confidence'];
     const editing = editingIds.includes(activeId);
     const now = Date.now();
@@ -469,7 +471,7 @@ async function loadAlignmentConfig() {
 }
 
 async function applyAlignmentConfig(clear = false) {
-    const btn = event?.target;
+    const btn = event && event.target;
     if (btn) setButtonProcessing(btn, true);
 
     const payload = {};
@@ -481,10 +483,14 @@ async function applyAlignmentConfig(clear = false) {
     if (clear) {
         payload.clear = true;
     } else {
-        const x0 = parseFloat(document.getElementById('align-x0')?.value || '0');
-        const x1 = parseFloat(document.getElementById('align-x1')?.value || '100');
-        const y0 = parseFloat(document.getElementById('align-y0')?.value || '0');
-        const y1 = parseFloat(document.getElementById('align-y1')?.value || '100');
+        const x0El = document.getElementById('align-x0');
+        const x1El = document.getElementById('align-x1');
+        const y0El = document.getElementById('align-y0');
+        const y1El = document.getElementById('align-y1');
+        const x0 = parseFloat((x0El && x0El.value) || '0');
+        const x1 = parseFloat((x1El && x1El.value) || '100');
+        const y0 = parseFloat((y0El && y0El.value) || '0');
+        const y1 = parseFloat((y1El && y1El.value) || '100');
         payload.roi = { x0, x1, y0, y1 };
     }
 
@@ -500,7 +506,7 @@ async function applyAlignmentConfig(clear = false) {
 }
 
 async function detectAlignmentRoi() {
-    const btn = event?.target;
+    const btn = event && event.target;
     if (btn) setButtonProcessing(btn, true);
     const result = await apiCall('preview_roi', { apply: false });
     if (btn) setButtonProcessing(btn, false);
@@ -545,7 +551,7 @@ async function setAlignmentMode(mode) {
 
 function togglePreviewInvert() {
     const checkbox = document.getElementById('preview-invert-toggle');
-    previewState.inverted = checkbox?.checked || false;
+    previewState.inverted = (checkbox && checkbox.checked) || false;
     // Restart video stream with new invert state if active
     if (previewState.videoActive) {
         startVideoStream();
@@ -591,15 +597,19 @@ function stopAutoRefresh() {
 }
 
 // Update refresh interval display
-document.getElementById('refresh-interval')?.addEventListener('input', (e) => {
-    previewState.refreshInterval = parseInt(e.target.value);
-    document.getElementById('refresh-interval-display').textContent = previewState.refreshInterval + ' ms';
-    
-    // Restart auto-refresh if active
-    if (previewState.autoRefresh) {
-        startAutoRefresh();
-    }
-});
+const refreshIntervalEl = document.getElementById('refresh-interval');
+if (refreshIntervalEl) {
+    refreshIntervalEl.addEventListener('input', (e) => {
+        previewState.refreshInterval = parseInt(e.target.value);
+        const displayEl = document.getElementById('refresh-interval-display');
+        if (displayEl) displayEl.textContent = previewState.refreshInterval + ' ms';
+        
+        // Restart auto-refresh if active
+        if (previewState.autoRefresh) {
+            startAutoRefresh();
+        }
+    });
+}
 
 // Settings Functions
 async function updateStepSizes() {
