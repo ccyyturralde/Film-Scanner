@@ -108,6 +108,24 @@ function updateUI(status) {
     }
 }
 
+// Logs
+async function fetchLogs() {
+    try {
+        const result = await apiCall('logs', { limit: 200 });
+        if (result.success && Array.isArray(result.logs)) {
+            const el = document.getElementById('log-output');
+            if (el) {
+                el.textContent = result.logs.join('\n');
+                el.scrollTop = el.scrollHeight;
+            }
+        }
+    } catch (e) {
+        // Ignore fetch errors to avoid spamming UI
+    }
+}
+
+setInterval(fetchLogs, 1500);
+
 // API helper with better error handling
 async function apiCall(endpoint, data = {}) {
     try {

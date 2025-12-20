@@ -24,6 +24,7 @@ import subprocess
 import time
 import os
 from datetime import datetime
+from collections import deque
 import json
 import threading
 import base64
@@ -235,6 +236,7 @@ class FilmScanner:
         self.camera_error = None
         self.last_camera_check = 0
         self.viewfinder_enabled = False
+        self.log_buffer = deque(maxlen=400)
         
         # Motor configuration
         self.fine_step = 8
@@ -273,6 +275,26 @@ class FilmScanner:
             self._load_alignment_config()
         except Exception as e:
             print(f"⚠ Failed to load alignment config: {e}")
+
+    # Lightweight in-memory log for UI consumption
+    def log(self, msg: str):
+        try:
+            ts = datetime.now().strftime("%H:%M:%S")
+            line = f"{ts} | {msg}"
+        except Exception:
+            line = msg
+        print(line)
+        try:
+            self.log_buffer.append(line)
+        except Exception:
+            pass
+
+    def get_logs(self, limit: int = 200):
+        try:
+            limit = max(1, min(int(limit), 400))
+        except Exception:
+            limit = 200
+        return list(self.log_buffer)[-limit:]
     
     def identify_arduino_board(self, port_info):
         """Identify Arduino board type from USB port info"""
@@ -895,9 +917,9 @@ class FilmScanner:
                         "polarity": getattr(detection, "polarity", None),
                     }
 
-            print(f"[auto-align] iter {iteration} offset={offset:.1f}px "
-                  f"conf={detection.confidence:.3f} (min {min_conf:.3f}) "
-                  f"polarity={getattr(detection, 'polarity', '?')} gap={detection.gap_x}")
+            self.log(f"[auto-align] iter {iteration} offset={offset:.1f}px "
+                     f"conf={detection.confidence:.3f} (min {min_conf:.3f}) "
+                     f"polarity={getattr(detection, 'polarity', '?')} gap={detection.gap_x}")
 
             if abs(offset) <= stop_px and not exploratory:
                 with self.lock:
@@ -1503,6 +1525,12 @@ def preview_roi_route():
         'applied': apply_roi and bool(detected_roi),
         'image': image_data
     })
+@app.route('/api/logs', methods=['POST'])
+def logs_route():
+    """Return recent application log lines (lightweight in-memory buffer)."""
+    data = request.json or {}
+    limit = data.get('limit', 200)
+    return jsonify({'success': True, 'logs': scanner.get_logs(limit=limit)})
 @app.route('/api/detect_alignment_roi', methods=['POST'])
 def detect_alignment_roi_route():
     """
