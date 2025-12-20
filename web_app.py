@@ -2033,24 +2033,24 @@ def preview_video_stream():
                     continue
 
                 out = frame
-            try:
-                if invert:
-                    arr = np.frombuffer(out, dtype=np.uint8)
-                    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                    if img is None:
-                        continue
-                    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                    pil_img = Image.fromarray(img)
-                    pil_img = ImageOps.invert(pil_img)
-                    buf = io.BytesIO()
-                    pil_img.save(buf, format='JPEG', quality=80)
-                    out = buf.getvalue()
-                yield (b'--frame\r\n'
-                       b'Content-Type: image/jpeg\r\n\r\n' + out + b'\r\n')
-            except GeneratorExit:
-                break
-            except Exception:
-                continue
+                try:
+                    if invert:
+                        arr = np.frombuffer(out, dtype=np.uint8)
+                        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                        if img is None:
+                            continue
+                        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                        pil_img = Image.fromarray(img)
+                        pil_img = ImageOps.invert(pil_img)
+                        buf = io.BytesIO()
+                        pil_img.save(buf, format='JPEG', quality=80)
+                        out = buf.getvalue()
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + out + b'\r\n')
+                except GeneratorExit:
+                    break
+                except Exception:
+                    continue
 
     return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
 @app.route('/api/update_step_sizes', methods=['POST'])
