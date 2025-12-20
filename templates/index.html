@@ -78,7 +78,7 @@
                 </div>
             </div>
             <div id="preview-container" style="display: none;">
-                <img id="preview-image" src="" alt="Live Preview">
+                <img id="preview-image" src="" alt="Live Preview" style="max-width:100%; border:1px solid #444;">
                 <img id="preview-video-stream" src="" alt="Video Preview" style="display:none; margin-top:10px; max-width:100%; border:1px solid #444;">
                 <div class="preview-info">
                     <span id="preview-timestamp"></span>
@@ -257,6 +257,11 @@
                     <button class="btn btn-secondary" onclick="setAlignmentMode('calibration')">Calibration Only</button>
                 </div>
                 <div class="help-text" id="alignment-mode-display">Mode: stream</div>
+            </div>
+
+            <div class="settings-section">
+                <h3>Alignment ROI</h3>
+                <p class="help-text">ROI and Detect/Save are still used by stream auto-align to focus on the film window.</p>
             </div>
 
             <div class="settings-section">

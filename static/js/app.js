@@ -377,10 +377,20 @@ function startVideoStream() {
     const streamImg = document.getElementById('preview-video-stream');
     const previewContainer = document.getElementById('preview-container');
     const invertParam = previewState.inverted ? '1' : '0';
+    // Stop auto-refresh of stills while streaming
+    previewState.autoRefresh = false;
+    document.getElementById('auto-refresh-toggle')?.checked = false;
+    stopAutoRefresh();
+
+    // Show stream element, hide still image to avoid confusion
+    const stillImg = document.getElementById('preview-image');
+    if (stillImg) stillImg.style.display = 'none';
     streamImg.src = `/api/preview_video_stream?invert=${invertParam}&t=${Date.now()}`;
     streamImg.style.display = 'block';
     previewContainer.style.display = 'block';
     previewState.videoActive = true;
+    const timestamp = document.getElementById('preview-timestamp');
+    if (timestamp) timestamp.textContent = 'Video stream active...';
 }
 
 function stopVideoStream() {
@@ -388,6 +398,8 @@ function stopVideoStream() {
     streamImg.src = '';
     streamImg.style.display = 'none';
     previewState.videoActive = false;
+    const stillImg = document.getElementById('preview-image');
+    if (stillImg) stillImg.style.display = 'block';
 }
 
 async function autoAlign() {
@@ -549,6 +561,24 @@ function togglePreviewInvert() {
     // Restart video stream with new invert state if active
     if (previewState.videoActive) {
         startVideoStream();
+    }
+}
+
+function toggleAutoRefresh() {
+    const checkbox = document.getElementById('auto-refresh-toggle');
+    previewState.autoRefresh = checkbox.checked;
+
+    // If streaming, don't auto-refresh stills
+    if (previewState.videoActive && previewState.autoRefresh) {
+        previewState.autoRefresh = false;
+        checkbox.checked = false;
+        return;
+    }
+
+    if (previewState.autoRefresh) {
+        startAutoRefresh();
+    } else {
+        stopAutoRefresh();
     }
 }
 
