@@ -65,11 +65,13 @@ function updateUI(status) {
         alignModeEl.textContent = `Mode: ${status.alignment_mode}`;
     }
     const roiSection = document.getElementById('alignment-roi-section');
+    const roiRegionSection = document.getElementById('alignment-region-section');
     const autoAlignBtn = document.getElementById('auto-align-btn');
     const autoAlignCheckbox = document.getElementById('auto-align-before-capture');
     const autoAlignCheckboxWrap = document.getElementById('auto-align-checkbox-wrapper');
     const isStreamMode = status.alignment_mode === 'stream';
     if (roiSection) roiSection.style.display = isStreamMode ? 'block' : 'none';
+    if (roiRegionSection) roiRegionSection.style.display = isStreamMode ? 'block' : 'none';
     if (autoAlignBtn) autoAlignBtn.style.display = isStreamMode ? 'inline-block' : 'none';
     if (autoAlignCheckboxWrap) autoAlignCheckboxWrap.style.display = isStreamMode ? 'inline-block' : 'none';
     if (autoAlignCheckbox) autoAlignCheckbox.disabled = !isStreamMode;
