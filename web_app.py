@@ -296,8 +296,8 @@ class CaptureCardStream:
         if cap:
             try:
                 cap.release()
-            except Exception:
-                pass
+                except Exception:
+                    pass
         # Allow thread to exit
         if self.thread:
             self.thread.join(timeout=1.0)
@@ -356,7 +356,7 @@ class CaptureCardStream:
                         self.last_frame_ts = time.time()
 
                 # Small delay to avoid 100% CPU usage
-                time.sleep(0.01)
+                    time.sleep(0.01)
 
         except Exception as e:
             self.last_error = str(e)
@@ -371,8 +371,8 @@ class CaptureCardStream:
             if cap:
                 try:
                     cap.release()
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
 
 
 # Arduino USB Vendor/Product IDs for automatic detection
@@ -420,7 +420,8 @@ class FilmScanner:
         self.step_delay = 800
         
         # Calibration data
-        self.frame_advance = None
+        self.frame_advance = None  # Full frame advance (steps)
+        self.half_frame_advance = None  # Half frame advance (2 half-frames, similar to 1 full)
         self.default_advance = 1200
         self.px_per_step = 3.0  # adaptive estimate for auto-align
         self.alignment_confidence = 0.0
@@ -521,7 +522,7 @@ class FilmScanner:
         except Exception as e:
             self.log(f"✗ Fallback capture failed: {e}")
 
-        return None, False
+            return None, False
     
     def identify_arduino_board(self, port_info):
         """Identify Arduino board type from USB port info"""
@@ -965,25 +966,25 @@ class FilmScanner:
         gphoto2 viewfinder is not used (only autofocus and capture).
         """
         self.viewfinder_enabled = True  # Always enabled via capture card
-        return True
+                return True
     def enable_viewfinder(self):
         """
         Viewfinder disabled - using capture card instead.
         gphoto2 is only used for autofocus and capture.
         """
-        return False
+            return False
     
     def disable_viewfinder(self):
         """
         Viewfinder disabled - using capture card instead.
         gphoto2 is only used for autofocus and capture.
         """
-        return False
+            return False
     
     def capture_image(self, retry=True):
         """Capture image to camera SD card with exclusive access"""
         # No preview stream to pause - using capture card for preview
-        
+
         # Ensure exclusive access - RLock allows recursive acquisition by same thread
         with self.camera_op_lock:
             try:
@@ -1046,44 +1047,38 @@ class FilmScanner:
     def auto_align(self, max_iters=5, stop_px=6, max_step=600, min_step=8, prefer_forward=True):
         """
         Auto alignment using capture card for preview frames.
-        gphoto2 is only used for autofocus and capture (not preview).
+        Uses column-statistics approach to find gaps between film frames.
+        
+        Full frame mode: Move until no gap is visible (gap pushed to edge)
+        Half frame mode: Move until gap is centered (for capturing two half-frames)
         """
         # Get frame from capture card
         frame_bytes, used_stream = self.get_alignment_frame(timeout=2.0)
         if not frame_bytes:
+            self.log("✗ Auto-align: No frame from capture card")
             return False, "No frame from capture card", {
                 "mode": "error",
                 "reason": "Capture card not providing frames",
             }
 
-        # Detect bright window to avoid mask edges
-        roi = self.detect_alignment_roi(padding=0.01, min_area_ratio=0.05)
-
-        # Default ROI if none detected; tighten edges based on mode
-        if not roi:
-            if self.frame_mode == "half":
-                roi = {"x0": 0.1, "x1": 0.9, "y0": 0.0, "y1": 1.0}
-            else:
-                roi = {"x0": 0.03, "x1": 0.97, "y0": 0.0, "y1": 1.0}
-
-        # Gap hint per mode
-        if self.frame_mode == "half":
-            expected_gap_fraction = 0.5
-            gap_window_fraction = 0.20
-        else:
-            expected_gap_fraction = 0.9
-            gap_window_fraction = 0.14
+        # Log frame info for debugging
+        self.log(f"▶ Auto-align [{self.frame_mode}]: Got {len(frame_bytes)} bytes (stream={used_stream})")
 
         try:
             result = detect_frame_gap(
                 frame_bytes,
-                roi=roi,
-                expected_gap_fraction=expected_gap_fraction,
-                gap_window_fraction=0.25 if self.frame_mode == "half" else 0.20,
-                min_prominence_ratio=0.10 if self.frame_mode == "half" else 0.10,
-                min_distance_ratio=0.08,
+                roi=None,  # Use full frame
+                expected_gap_fraction=None,  # Search everywhere
+                gap_window_fraction=1.0,     # Wide search
+                brightness_threshold=0.3,
+                std_threshold=0.20,
+                diff_threshold=0.40,
+                min_gap_width=3,
             )
         except Exception as e:
+            self.log(f"✗ Auto-align detection error: {e}")
+            import traceback
+            traceback.print_exc()
             return False, f"Detection error: {e}", {
                 "mode": "error",
                 "reason": "gap detection failed",
@@ -1094,43 +1089,98 @@ class FilmScanner:
         self.alignment_confidence = result.confidence
         self.last_gap_px = result.gap_x
 
+        # Include debug info in response
+        debug = result.debug_info or {}
+        gap_count = debug.get("gap_count", 0)
+        
+        # Get image dimensions from debug or estimate
+        # The detector works on the cropped/processed image
+        # We need to know the full frame width for offset calculations
+        
         info = {
             "offset_px": result.offset_px,
             "confidence": result.confidence,
             "gap_x": result.gap_x,
             "polarity": result.polarity,
-            "roi": roi,
+            "frame_mode": self.frame_mode,
+            "gap_count": gap_count,
+            "debug": debug,
         }
 
-        # Use a slightly higher minimum for robustness, but allow low floor to avoid zero
-        min_conf_req = max(self.alignment_min_confidence, 0.08)
+        self.log(f"▶ Detection: {gap_count} gaps, gap_x={result.gap_x}, confidence={result.confidence:.3f}")
 
-        # If confidence too low, abort movement
-        if result.confidence < min_conf_req:
-            self.log(f"Auto-align low confidence: {result.confidence:.3f}, offset {result.offset_px}")
-            return False, "Low confidence", {**info, "mode": "low_confidence"}
+        # Handle different frame modes differently
+        if self.frame_mode == "full":
+            # FULL FRAME MODE: We want NO gap visible (or gap pushed to edge)
+            # If no gaps detected, we're aligned!
+            if gap_count == 0 or result.confidence == 0:
+                self.status_msg = "✓ Aligned (no gap)"
+                self.log("✓ Full frame aligned - no gap visible")
+                return True, "Aligned", {**info, "mode": "aligned"}
+            
+            # For full frame, only consider gaps in the middle 80% of the frame
+            # (gaps at edges <10% or >90% are nearly out and we can consider aligned)
+            # Estimate frame width from debug info or use default
+            frame_width = debug.get("lit_region", {}).get("x1", 1920) - debug.get("lit_region", {}).get("x0", 0)
+            if frame_width <= 0:
+                frame_width = 1920  # Default
+            
+            if result.gap_x:
+                gap_fraction = result.gap_x / frame_width
+                if gap_fraction < 0.10 or gap_fraction > 0.90:
+                    self.status_msg = "✓ Aligned (gap at edge)"
+                    self.log(f"✓ Full frame aligned - gap at edge ({gap_fraction:.1%})")
+                    return True, "Aligned", {**info, "mode": "aligned_edge"}
+                
+                # Gap detected in center area - need to move it out of frame
+                self.log(f"▶ Full frame: gap at {result.gap_x}px ({gap_fraction:.1%}), offset: {result.offset_px}px")
+            
+                else:
+            # HALF FRAME MODE: We want gap CENTERED at ~50%
+            # If no gaps detected, we need to find one
+            if gap_count == 0 or result.confidence == 0:
+                self.log("⚠ Half frame: No gap detected - moving forward to find gap")
+                # Move forward a bit to find a gap
+                cmd = "H50"  # Small forward movement
+                moved = self.send(cmd)
+                return False, "Searching for gap", {**info, "mode": "searching", "steps": 50}
+            
+            # Gap detected - calculate offset from center
+            offset_px = result.offset_px
+            self.log(f"▶ Half frame: gap at {result.gap_x}px, offset from center: {offset_px}px")
 
-        # If already centered enough, succeed without moving
+        # Check if already aligned (gap within tolerance of target position)
         if abs(result.offset_px) <= stop_px:
             self.status_msg = "✓ Aligned"
+            self.log(f"✓ Already aligned (offset {result.offset_px}px <= {stop_px}px)")
             return True, "Aligned", {**info, "mode": "aligned"}
 
         # Convert pixel offset to motor steps
-        px_per_step = max(0.5, float(self.px_per_step))
+                px_per_step = max(0.5, float(self.px_per_step))
         raw_steps = result.offset_px / px_per_step
         steps = int(round(raw_steps))
+
+        # For full frame, we want to push gap OUT, so we may need larger moves
+        if self.frame_mode == "full":
+            # Add extra steps to push gap completely out of frame
+            extra = int(abs(steps) * 0.2) + 20  # 20% extra + 20 steps
+            if steps > 0:
+                steps += extra
+            else:
+                steps -= extra
 
         # Enforce minimum/maximum movement
         if abs(steps) < min_step:
             steps = min_step if steps >= 0 else -min_step
         steps = max(-max_step, min(max_step, steps))
 
-        # Choose direction (positive = forward)
+        # Choose direction (positive = forward = H command)
         if steps > 0:
             cmd = f"H{abs(steps)}"
         else:
             cmd = f"h{abs(steps)}"
 
+        self.log(f"▶ Moving motor: {cmd} ({steps} steps)")
         moved = self.send(cmd)
         if not moved:
             return False, "Motor move failed", {**info, "mode": "move_failed", "steps": steps}
@@ -1149,7 +1199,7 @@ class FilmScanner:
         
         try:
             roi = detect_bright_region_roi(frame_bytes, padding=padding, min_area_ratio=min_area_ratio)
-            if roi:
+        if roi:
                 self.alignment_roi = self._normalize_alignment_roi(roi)
             return self.alignment_roi
         except Exception as e:
@@ -1277,6 +1327,7 @@ class FilmScanner:
             'frames_in_strip': self.frames_in_strip,
             'position': self.position,
             'frame_advance': self.frame_advance,
+            'half_frame_advance': self.half_frame_advance,
             'frame_positions': self.frame_positions,
             'mode': self.mode,
             'auto_advance': self.auto_advance,
@@ -1299,6 +1350,7 @@ class FilmScanner:
                 self.frames_in_strip = state.get('frames_in_strip', 0)
                 self.position = state.get('position', 0)
                 self.frame_advance = state.get('frame_advance')
+                self.half_frame_advance = state.get('half_frame_advance')
                 self.frame_positions = state.get('frame_positions', [])
                 self.mode = state.get('mode', 'manual')
                 self.auto_advance = state.get('auto_advance', True)
@@ -1307,11 +1359,29 @@ class FilmScanner:
         return False
     
     def advance_frame(self):
-        """Advance one full frame forward using calibrated distance"""
-        if self.frame_advance:
-            success = self.send(f'H{self.frame_advance}')
+        """
+        Advance film forward using calibrated distance.
+        
+        Full frame mode: Advances by frame_advance (1 full 35mm frame)
+        Half frame mode: Advances by half_frame_advance (2 half-frames ≈ 1 full frame)
+        
+        Half frame cameras expose 2 smaller frames per standard 35mm frame area.
+        Each capture gets both half-frames (with gap centered), then we advance
+        by 2 half-frames to the next pair.
+        """
+        # Determine advance distance based on frame mode
+        if self.frame_mode == "half":
+            # Use half_frame_advance if calibrated, else fallback to frame_advance
+            advance = self.half_frame_advance or self.frame_advance
+            mode_label = "half-frame"
+        else:
+            advance = self.frame_advance
+            mode_label = "full-frame"
+        
+        if advance:
+            success = self.send(f'H{advance}')
             if success:
-                self.status_msg = f"Advanced {self.frame_advance} steps"
+                self.status_msg = f"Advanced {advance} steps ({mode_label})"
                 return True
             else:
                 self.status_msg = "❌ Advance failed - Check Arduino"
@@ -1319,13 +1389,23 @@ class FilmScanner:
         return False
     
     def backup_frame(self):
-        """Backup one full frame using calibrated distance"""
-        if self.frame_advance:
+        """
+        Backup film using calibrated distance.
+        Uses appropriate advance value based on frame mode (full or half).
+        """
+        # Determine advance distance based on frame mode
+        if self.frame_mode == "half":
+            advance = self.half_frame_advance or self.frame_advance
+            mode_label = "half-frame"
+        else:
+            advance = self.frame_advance
+            mode_label = "full-frame"
+        
+        if advance:
             # Use 'h' command for backward movement (lowercase = reverse direction)
-            # Note: 'H' only accepts positive values; 'h' moves backward with positive value
-            success = self.send(f'h{self.frame_advance}')
+            success = self.send(f'h{advance}')
             if success:
-                self.status_msg = f"Backed up {self.frame_advance} steps"
+                self.status_msg = f"Backed up {advance} steps ({mode_label})"
                 return True
             else:
                 self.status_msg = "❌ Backup failed - Check Arduino"
@@ -1344,6 +1424,7 @@ class FilmScanner:
                 'position': self.position,
                 'mode': self.mode,
                 'frame_advance': self.frame_advance,
+                'half_frame_advance': self.half_frame_advance,
                 'auto_advance': self.auto_advance,
                 'alignment_mode': self.alignment_mode,
                 'frame_mode': self.frame_mode,
@@ -1582,9 +1663,17 @@ def capture():
         
         # Auto-advance AFTER capture (for calibrated mode)
         # Advances to next frame position so user is ready for next capture
-        if scanner.mode == 'calibrated' and scanner.auto_advance and scanner.frame_advance:
+        # Uses appropriate advance based on frame_mode (full or half)
+        advance = None
+        if scanner.mode == 'calibrated' and scanner.auto_advance:
+            if scanner.frame_mode == "half":
+                advance = scanner.half_frame_advance or scanner.frame_advance
+            else:
+                advance = scanner.frame_advance
+        
+        if advance:
             time.sleep(0.3)  # Brief pause before advancing
-            if scanner.send(f'H{scanner.frame_advance}'):
+            if scanner.send(f'H{advance}'):
                 scanner.status_msg = f"✓ Frame {scanner.frame_count} → Ready for next"
             else:
                 scanner.status_msg = f"✓ Frame {scanner.frame_count} (advance failed)"
@@ -1694,6 +1783,57 @@ def set_frame_mode_route():
         return jsonify({'success': True, 'frame_mode': scanner.frame_mode})
 
 
+@app.route('/api/set_half_frame_advance', methods=['POST'])
+def set_half_frame_advance_route():
+    """
+    Set the half-frame advance distance (steps to move 2 half-frames).
+    
+    Half-frame cameras expose 2 smaller frames per standard 35mm frame area.
+    When scanning half-frame film:
+    - Each capture gets both half-frames (with gap centered)
+    - Advance moves 2 half-frames to the next pair
+    
+    If not set, defaults to frame_advance (full frame distance).
+    Can be set to a percentage of frame_advance (e.g., 95% if half-frames
+    are slightly smaller than full frames).
+    """
+    data = request.json or {}
+    
+    # Accept either absolute steps or percentage of frame_advance
+    steps = data.get('steps')
+    percentage = data.get('percentage')
+    
+    if steps is not None:
+        try:
+            steps = int(steps)
+            if steps <= 0:
+                return jsonify({'success': False, 'message': 'steps must be positive'})
+            scanner.half_frame_advance = steps
+        except (ValueError, TypeError):
+            return jsonify({'success': False, 'message': 'Invalid steps value'})
+    elif percentage is not None:
+        try:
+            percentage = float(percentage)
+            if not scanner.frame_advance:
+                return jsonify({'success': False, 'message': 'Calibrate full frame first'})
+            scanner.half_frame_advance = int(scanner.frame_advance * percentage / 100)
+        except (ValueError, TypeError):
+            return jsonify({'success': False, 'message': 'Invalid percentage value'})
+    else:
+        # Clear half_frame_advance (will fallback to frame_advance)
+        scanner.half_frame_advance = None
+    
+    scanner.save_state()
+    scanner.status_msg = f"Half-frame advance: {scanner.half_frame_advance or 'using full frame'}"
+    scanner.broadcast_status()
+    
+    return jsonify({
+        'success': True,
+        'half_frame_advance': scanner.half_frame_advance,
+        'frame_advance': scanner.frame_advance,
+    })
+
+
 @app.route('/api/preview_roi', methods=['POST'])
 def preview_roi_route():
     """
@@ -1714,31 +1854,31 @@ def preview_roi_route():
     # Optionally persist detected ROI
     if apply_roi and detected_roi:
         try:
-            with scanner.lock:
-                scanner.alignment_roi = detected_roi
-            scanner._save_alignment_config()
+        with scanner.lock:
+            scanner.alignment_roi = detected_roi
+        scanner._save_alignment_config()
         except Exception:
             pass  # best-effort
 
     image_data = None
     if overlay:
-        try:
+    try:
             arr = np.frombuffer(frame_bytes, dtype=np.uint8)
-            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-            if img is None:
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img is None:
                 raise ValueError("Failed to decode preview for ROI overlay")
 
-            if detected_roi:
-                h, w = img.shape[:2]
-                x0 = int(detected_roi['x0'] * w)
-                x1 = int(detected_roi['x1'] * w)
-                y0 = int(detected_roi['y0'] * h)
-                y1 = int(detected_roi['y1'] * h)
-                cv2.rectangle(img, (x0, y0), (x1, y1), (0, 0, 255), thickness=3)
+        if detected_roi:
+            h, w = img.shape[:2]
+            x0 = int(detected_roi['x0'] * w)
+            x1 = int(detected_roi['x1'] * w)
+            y0 = int(detected_roi['y0'] * h)
+            y1 = int(detected_roi['y1'] * h)
+            cv2.rectangle(img, (x0, y0), (x1, y1), (0, 0, 255), thickness=3)
 
-            success, buf = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+        success, buf = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
             if success:
-                image_data = base64.b64encode(buf.tobytes()).decode('utf-8')
+        image_data = base64.b64encode(buf.tobytes()).decode('utf-8')
         except Exception:
             image_data = None
 
@@ -1748,6 +1888,93 @@ def preview_roi_route():
         'applied': apply_roi and bool(detected_roi),
         'image': image_data
     })
+
+
+@app.route('/api/capture_card_diagnostic', methods=['POST'])
+def capture_card_diagnostic_route():
+    """
+    Diagnostic endpoint to test capture card and gap detection.
+    Returns detailed info about what the detector sees.
+    """
+    from frame_detector import compute_column_stats, find_gap_mask, find_gap_regions
+    
+    result = {
+        'success': False,
+        'capture_card': {
+            'device': scanner.preview_stream.device,
+            'is_running': scanner.preview_stream.is_running(),
+            'last_error': scanner.preview_stream.last_error,
+        },
+        'frame': None,
+        'detection': None,
+    }
+    
+    # Try to get a frame
+    try:
+        frame_bytes, used_stream = scanner.get_alignment_frame(timeout=2.0)
+        if frame_bytes:
+            result['frame'] = {
+                'size_bytes': len(frame_bytes),
+                'used_stream': used_stream,
+            }
+            
+            # Decode and analyze
+            arr = np.frombuffer(frame_bytes, dtype=np.uint8)
+            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if img is not None:
+                result['frame']['width'] = img.shape[1]
+                result['frame']['height'] = img.shape[0]
+                
+                # Convert to grayscale and compute stats
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                gray = cv2.medianBlur(gray, 5)
+                stats = compute_column_stats(gray)
+                
+                result['detection'] = {
+                    'brightness_min': float(stats['col_min'].min()),
+                    'brightness_max': float(stats['col_min'].max()),
+                    'brightness_mean': float(stats['col_mean'].mean()),
+                    'std_min': float(stats['col_std'].min()),
+                    'std_max': float(stats['col_std'].max()),
+                    'diff_min': float(stats['col_diff'].min()),
+                    'diff_max': float(stats['col_diff'].max()),
+                }
+                
+                # Test gap detection with various thresholds
+                for thresh in [0.3, 0.4, 0.5]:
+                    gap_mask = find_gap_mask(stats, brightness_threshold=thresh)
+                    regions = find_gap_regions(gap_mask, min_width=3)
+                    result['detection'][f'gaps_at_{thresh}'] = len(regions)
+                    if regions:
+                        result['detection'][f'gap_widths_at_{thresh}'] = [r.width for r in regions[:5]]
+                
+                # Include preview image with detected gaps overlaid
+                gap_mask = find_gap_mask(stats, brightness_threshold=0.3, std_threshold=0.20, diff_threshold=0.40)
+                regions = find_gap_regions(gap_mask, min_width=3)
+                
+                # Draw gap regions on image
+                for region in regions:
+                    cv2.rectangle(img, (region.start_x, 0), (region.end_x, img.shape[0]), (0, 255, 0), 2)
+                
+                # Draw center line
+                center = img.shape[1] // 2
+                cv2.line(img, (center, 0), (center, img.shape[0]), (255, 0, 0), 2)
+                
+                success, buf = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+                if success:
+                    result['image'] = base64.b64encode(buf.tobytes()).decode('utf-8')
+                
+                result['success'] = True
+        else:
+            result['frame'] = {'error': 'No frame received'}
+    except Exception as e:
+        result['frame'] = {'error': str(e)}
+        import traceback
+        result['traceback'] = traceback.format_exc()
+    
+    return jsonify(result)
+
+
 @app.route('/api/logs', methods=['POST'])
 def logs_route():
     """Return recent application log lines (lightweight in-memory buffer)."""
@@ -1760,11 +1987,11 @@ def detect_alignment_roi_route():
     if not scanner.stream_enabled:
         return jsonify({'success': False, 'message': 'Preview stream disabled'})
     
-    roi = scanner.detect_alignment_roi()
-    if roi:
+        roi = scanner.detect_alignment_roi()
+        if roi:
         scanner.status_msg = "✓ ROI detected from capture card"
         scanner.broadcast_status()
-        return jsonify({'success': True, 'roi': roi})
+            return jsonify({'success': True, 'roi': roi})
     else:
         scanner.status_msg = "✗ ROI detection failed"
         scanner.broadcast_status()
@@ -1906,7 +2133,7 @@ def preview_video_stream():
                 frame = scanner.preview_stream.get_frame(timeout=0.5)
                 if frame is None:
                     time.sleep(0.05)
-                    continue
+                        continue
 
                 out = frame
                 if invert:

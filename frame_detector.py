@@ -1,10 +1,13 @@
 """
 Frame edge / gap detector for film scanning previews.
 
-Key idea: compute a vertical intensity profile across the preview (mean over
-rows), smooth it, then find bright gap peaks between frames. Returns the
-offset in pixels from the image center to the strongest gap plus a confidence
-score. Inspired by the negative_scanner project.
+Uses column-statistics approach inspired by negative_scanner project:
+- First crops to the bright lit region (excluding black mask borders)
+- Computes per-column mean and standard deviation
+- Gaps between frames are columns that are BRIGHT (high mean) AND UNIFORM (low std)
+- Finds contiguous gap regions for alignment
+
+This is much simpler and more robust than peak-finding approaches.
 """
 
 from dataclasses import dataclass
@@ -15,30 +18,38 @@ import numpy as np
 
 
 @dataclass
-class GapDetection:
-    """Single detected gap/edge candidate."""
-
-    x: int
-    prominence: float
+class GapRegion:
+    """A detected gap region (uniform bright columns)."""
+    start_x: int  # Left edge of gap (in cropped coordinates)
+    end_x: int    # Right edge of gap
     width: int
+    mean_brightness: float
+    global_start_x: int = 0  # In full image coordinates
+    global_end_x: int = 0
 
 
 @dataclass
 class DetectionResult:
     """Summary of detection suitable for motor alignment."""
-
     offset_px: int  # positive means gap is to the right of center
     confidence: float
-    gap_x: Optional[int]
-    profile: Optional[np.ndarray] = None
-    smoothed: Optional[np.ndarray] = None
-    gaps: Optional[List[GapDetection]] = None
-    polarity: str = "bright"  # whether we locked onto a bright or dark gap
+    gap_x: Optional[int]  # X position of the gap center in full image coordinates
+    gaps: Optional[List[GapRegion]] = None
+    polarity: str = "bright"
+    debug_info: Optional[dict] = None
+
+
+def jpeg_bytes_to_color(jpeg_bytes: bytes) -> np.ndarray:
+    """Decode JPEG bytes to a BGR color image."""
+    arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise ValueError("Failed to decode preview image")
+    return img
 
 
 def jpeg_bytes_to_gray(jpeg_bytes: bytes) -> np.ndarray:
     """Decode JPEG bytes to a uint8 grayscale image."""
-
     arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
     if img is None:
@@ -46,72 +57,146 @@ def jpeg_bytes_to_gray(jpeg_bytes: bytes) -> np.ndarray:
     return img
 
 
-def vertical_profile(gray: np.ndarray) -> np.ndarray:
-    """Compute average intensity per column (float32)."""
-
-    if gray.ndim != 2:
-        raise ValueError("Expected grayscale image")
-    return gray.mean(axis=0).astype(np.float32)
-
-
-def _smooth_profile(profile: np.ndarray, ksize: int = 11) -> np.ndarray:
-    """Gaussian smooth; ksize must be odd."""
-
-    ksize = max(3, ksize | 1)  # force odd and >=3
-    # cv2.GaussianBlur requires 2D input; reshape 1D profile to single-row 2D array
-    profile_2d = profile.reshape(1, -1)
-    smoothed_2d = cv2.GaussianBlur(profile_2d, (ksize, 1), 0, borderType=cv2.BORDER_REPLICATE)
-    return smoothed_2d.flatten()
-
-
-def _find_gaps(smoothed: np.ndarray, min_prominence: float, min_distance: int) -> List[GapDetection]:
+def find_lit_region(gray: np.ndarray, threshold_ratio: float = 0.3) -> Tuple[int, int, int, int]:
     """
-    Find bright peaks (gaps) in the smoothed profile using a simple derivative
-    and prominence heuristic (no scipy dependency).
+    Find the lit (bright) region of the image, excluding dark mask borders.
+    
+    Returns (x0, y0, x1, y1) of the bounding box of the bright region.
     """
+    h, w = gray.shape[:2]
+    
+    # Use Otsu's method to find threshold between dark mask and lit region
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # Find rows and columns that have significant bright content
+    row_sums = binary.mean(axis=1)
+    col_sums = binary.mean(axis=0)
+    
+    threshold = binary.max() * threshold_ratio
+    
+    # Find first/last rows with bright content
+    bright_rows = np.where(row_sums > threshold)[0]
+    if len(bright_rows) == 0:
+        return (0, 0, w, h)
+    y0, y1 = bright_rows[0], bright_rows[-1] + 1
+    
+    # Find first/last columns with bright content
+    bright_cols = np.where(col_sums > threshold)[0]
+    if len(bright_cols) == 0:
+        return (0, 0, w, h)
+    x0, x1 = bright_cols[0], bright_cols[-1] + 1
+    
+    # Add small margin and clamp
+    margin_x = int(0.01 * (x1 - x0))
+    margin_y = int(0.01 * (y1 - y0))
+    x0 = max(0, x0 + margin_x)
+    x1 = min(w, x1 - margin_x)
+    y0 = max(0, y0 + margin_y)
+    y1 = min(h, y1 - margin_y)
+    
+    return (x0, y0, x1, y1)
 
-    # First derivative to locate rising/falling edges
-    deriv = np.diff(smoothed)
-    # Simple zero-crossing at local maxima
-    maxima = []
-    for i in range(1, len(smoothed) - 1):
-        if smoothed[i] > smoothed[i - 1] and smoothed[i] >= smoothed[i + 1]:
-            maxima.append(i)
 
-    gaps: List[GapDetection] = []
-    for idx in maxima:
-        left = idx - 1
-        while left > 0 and smoothed[left] < smoothed[left - 1]:
-            left -= 1
-        right = idx + 1
-        while right < len(smoothed) - 1 and smoothed[right] < smoothed[right + 1]:
-            right += 1
+def compute_column_stats(gray: np.ndarray) -> dict:
+    """
+    Compute per-column statistics.
+    
+    Returns dict with:
+        col_mean: mean brightness per column (0-1)
+        col_std: std dev per column (0-1)
+    """
+    # Convert to float for calculations
+    img = gray.astype(np.float32) / 255.0
+    
+    col_mean = img.mean(axis=0)
+    col_std = img.std(axis=0)
+    
+    return {
+        "col_mean": col_mean,
+        "col_std": col_std,
+    }
 
-        prominence = smoothed[idx] - 0.5 * (smoothed[left] + smoothed[right])
-        width = right - left + 1
 
-        if prominence >= min_prominence:
-            gaps.append(GapDetection(x=idx, prominence=float(prominence), width=width))
+def find_gap_mask(
+    stats: dict,
+    mean_threshold: float = 0.7,
+    std_threshold: float = 0.12,
+) -> np.ndarray:
+    """
+    Create a 1D mask where gaps (uniform bright columns) are True.
+    
+    A column is considered a gap if:
+    - Mean brightness is above mean_threshold (bright column)
+    - Standard deviation is below std_threshold (uniform - no texture)
+    """
+    col_mean = stats["col_mean"]
+    col_std = stats["col_std"]
+    
+    # Get the maximum mean brightness as reference
+    max_mean = col_mean.max() if col_mean.max() > 0 else 1.0
+    
+    # Gap columns are bright (high mean) AND uniform (low std)
+    bright_mask = col_mean > (mean_threshold * max_mean)
+    uniform_mask = col_std < std_threshold
+    
+    gap_mask = bright_mask & uniform_mask
+    
+    return gap_mask
 
-    # Enforce minimum distance between peaks by keeping stronger ones
-    if not gaps:
-        return []
 
-    gaps = sorted(gaps, key=lambda g: g.prominence, reverse=True)
-    kept: List[GapDetection] = []
-    for g in gaps:
-        if all(abs(g.x - k.x) >= min_distance for k in kept):
-            kept.append(g)
-    return kept
+def find_gap_regions(
+    gap_mask: np.ndarray, 
+    min_width: int = 5, 
+    max_width: int = 500,  # Real gaps are narrow
+    x_offset: int = 0
+) -> List[GapRegion]:
+    """
+    Find contiguous gap regions from the mask.
+    Filters by both min and max width (real gaps are narrow).
+    Returns list of GapRegion sorted by width (largest valid gap first).
+    """
+    regions = []
+    in_gap = False
+    start = 0
+    
+    for i, is_gap in enumerate(gap_mask):
+        if is_gap and not in_gap:
+            in_gap = True
+            start = i
+        elif not is_gap and in_gap:
+            width = i - start
+            if min_width <= width <= max_width:
+                regions.append(GapRegion(
+                    start_x=start,
+                    end_x=i - 1,
+                    width=width,
+                    mean_brightness=0.0,
+                    global_start_x=start + x_offset,
+                    global_end_x=i - 1 + x_offset,
+                ))
+            in_gap = False
+    
+    # Handle gap at end
+    if in_gap:
+        width = len(gap_mask) - start
+        if min_width <= width <= max_width:
+            regions.append(GapRegion(
+                start_x=start,
+                end_x=len(gap_mask) - 1,
+                width=width,
+                mean_brightness=0.0,
+                global_start_x=start + x_offset,
+                global_end_x=len(gap_mask) - 1 + x_offset,
+            ))
+    
+    # Sort by width (largest first, but all are within valid range)
+    regions.sort(key=lambda r: r.width, reverse=True)
+    
+    return regions
 
 
 def _normalize_roi(roi, width: int, height: int):
-    """
-    Normalize ROI dictionary into pixel coordinates.
-
-    ROI may be provided as 0-1 floats or 0-100 percentages. Values are clamped
-    to [0, 1]. Returns (x0, x1, y0, y1) ints or None if invalid.
-    """
+    """Normalize ROI dictionary into pixel coordinates."""
     try:
         if not isinstance(roi, dict):
             return None
@@ -121,17 +206,14 @@ def _normalize_roi(roi, width: int, height: int):
         y0 = float(roi.get("y0", 0.0))
         y1 = float(roi.get("y1", 1.0))
 
-        # Allow percentage input
         if max(x0, x1, y0, y1) > 1.5:
             x0, x1, y0, y1 = x0 / 100.0, x1 / 100.0, y0 / 100.0, y1 / 100.0
 
-        # Clamp to [0, 1]
         x0 = max(0.0, min(1.0, x0))
         x1 = max(0.0, min(1.0, x1))
         y0 = max(0.0, min(1.0, y0))
         y1 = max(0.0, min(1.0, y1))
 
-        # Ensure valid ordering and minimum width/height
         if x1 <= x0 or y1 <= y0:
             return None
 
@@ -150,150 +232,179 @@ def _normalize_roi(roi, width: int, height: int):
 
 def detect_frame_gap(
     jpeg_bytes: bytes,
+    roi: Optional[dict] = None,
+    mean_threshold: float = 0.75,
+    std_threshold: float = 0.10,
+    min_gap_width: int = 8,
+    expected_gap_fraction: Optional[float] = None,
+    gap_window_fraction: float = 0.3,
+    # Legacy parameters (ignored but kept for API compatibility)
+    brightness_threshold: float = 0.4,
+    diff_threshold: float = 0.35,
+    vertical_crop: float = 0.85,
     smooth_ksize: int = 11,
     min_prominence_ratio: float = 0.10,
     min_distance_ratio: float = 0.05,
-    roi: Optional[dict] = None,
-    expected_gap_fraction: Optional[float] = None,
-    gap_window_fraction: float = 0.15,
 ) -> DetectionResult:
     """
-    Detect brightest gap and return offset from image center.
-
+    Detect frame gaps using column statistics approach.
+    
+    This first crops to the lit region (excluding black mask borders),
+    then looks for columns that are bright AND uniform - indicating the
+    backlight shining through gaps between frames.
+    
     Args:
-        jpeg_bytes: preview image bytes (JPEG).
-        smooth_ksize: gaussian kernel width for smoothing (pixels).
-        min_prominence_ratio: fraction of (max - min) used as minimum peak prominence.
-        min_distance_ratio: fraction of image width for minimum gap separation.
-        roi: Optional dict specifying region of interest:
-             {"x0": start, "x1": end, "y0": start, "y1": end}
-             Values may be 0-1 fractions or 0-100 percentages.
+        jpeg_bytes: Preview image bytes (JPEG).
+        roi: Optional ROI to crop before analysis.
+        mean_threshold: Column mean must be > this * max_mean (0-1).
+        std_threshold: Column std dev must be < this (0-1).
+        min_gap_width: Minimum gap width in pixels.
+        expected_gap_fraction: Expected X position of gap (0-1), for filtering.
+        gap_window_fraction: Window around expected_gap_fraction to search.
+    
+    Returns:
+        DetectionResult with offset from center and confidence.
     """
-
-    # Decode color to allow channel selection; fall back to gray if needed
-    arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
-    color = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    if color is None:
-        raise ValueError("Failed to decode preview image")
-
-    base_gray = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY)
-    full_height, full_width = base_gray.shape[:2]
-
-    # Apply ROI crop in both color and gray space
-    roi_bounds = _normalize_roi(roi, width=full_width, height=full_height) if roi else None
-    roi_x_offset = 0
-    if roi_bounds:
-        x0, x1, y0, y1 = roi_bounds
-        color = color[y0:y1, x0:x1]
-        base_gray = base_gray[y0:y1, x0:x1]
-        roi_x_offset = x0
-
-    if color.size == 0 or base_gray.size == 0:
-        return DetectionResult(offset_px=0, confidence=0.0, gap_x=None, profile=None, smoothed=None, gaps=[])
-
-    # Pick the strongest color channel (highest variance) to maximize contrast
-    channel_stds = [color[..., i].std() for i in range(3)]
-    best_ch = int(np.argmax(channel_stds))
-    working = color[..., best_ch]
-
-    # Contrast enhancement (CLAHE) to make gaps stand out on flat scans
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    working = clahe.apply(working)
-
-    # Downsample horizontally for stability and speed
-    target_width = 512
-    h, w = working.shape[:2]
-    if w > target_width:
-        scale = target_width / float(w)
-        new_h = max(1, int(round(h * scale)))
-        working = cv2.resize(working, (target_width, new_h), interpolation=cv2.INTER_AREA)
-        width_scale = w / float(target_width)
-    else:
-        width_scale = 1.0
-
-    # Intensity profile
-    profile = vertical_profile(working)
-    smoothed_intensity = _smooth_profile(profile, smooth_ksize)
-
-    # Gradient-based profile (strong for sharp vertical bars)
-    blurred = cv2.GaussianBlur(working, (5, 5), 0)
-    sobel = cv2.Sobel(blurred, cv2.CV_32F, 1, 0, ksize=3)
-    grad = np.abs(sobel)
-    grad_profile = grad.mean(axis=0).astype(np.float32)
-    smoothed_grad = _smooth_profile(grad_profile, smooth_ksize)
-
-    def _confidence_from_gap(gap: GapDetection, span: float, signal_len: int) -> float:
-        prominence_norm = gap.prominence / max(span, 1e-6)
-        width_norm = max(0.35, min(1.0, gap.width / max(1.0, 0.1 * signal_len)))
-        return float(np.clip(prominence_norm * (0.5 + 0.5 * width_norm), 0.0, 1.0))
-
-    def _best_gap_for_signal(signal: np.ndarray, polarity: str):
-        span = float(signal.max() - signal.min() + 1e-6)
-        min_prominence = min_prominence_ratio * span
-        min_distance = max(8, int(len(signal) * min_distance_ratio))
-        found = _find_gaps(signal, min_prominence=min_prominence, min_distance=min_distance)
-        if not found:
-            return None
-
-        # If we have an expected gap position, restrict candidates to a window around it
-        if expected_gap_fraction is not None:
-            hint_x = expected_gap_fraction * full_width
-            half_window = max(4.0, gap_window_fraction * full_width * 0.5)
-            filtered = [
-                g for g in found
-                if abs((roi_x_offset + g.x * width_scale) - hint_x) <= half_window
-            ]
-            if filtered:
-                found = filtered
-
-        best_gap = max(found, key=lambda g: g.prominence)
-        confidence = _confidence_from_gap(best_gap, span, len(signal))
-        gap_global_x = roi_x_offset + int(round(best_gap.x * width_scale))
-        return {
-            "gap": best_gap,
-            "confidence": confidence,
-            "gap_x": gap_global_x,
-            "polarity": polarity,
-            "gaps": found,
-        }
-
-    candidates = []
-    candidates.append(_best_gap_for_signal(smoothed_intensity, "intensity-bright"))
-    candidates.append(_best_gap_for_signal(-smoothed_intensity, "intensity-dark"))
-    candidates.append(_best_gap_for_signal(smoothed_grad, "gradient-bright"))
-    candidates.append(_best_gap_for_signal(-smoothed_grad, "gradient-dark"))
-    candidates = [c for c in candidates if c]
-
-    if not candidates:
-        return DetectionResult(offset_px=0, confidence=0.0, gap_x=None, profile=profile, smoothed=smoothed_intensity, gaps=[])
-
-    best = max(candidates, key=lambda c: c["confidence"])
+    # Decode image
+    try:
+        color = jpeg_bytes_to_color(jpeg_bytes)
+    except Exception as e:
+        return DetectionResult(
+            offset_px=0,
+            confidence=0.0,
+            gap_x=None,
+            debug_info={"error": str(e)},
+        )
+    
+    gray = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY)
+    full_height, full_width = gray.shape[:2]
+    
+    # First, find the lit region to exclude black mask borders
+    lit_x0, lit_y0, lit_x1, lit_y1 = find_lit_region(gray)
+    
+    # Crop to lit region
+    gray_cropped = gray[lit_y0:lit_y1, lit_x0:lit_x1]
+    
+    if gray_cropped.size == 0:
+        return DetectionResult(
+            offset_px=0,
+            confidence=0.0,
+            gap_x=None,
+            debug_info={"error": "Empty lit region"},
+        )
+    
+    cropped_h, cropped_w = gray_cropped.shape[:2]
+    
+    # Further crop top/bottom by a small percentage to avoid edge artifacts
+    edge_crop_y = int(0.05 * cropped_h)
+    if edge_crop_y > 0 and cropped_h - 2 * edge_crop_y > 10:
+        gray_cropped = gray_cropped[edge_crop_y:cropped_h - edge_crop_y, :]
+    
+    # Apply median blur to reduce noise/scratches
+    gray_cropped = cv2.medianBlur(gray_cropped, 5)
+    
+    # Compute column statistics
+    stats = compute_column_stats(gray_cropped)
+    
+    # Find gap mask
+    gap_mask = find_gap_mask(
+        stats,
+        mean_threshold=mean_threshold,
+        std_threshold=std_threshold,
+    )
+    
+    # Find gap regions (with x_offset to convert back to full image coords)
+    # Real inter-frame gaps are narrow - typically 1-5% of frame width
+    # Use max_width to filter out large bright areas in film content
+    max_gap_width = int(0.08 * cropped_w)  # Max 8% of cropped width
+    max_gap_width = max(max_gap_width, 300)  # But at least 300px for high-res images
+    
+    regions = find_gap_regions(gap_mask, min_width=min_gap_width, max_width=max_gap_width, x_offset=lit_x0)
+    
+    debug_info = {
+        "gap_count": len(regions),
+        "lit_region": {"x0": lit_x0, "y0": lit_y0, "x1": lit_x1, "y1": lit_y1},
+        "cropped_size": {"w": cropped_w, "h": cropped_h},
+        "col_mean_max": float(stats["col_mean"].max()),
+        "col_mean_min": float(stats["col_mean"].min()),
+        "col_std_min": float(stats["col_std"].min()),
+        "col_std_max": float(stats["col_std"].max()),
+    }
+    
+    if not regions:
+        return DetectionResult(
+            offset_px=0,
+            confidence=0.0,
+            gap_x=None,
+            gaps=[],
+            debug_info=debug_info,
+        )
+    
+    # If we have an expected gap position, filter candidates
+    if expected_gap_fraction is not None:
+        hint_x = expected_gap_fraction * full_width
+        half_window = gap_window_fraction * full_width * 0.5
+        
+        filtered = [
+            r for r in regions
+            if abs(((r.global_start_x + r.global_end_x) / 2) - hint_x) <= half_window
+        ]
+        if filtered:
+            regions = filtered
+    
+    # Pick the best gap (widest after filtering)
+    best_gap = regions[0]  # Already sorted by width
+    
+    # Gap center in full image coordinates
+    gap_center_x = (best_gap.global_start_x + best_gap.global_end_x) // 2
+    
+    # Compute offset from image center
     center = full_width // 2
-    offset = best["gap_x"] - center
-
+    offset = gap_center_x - center
+    
+    # Confidence based on gap width relative to cropped region
+    # Wider gaps and more uniform columns = higher confidence
+    gap_fraction = best_gap.width / max(1, cropped_w)
+    confidence = min(1.0, gap_fraction * 5.0 + 0.3)  # Scale so typical gaps give ~0.5-0.8
+    
+    debug_info["best_gap_width"] = best_gap.width
+    debug_info["best_gap_center"] = gap_center_x
+    debug_info["gap_widths"] = [r.width for r in regions[:5]]
+    
     return DetectionResult(
         offset_px=int(offset),
-        confidence=float(best["confidence"]),
-        gap_x=int(best["gap_x"]),
-        profile=profile,
-        smoothed=smoothed_intensity,
-        gaps=best["gaps"],
-        polarity=best["polarity"],
+        confidence=float(confidence),
+        gap_x=int(gap_center_x),
+        gaps=regions,
+        polarity="bright",
+        debug_info=debug_info,
     )
 
 
 def detect_bright_region_roi(
-    jpeg_bytes: bytes,
+    image_input,
     min_area_ratio: float = 0.05,
     padding: float = 0.0,
     inner_shrink: float = 0.01,
 ) -> Optional[dict]:
     """
     Detect the largest bright region (lit film window) within a mostly dark mask.
-
+    
+    Args:
+        image_input: Either JPEG bytes or a grayscale numpy array.
+    
     Returns ROI as normalized fractions {x0,x1,y0,y1} or None if not found.
     """
-    gray = jpeg_bytes_to_gray(jpeg_bytes)
+    if isinstance(image_input, bytes):
+        gray = jpeg_bytes_to_gray(image_input)
+    elif isinstance(image_input, np.ndarray):
+        if image_input.ndim == 3:
+            gray = cv2.cvtColor(image_input, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = image_input
+    else:
+        return None
+    
     h, w = gray.shape[:2]
 
     # Smooth to reduce noise, then Otsu threshold to separate bright/dark
@@ -311,7 +422,7 @@ def detect_bright_region_roi(
         return None
 
     area_threshold = min_area_ratio * w * h
-    best_box: Optional[Tuple[int, int, int, int]] = None  # x, y, bw, bh
+    best_box: Optional[Tuple[int, int, int, int]] = None
     best_area = 0
 
     for c in contours:
@@ -326,7 +437,7 @@ def detect_bright_region_roi(
 
     x, y, bw, bh = best_box
 
-    # Slightly shrink the detected box to avoid including mask edges
+    # Slightly shrink the detected box
     shrink_x = max(1, min(10, int(round(0.003 * w))))
     shrink_y = max(1, min(10, int(round(0.003 * h))))
     x += shrink_x
@@ -334,7 +445,7 @@ def detect_bright_region_roi(
     bw = max(1, bw - 2 * shrink_x)
     bh = max(1, bh - 2 * shrink_y)
 
-    # Further crop inward within the bright region so we ignore mask edges
+    # Further crop inward
     if inner_shrink > 0:
         inner_x = int(round(inner_shrink * bw))
         inner_y = int(round(inner_shrink * bh))
@@ -344,7 +455,7 @@ def detect_bright_region_roi(
             bw -= 2 * inner_x
             bh -= 2 * inner_y
 
-    # Add optional padding (as fraction of image size) and clamp
+    # Add optional padding and clamp
     pad_x = int(round(padding * w))
     pad_y = int(round(padding * h))
     x0 = max(0, x - pad_x)
