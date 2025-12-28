@@ -978,6 +978,16 @@ class FilmScanner:
             try:
                 # Clean any stray gphoto2 from previous ops
                 self._kill_gphoto2()
+                
+                # Best-effort: ensure capture goes to camera SD card (capturetarget=1)
+                try:
+                    subprocess.run(
+                        ["gphoto2", "--set-config", "capturetarget=1"],
+                        capture_output=True, timeout=5, text=True
+                    )
+                except Exception as e:
+                    print(f"⚠ capturetarget set failed (continuing): {e}")
+                
                 print("\n📷 Capturing image...")
                 result = subprocess.run(
                     ["gphoto2", "--capture-image"],
@@ -1100,14 +1110,7 @@ class FilmScanner:
             return None
         
         try:
-            # Decode JPEG frame
-            img_array = np.frombuffer(frame_bytes, dtype=np.uint8)
-            img = cv2.imdecode(img_array, cv2.IMREAD_GRAYSCALE)
-            if img is None:
-                return None
-            
-            # Use frame_detector to detect bright region
-            roi = detect_bright_region_roi(img, padding=padding, min_area_ratio=min_area_ratio)
+            roi = detect_bright_region_roi(frame_bytes, padding=padding, min_area_ratio=min_area_ratio)
             if roi:
                 self.alignment_roi = self._normalize_alignment_roi(roi)
             return self.alignment_roi
@@ -1639,42 +1642,51 @@ def set_alignment_mode_route():
 
 @app.route('/api/preview_roi', methods=['POST'])
 def preview_roi_route():
-    """Preview from camera disabled - use capture card instead"""
-    return jsonify({
-        'success': False,
-        'message': 'Preview from camera disabled - use capture card for preview/viewfinder. gphoto2 is only used for autofocus and capture.'
-    })
+    """
+    Detect ROI from capture card frame and optionally return an overlay.
+    Request JSON: {apply_roi: bool, overlay: bool}
+    """
+    data = request.json or {}
+    apply_roi = bool(data.get('apply_roi'))
+    overlay = bool(data.get('overlay'))
 
-    detected_roi = detect_bright_region_roi(preview_bytes, padding=0.0)
+    try:
+        frame_bytes = scanner.capture_preview_bytes()
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'Preview error: {e}'})
+
+    detected_roi = detect_bright_region_roi(frame_bytes, padding=0.0)
 
     # Optionally persist detected ROI
     if apply_roi and detected_roi:
-        with scanner.lock:
-            scanner.alignment_roi = detected_roi
-        scanner._save_alignment_config()
+        try:
+            with scanner.lock:
+                scanner.alignment_roi = detected_roi
+            scanner._save_alignment_config()
+        except Exception:
+            pass  # best-effort
 
-    # Draw rectangle if detected
-    try:
-        arr = np.frombuffer(preview_bytes, dtype=np.uint8)
-        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        if img is None:
-            raise ValueError("Failed to decode preview")
+    image_data = None
+    if overlay:
+        try:
+            arr = np.frombuffer(frame_bytes, dtype=np.uint8)
+            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if img is None:
+                raise ValueError("Failed to decode preview for ROI overlay")
 
-        if detected_roi:
-            h, w = img.shape[:2]
-            x0 = int(detected_roi['x0'] * w)
-            x1 = int(detected_roi['x1'] * w)
-            y0 = int(detected_roi['y0'] * h)
-            y1 = int(detected_roi['y1'] * h)
-            cv2.rectangle(img, (x0, y0), (x1, y1), (0, 0, 255), thickness=3)
+            if detected_roi:
+                h, w = img.shape[:2]
+                x0 = int(detected_roi['x0'] * w)
+                x1 = int(detected_roi['x1'] * w)
+                y0 = int(detected_roi['y0'] * h)
+                y1 = int(detected_roi['y1'] * h)
+                cv2.rectangle(img, (x0, y0), (x1, y1), (0, 0, 255), thickness=3)
 
-        # Encode back to JPEG
-        success, buf = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
-        if not success:
-            raise ValueError("Failed to encode ROI preview")
-        image_data = base64.b64encode(buf.tobytes()).decode('utf-8')
-    except Exception as e:
-        return jsonify({'success': False, 'message': f'ROI overlay failed: {e}', 'roi': detected_roi})
+            success, buf = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+            if success:
+                image_data = base64.b64encode(buf.tobytes()).decode('utf-8')
+        except Exception:
+            image_data = None
 
     return jsonify({
         'success': True,
