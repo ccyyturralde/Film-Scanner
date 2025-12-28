@@ -1091,21 +1091,24 @@ class FilmScanner:
         self.last_gap_px = result.gap_x
 
         # Include debug info in response
+        # Convert numpy types to native Python types for JSON serialization
         debug = result.debug_info or {}
-        gap_count = debug.get("gap_count", 0)
+        gap_count = int(debug.get("gap_count", 0))
         
-        # Get image dimensions from debug or estimate
-        # The detector works on the cropped/processed image
-        # We need to know the full frame width for offset calculations
+        # Helper to convert numpy types
+        def to_native(v):
+            if hasattr(v, 'item'):
+                return v.item()  # numpy scalar to Python
+            return v
         
         info = {
-            "offset_px": result.offset_px,
-            "confidence": result.confidence,
-            "gap_x": result.gap_x,
+            "offset_px": int(result.offset_px) if result.offset_px is not None else 0,
+            "confidence": float(result.confidence) if result.confidence is not None else 0.0,
+            "gap_x": int(result.gap_x) if result.gap_x is not None else None,
             "polarity": result.polarity,
             "frame_mode": self.frame_mode,
             "gap_count": gap_count,
-            "debug": debug,
+            "debug": {k: to_native(v) if not isinstance(v, dict) else v for k, v in debug.items()},
         }
 
         self.log(f"▶ Detection: {gap_count} gaps, gap_x={result.gap_x}, confidence={result.confidence:.3f}")
