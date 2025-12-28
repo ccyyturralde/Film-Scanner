@@ -113,7 +113,8 @@ apt-get install -y \
 print_step "Installing camera support (gphoto2)..."
 apt-get install -y \
     gphoto2 \
-    libgphoto2-dev
+    libgphoto2-dev \
+    ffmpeg
 
 # Image processing libraries
 print_step "Installing image processing libraries..."

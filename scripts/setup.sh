@@ -32,6 +32,7 @@ sudo apt install -y \
     python3-pygame \
     git \
     gphoto2 \
+    ffmpeg \
     screen \
     curl \
     libsdl2-dev \
