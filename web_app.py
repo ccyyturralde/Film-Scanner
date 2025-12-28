@@ -1034,14 +1034,61 @@ class FilmScanner:
                 "mode": "error",
                 "reason": "Capture card not providing frames",
             }
-        
-        # Use frame_detector with capture card frame
-        # This method would need to be updated to work with capture card frames
-        # For now, return disabled since the alignment logic expects camera preview
-        return False, "Auto alignment with capture card not yet implemented", {
-            "mode": "disabled",
-            "reason": "Auto alignment needs to be updated for capture card",
+
+        # Detect bright window to avoid mask edges
+        roi = self.detect_alignment_roi(padding=0.01, min_area_ratio=0.05)
+
+        try:
+            result = detect_frame_gap(frame_bytes, roi=roi)
+        except Exception as e:
+            return False, f"Detection error: {e}", {
+                "mode": "error",
+                "reason": "gap detection failed",
+            }
+
+        # Update internal alignment metrics
+        self.alignment_confidence = result.confidence
+        self.last_gap_px = result.gap_x
+
+        info = {
+            "offset_px": result.offset_px,
+            "confidence": result.confidence,
+            "gap_x": result.gap_x,
+            "polarity": result.polarity,
+            "roi": roi,
         }
+
+        # If confidence too low, abort movement
+        if result.confidence < self.alignment_min_confidence:
+            return False, "Low confidence", {**info, "mode": "low_confidence"}
+
+        # If already centered enough, succeed without moving
+        if abs(result.offset_px) <= stop_px:
+            self.status_msg = "✓ Aligned"
+            return True, "Aligned", {**info, "mode": "aligned"}
+
+        # Convert pixel offset to motor steps
+        px_per_step = max(0.5, float(self.px_per_step))
+        raw_steps = result.offset_px / px_per_step
+        steps = int(round(raw_steps))
+
+        # Enforce minimum/maximum movement
+        if abs(steps) < min_step:
+            steps = min_step if steps >= 0 else -min_step
+        steps = max(-max_step, min(max_step, steps))
+
+        # Choose direction (positive = forward)
+        if steps > 0:
+            cmd = f"H{abs(steps)}"
+        else:
+            cmd = f"h{abs(steps)}"
+
+        moved = self.send(cmd)
+        if not moved:
+            return False, "Motor move failed", {**info, "mode": "move_failed", "steps": steps}
+
+        self.status_msg = f"Aligned move: {steps} steps"
+        return True, "Aligned move complete", {**info, "mode": "moved", "steps": steps}
     def detect_alignment_roi(self, padding: float = 0.0, min_area_ratio: float = 0.05):
         """
         Detect alignment ROI from capture card frame.
