@@ -154,6 +154,8 @@ def detect_frame_gap(
     min_prominence_ratio: float = 0.10,
     min_distance_ratio: float = 0.05,
     roi: Optional[dict] = None,
+    expected_gap_fraction: Optional[float] = None,
+    gap_window_fraction: float = 0.15,
 ) -> DetectionResult:
     """
     Detect brightest gap and return offset from image center.
@@ -232,6 +234,18 @@ def detect_frame_gap(
         found = _find_gaps(signal, min_prominence=min_prominence, min_distance=min_distance)
         if not found:
             return None
+
+        # If we have an expected gap position, restrict candidates to a window around it
+        if expected_gap_fraction is not None:
+            hint_x = expected_gap_fraction * full_width
+            half_window = max(4.0, gap_window_fraction * full_width * 0.5)
+            filtered = [
+                g for g in found
+                if abs((roi_x_offset + g.x * width_scale) - hint_x) <= half_window
+            ]
+            if filtered:
+                found = filtered
+
         best_gap = max(found, key=lambda g: g.prominence)
         confidence = _confidence_from_gap(best_gap, span, len(signal))
         gap_global_x = roi_x_offset + int(round(best_gap.x * width_scale))

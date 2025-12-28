@@ -436,6 +436,7 @@ class FilmScanner:
         self.mode = 'manual'
         self.auto_advance = True
         self.alignment_mode = "stream"  # stream (auto) or calibration (distance-only)
+        self.frame_mode = "full"  # full or half
         
         # State persistence
         self.state_file = None
@@ -1048,8 +1049,30 @@ class FilmScanner:
         # Detect bright window to avoid mask edges
         roi = self.detect_alignment_roi(padding=0.01, min_area_ratio=0.05)
 
+        # Default ROI if none detected; tighten edges based on mode
+        if not roi:
+            if self.frame_mode == "half":
+                roi = {"x0": 0.1, "x1": 0.9, "y0": 0.0, "y1": 1.0}
+            else:
+                roi = {"x0": 0.03, "x1": 0.97, "y0": 0.0, "y1": 1.0}
+
+        # Gap hint per mode
+        if self.frame_mode == "half":
+            expected_gap_fraction = 0.5
+            gap_window_fraction = 0.20
+        else:
+            expected_gap_fraction = 0.9
+            gap_window_fraction = 0.14
+
         try:
-            result = detect_frame_gap(frame_bytes, roi=roi)
+            result = detect_frame_gap(
+                frame_bytes,
+                roi=roi,
+                expected_gap_fraction=expected_gap_fraction,
+                gap_window_fraction=gap_window_fraction,
+                min_prominence_ratio=0.12 if self.frame_mode == "half" else 0.10,
+                min_distance_ratio=0.08,
+            )
         except Exception as e:
             return False, f"Detection error: {e}", {
                 "mode": "error",
@@ -1068,8 +1091,11 @@ class FilmScanner:
             "roi": roi,
         }
 
+        # Use a slightly higher minimum for robustness
+        min_conf_req = max(self.alignment_min_confidence, 0.12)
+
         # If confidence too low, abort movement
-        if result.confidence < self.alignment_min_confidence:
+        if result.confidence < min_conf_req:
             return False, "Low confidence", {**info, "mode": "low_confidence"}
 
         # If already centered enough, succeed without moving
@@ -1308,6 +1334,7 @@ class FilmScanner:
                 'frame_advance': self.frame_advance,
                 'auto_advance': self.auto_advance,
                 'alignment_mode': self.alignment_mode,
+                'frame_mode': self.frame_mode,
                 'camera_connected': self.camera_connected,
                 'camera_model': self.camera_model,
                 'camera_error': self.camera_error,
@@ -1638,6 +1665,20 @@ def set_alignment_mode_route():
             })
     except ValueError as e:
         return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/set_frame_mode', methods=['POST'])
+def set_frame_mode_route():
+    """Set frame mode: full or half (affects gap hint for alignment)."""
+    data = request.json or {}
+    mode = (data.get('mode') or '').strip().lower()
+    if mode not in ("full", "half"):
+        return jsonify({'success': False, 'message': "mode must be 'full' or 'half'"})
+    scanner.frame_mode = mode
+    scanner.status_msg = f"Frame mode: {scanner.frame_mode}"
+    scanner.broadcast_status()
+    with scanner.lock:
+        return jsonify({'success': True, 'frame_mode': scanner.frame_mode})
 
 
 @app.route('/api/preview_roi', methods=['POST'])
