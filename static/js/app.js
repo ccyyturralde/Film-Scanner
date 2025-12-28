@@ -506,6 +506,10 @@ async function loadAlignmentConfig() {
         if (alignModeEl && result.alignment_mode) {
             alignModeEl.textContent = `Mode: ${result.alignment_mode}`;
         }
+        const frameModeEl = document.getElementById('frame-mode-display');
+        if (frameModeEl && result.frame_mode) {
+            frameModeEl.textContent = `Frame: ${result.frame_mode.toUpperCase()}`;
+        }
     }
 }
 
@@ -586,6 +590,23 @@ async function setAlignmentMode(mode) {
             startVideoStream();
         }
     }
+}
+
+async function setFrameMode(mode) {
+    const btn = event && event.target;
+    if (btn) setButtonProcessing(btn, true);
+    const result = await apiCall('set_frame_mode', { mode });
+    if (btn) setButtonProcessing(btn, false);
+    if (!result.success) {
+        alert('Failed to set frame mode: ' + (result.message || 'Unknown error'));
+        return;
+    }
+    const frameModeEl = document.getElementById('frame-mode-display');
+    if (frameModeEl && result.frame_mode) {
+        frameModeEl.textContent = `Frame: ${result.frame_mode.toUpperCase()}`;
+    }
+    // Reload alignment config to reflect defaults if needed
+    loadAlignmentConfig();
 }
 
 function togglePreviewInvert() {

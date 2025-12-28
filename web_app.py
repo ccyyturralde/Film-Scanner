@@ -1616,6 +1616,7 @@ def get_alignment_config_route():
             'roi': scanner.alignment_roi,
             'min_confidence': scanner.alignment_min_confidence,
             'alignment_mode': scanner.alignment_mode,
+            'frame_mode': scanner.frame_mode,
         })
 
 
