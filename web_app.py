@@ -507,10 +507,20 @@ class FilmScanner:
         Get frame from capture card for alignment.
         Returns (frame_bytes, used_stream_flag).
         """
+        # Try live stream first
         if self.ensure_preview_stream():
             frame = self.preview_stream.get_frame(timeout=timeout)
             if frame:
                 return frame, True
+
+        # Fallback: grab a fresh frame directly
+        try:
+            frame = self.capture_preview_bytes()
+            if frame:
+                return frame, False
+        except Exception as e:
+            self.log(f"✗ Fallback capture failed: {e}")
+
         return None, False
     
     def identify_arduino_board(self, port_info):
@@ -1097,6 +1107,7 @@ class FilmScanner:
 
         # If confidence too low, abort movement
         if result.confidence < min_conf_req:
+            self.log(f"Auto-align low confidence: {result.confidence:.3f}, offset {result.offset_px}")
             return False, "Low confidence", {**info, "mode": "low_confidence"}
 
         # If already centered enough, succeed without moving
