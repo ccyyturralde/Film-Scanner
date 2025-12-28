@@ -1066,15 +1066,16 @@ class FilmScanner:
         self.log(f"▶ Auto-align [{self.frame_mode}]: Got {len(frame_bytes)} bytes (stream={used_stream})")
 
         try:
+            # Use more lenient thresholds for capture card feed
+            # which may have different characteristics than DSLR samples
             result = detect_frame_gap(
                 frame_bytes,
                 roi=None,  # Use full frame
                 expected_gap_fraction=None,  # Search everywhere
                 gap_window_fraction=1.0,     # Wide search
-                brightness_threshold=0.3,
-                std_threshold=0.20,
-                diff_threshold=0.40,
-                min_gap_width=3,
+                brightness_threshold=0.25,   # More lenient (was 0.3)
+                std_threshold=0.25,          # More lenient (was 0.20)
+                min_gap_width=2,             # Smaller gaps OK (was 3)
             )
         except Exception as e:
             self.log(f"✗ Auto-align detection error: {e}")
@@ -1111,7 +1112,9 @@ class FilmScanner:
             "debug": {k: to_native(v) if not isinstance(v, dict) else v for k, v in debug.items()},
         }
 
-        self.log(f"▶ Detection: {gap_count} gaps, gap_x={result.gap_x}, confidence={result.confidence:.3f}")
+        self.log(f"▶ Detection [{self.frame_mode}]: {gap_count} gaps, gap_x={result.gap_x}, conf={result.confidence:.3f}")
+        if debug:
+            self.log(f"   Debug: mean_max={debug.get('col_mean_max', 0):.2f}, std_min={debug.get('col_std_min', 0):.2f}")
 
         # Handle different frame modes differently
         if self.frame_mode == "full":
@@ -1146,7 +1149,11 @@ class FilmScanner:
                 # Move forward a bit to find a gap
                 cmd = "H50"  # Small forward movement
                 moved = self.send(cmd)
-                return False, "Searching for gap", {**info, "mode": "searching", "steps": 50}
+                if moved:
+                    self.status_msg = "Searching for gap..."
+                    return True, "Searching for gap (moved 50 steps)", {**info, "mode": "searching", "steps": 50}
+                else:
+                    return False, "Motor move failed", {**info, "mode": "error"}
             
             # Gap detected - calculate offset from center
             self.log(f"▶ Half frame: gap at {result.gap_x}px, offset from center: {result.offset_px}px")
