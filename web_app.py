@@ -296,8 +296,8 @@ class CaptureCardStream:
         if cap:
             try:
                 cap.release()
-                except Exception:
-                    pass
+            except Exception:
+                pass
         # Allow thread to exit
         if self.thread:
             self.thread.join(timeout=1.0)
@@ -371,8 +371,8 @@ class CaptureCardStream:
             if cap:
                 try:
                     cap.release()
-                    except Exception:
-                        pass
+                except Exception:
+                    pass
 
 
 # Arduino USB Vendor/Product IDs for automatic detection
@@ -966,20 +966,21 @@ class FilmScanner:
         gphoto2 viewfinder is not used (only autofocus and capture).
         """
         self.viewfinder_enabled = True  # Always enabled via capture card
-                return True
+        return True
+
     def enable_viewfinder(self):
         """
         Viewfinder disabled - using capture card instead.
         gphoto2 is only used for autofocus and capture.
         """
-            return False
+        return False
     
     def disable_viewfinder(self):
         """
         Viewfinder disabled - using capture card instead.
         gphoto2 is only used for autofocus and capture.
         """
-            return False
+        return False
     
     def capture_image(self, retry=True):
         """Capture image to camera SD card with exclusive access"""
@@ -1120,7 +1121,6 @@ class FilmScanner:
             
             # For full frame, only consider gaps in the middle 80% of the frame
             # (gaps at edges <10% or >90% are nearly out and we can consider aligned)
-            # Estimate frame width from debug info or use default
             frame_width = debug.get("lit_region", {}).get("x1", 1920) - debug.get("lit_region", {}).get("x0", 0)
             if frame_width <= 0:
                 frame_width = 1920  # Default
@@ -1135,7 +1135,7 @@ class FilmScanner:
                 # Gap detected in center area - need to move it out of frame
                 self.log(f"▶ Full frame: gap at {result.gap_x}px ({gap_fraction:.1%}), offset: {result.offset_px}px")
             
-                else:
+        else:
             # HALF FRAME MODE: We want gap CENTERED at ~50%
             # If no gaps detected, we need to find one
             if gap_count == 0 or result.confidence == 0:
@@ -1146,8 +1146,7 @@ class FilmScanner:
                 return False, "Searching for gap", {**info, "mode": "searching", "steps": 50}
             
             # Gap detected - calculate offset from center
-            offset_px = result.offset_px
-            self.log(f"▶ Half frame: gap at {result.gap_x}px, offset from center: {offset_px}px")
+            self.log(f"▶ Half frame: gap at {result.gap_x}px, offset from center: {result.offset_px}px")
 
         # Check if already aligned (gap within tolerance of target position)
         if abs(result.offset_px) <= stop_px:
@@ -1156,7 +1155,7 @@ class FilmScanner:
             return True, "Aligned", {**info, "mode": "aligned"}
 
         # Convert pixel offset to motor steps
-                px_per_step = max(0.5, float(self.px_per_step))
+        px_per_step = max(0.5, float(self.px_per_step))
         raw_steps = result.offset_px / px_per_step
         steps = int(round(raw_steps))
 
@@ -1199,7 +1198,7 @@ class FilmScanner:
         
         try:
             roi = detect_bright_region_roi(frame_bytes, padding=padding, min_area_ratio=min_area_ratio)
-        if roi:
+            if roi:
                 self.alignment_roi = self._normalize_alignment_roi(roi)
             return self.alignment_roi
         except Exception as e:
@@ -1854,31 +1853,31 @@ def preview_roi_route():
     # Optionally persist detected ROI
     if apply_roi and detected_roi:
         try:
-        with scanner.lock:
-            scanner.alignment_roi = detected_roi
-        scanner._save_alignment_config()
+            with scanner.lock:
+                scanner.alignment_roi = detected_roi
+            scanner._save_alignment_config()
         except Exception:
             pass  # best-effort
 
     image_data = None
     if overlay:
-    try:
+        try:
             arr = np.frombuffer(frame_bytes, dtype=np.uint8)
-        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        if img is None:
+            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if img is None:
                 raise ValueError("Failed to decode preview for ROI overlay")
 
-        if detected_roi:
-            h, w = img.shape[:2]
-            x0 = int(detected_roi['x0'] * w)
-            x1 = int(detected_roi['x1'] * w)
-            y0 = int(detected_roi['y0'] * h)
-            y1 = int(detected_roi['y1'] * h)
-            cv2.rectangle(img, (x0, y0), (x1, y1), (0, 0, 255), thickness=3)
+            if detected_roi:
+                h, w = img.shape[:2]
+                x0 = int(detected_roi['x0'] * w)
+                x1 = int(detected_roi['x1'] * w)
+                y0 = int(detected_roi['y0'] * h)
+                y1 = int(detected_roi['y1'] * h)
+                cv2.rectangle(img, (x0, y0), (x1, y1), (0, 0, 255), thickness=3)
 
-        success, buf = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+            success, buf = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
             if success:
-        image_data = base64.b64encode(buf.tobytes()).decode('utf-8')
+                image_data = base64.b64encode(buf.tobytes()).decode('utf-8')
         except Exception:
             image_data = None
 
@@ -1987,11 +1986,11 @@ def detect_alignment_roi_route():
     if not scanner.stream_enabled:
         return jsonify({'success': False, 'message': 'Preview stream disabled'})
     
-        roi = scanner.detect_alignment_roi()
-        if roi:
+    roi = scanner.detect_alignment_roi()
+    if roi:
         scanner.status_msg = "✓ ROI detected from capture card"
         scanner.broadcast_status()
-            return jsonify({'success': True, 'roi': roi})
+        return jsonify({'success': True, 'roi': roi})
     else:
         scanner.status_msg = "✗ ROI detection failed"
         scanner.broadcast_status()
@@ -2133,7 +2132,7 @@ def preview_video_stream():
                 frame = scanner.preview_stream.get_frame(timeout=0.5)
                 if frame is None:
                     time.sleep(0.05)
-                        continue
+                    continue
 
                 out = frame
                 if invert:
