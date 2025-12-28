@@ -1069,14 +1069,15 @@ class FilmScanner:
                 frame_bytes,
                 roi=roi,
                 expected_gap_fraction=expected_gap_fraction,
-                gap_window_fraction=gap_window_fraction,
-                min_prominence_ratio=0.12 if self.frame_mode == "half" else 0.10,
+                gap_window_fraction=0.25 if self.frame_mode == "half" else 0.20,
+                min_prominence_ratio=0.10 if self.frame_mode == "half" else 0.10,
                 min_distance_ratio=0.08,
             )
         except Exception as e:
             return False, f"Detection error: {e}", {
                 "mode": "error",
                 "reason": "gap detection failed",
+                "confidence": 0.0,
             }
 
         # Update internal alignment metrics
@@ -1091,8 +1092,8 @@ class FilmScanner:
             "roi": roi,
         }
 
-        # Use a slightly higher minimum for robustness
-        min_conf_req = max(self.alignment_min_confidence, 0.12)
+        # Use a slightly higher minimum for robustness, but allow low floor to avoid zero
+        min_conf_req = max(self.alignment_min_confidence, 0.08)
 
         # If confidence too low, abort movement
         if result.confidence < min_conf_req:
