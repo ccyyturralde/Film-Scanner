@@ -1085,9 +1085,9 @@ class FilmScanner:
                 roi={"x0": 0.05, "x1": 0.95, "y0": 0.15, "y1": 0.85},
                 expected_gap_fraction=None,
                 gap_window_fraction=1.0,
-                mean_threshold=0.45,  # Lowered - catch dimmer gaps
-                std_threshold=0.30,   # Raised - allow more variation (camera noise)
-                min_gap_width=4,
+                mean_threshold=0.70,  # Higher - gaps must be clearly bright (white)
+                std_threshold=0.25,   # Tighter - gaps must be uniform
+                min_gap_width=6,      # Wider minimum to avoid noise
                 max_gap_width=400,
                 use_edge_detection=True,
             )
@@ -1185,9 +1185,9 @@ class FilmScanner:
                     verify_result = detect_frame_gap(
                         verify_bytes,
                         roi={"x0": 0.05, "x1": 0.95, "y0": 0.15, "y1": 0.85},
-                        mean_threshold=0.45,  # Same as initial detection
-                        std_threshold=0.30,   # Same as initial detection
-                        min_gap_width=4,
+                        mean_threshold=0.70,  # Same as initial detection
+                        std_threshold=0.25,   # Same as initial detection
+                        min_gap_width=6,
                         max_gap_width=400,
                         use_edge_detection=True,
                     )
