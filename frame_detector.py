@@ -217,34 +217,81 @@ def compute_vertical_continuity(gray: np.ndarray, threshold: float = 0.6) -> np.
     return bright_per_col
 
 
+def compute_column_uniformity(gray: np.ndarray) -> np.ndarray:
+    """
+    Compute how UNIFORM each column is from top to bottom.
+    
+    This is the key distinguishing feature of a gap vs film content:
+    - A gap will have the SAME brightness from top to bottom (high uniformity)
+    - Film content will have varying brightness (low uniformity)
+    
+    Returns a score per column (0-1) where 1 means perfectly uniform.
+    Unlike vertical_continuity, this works regardless of brightness level.
+    """
+    # Normalize to 0-1
+    img = gray.astype(np.float32) / 255.0
+    
+    # Compute std deviation along each column (axis=0)
+    col_std = img.std(axis=0)
+    
+    # Convert std to uniformity score (lower std = higher uniformity)
+    # A std of 0 means perfect uniformity (score=1)
+    # A std of 0.3 means low uniformity (score~=0)
+    uniformity = np.clip(1.0 - (col_std / 0.3), 0, 1)
+    
+    return uniformity
+
+
 def find_gap_candidates_brightness(
     stats: dict,
     mean_threshold: float = 0.70,
     std_threshold: float = 0.12,
     vertical_continuity: Optional[np.ndarray] = None,
     min_continuity: float = 0.85,
+    column_uniformity: Optional[np.ndarray] = None,
+    min_uniformity: float = 0.70,
 ) -> np.ndarray:
     """
     Create a 1D mask where gap candidates (bright uniform columns) are True.
     
-    A column is considered a gap candidate if:
+    A column is considered a gap candidate if it passes EITHER:
+    
+    Method 1 (traditional - bright + low std):
     - Mean brightness is above mean_threshold (relative to max)
     - Standard deviation is below std_threshold (uniform)
     - (Optional) Vertical continuity is above min_continuity (full height)
+    
+    Method 2 (uniformity-first - works regardless of absolute brightness):
+    - Column uniformity is above min_uniformity (very consistent top-to-bottom)
+    - Mean brightness is significantly above the minimum (brighter than film content)
+    - Vertical continuity is above min_continuity (full height)
     """
     col_mean = stats["col_mean"]
     col_std = stats["col_std"]
     
-    # Get the maximum mean brightness as reference
+    # Get the maximum and minimum mean brightness as reference
     max_mean = float(col_mean.max()) if col_mean.max() > 0 else 1.0
+    min_mean = float(col_mean.min())
     
-    # Gap columns are bright (high mean) AND uniform (low std)
+    # Method 1: Gap columns are bright (high mean) AND uniform (low std)
     bright_mask = col_mean > (mean_threshold * max_mean)
     uniform_mask = col_std < std_threshold
+    gap_mask_method1 = bright_mask & uniform_mask
     
-    gap_mask = bright_mask & uniform_mask
+    # Method 2: Use column uniformity as primary indicator
+    # A gap needs to be brighter than film content but doesn't need to be max brightness
+    gap_mask_method2 = np.zeros_like(col_mean, dtype=bool)
+    if column_uniformity is not None:
+        # Column is uniform AND brighter than the average
+        mid_brightness = (max_mean + min_mean) / 2
+        brighter_than_mid = col_mean > mid_brightness
+        high_uniformity = column_uniformity > min_uniformity
+        gap_mask_method2 = brighter_than_mid & high_uniformity
     
-    # Apply vertical continuity filter if provided
+    # Combine both methods - a column is a gap if it passes EITHER method
+    gap_mask = gap_mask_method1 | gap_mask_method2
+    
+    # Apply vertical continuity filter if provided (applies to both methods)
     if vertical_continuity is not None:
         continuity_mask = vertical_continuity > min_continuity
         gap_mask = gap_mask & continuity_mask
@@ -501,6 +548,9 @@ def detect_frame_gap(
     # Compute vertical continuity (helps distinguish full-height gaps from partial bright areas)
     vertical_continuity = compute_vertical_continuity(gray_cropped, threshold=0.5)
     
+    # Compute column uniformity (key feature: gaps are uniform top-to-bottom regardless of brightness)
+    column_uniformity = compute_column_uniformity(gray_cropped)
+    
     # Method 1: Column brightness analysis with vertical continuity filter
     stats = compute_column_stats(gray_blurred)
     gap_mask = find_gap_candidates_brightness(
@@ -509,6 +559,8 @@ def detect_frame_gap(
         std_threshold=std_threshold,
         vertical_continuity=vertical_continuity,
         min_continuity=0.80,  # Must be bright for at least 80% of height
+        column_uniformity=column_uniformity,
+        min_uniformity=0.70,  # Must be very uniform from top to bottom
     )
     
     # Method 2: Edge detection
@@ -568,6 +620,8 @@ def detect_frame_gap(
     
     debug_info["vertical_continuity_max"] = float(vertical_continuity.max())
     debug_info["vertical_continuity_mean"] = float(vertical_continuity.mean())
+    debug_info["column_uniformity_max"] = float(column_uniformity.max())
+    debug_info["column_uniformity_mean"] = float(column_uniformity.mean())
     
     if not regions:
         return DetectionResult(
