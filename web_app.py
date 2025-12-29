@@ -1085,8 +1085,8 @@ class FilmScanner:
                 roi={"x0": 0.05, "x1": 0.95, "y0": 0.15, "y1": 0.85},
                 expected_gap_fraction=None,
                 gap_window_fraction=1.0,
-                mean_threshold=0.50,
-                std_threshold=0.22,
+                mean_threshold=0.45,  # Lowered - catch dimmer gaps
+                std_threshold=0.30,   # Raised - allow more variation (camera noise)
                 min_gap_width=4,
                 max_gap_width=400,
                 use_edge_detection=True,
