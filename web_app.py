@@ -1054,159 +1054,162 @@ class FilmScanner:
             raise RuntimeError("No frame available from capture card")
         return frame
 
-    def auto_align(self, max_iters=8, stop_px=6, max_step=400, min_step=15, prefer_forward=True):
+    def auto_align(self, max_iters=20, stop_px=8, max_step=300, min_step=20, prefer_forward=True):
         """
-        Auto alignment using capture card for preview frames.
-        Uses combined brightness and edge detection to find gaps between film frames.
+        Auto alignment using CONTINUOUS capture card monitoring.
         
-        ITERATES until alignment is achieved or max_iters reached.
+        Uses a tight loop with minimal delay - essentially "watching" the live feed
+        and making quick adjustments until aligned.
         
-        Full frame mode: Move until no gap is visible (gap pushed to edge)
-        Half frame mode: Move until gap is centered (for capturing two half-frames)
+        Full frame mode: Move until no gap is visible
+        Half frame mode: Move until gap is centered
         """
         total_steps_moved = 0
+        last_direction = 0
+        stuck_count = 0
+        last_gap_x = None
+        
+        self.log(f"▶ Auto-align starting [{self.frame_mode}] - continuous monitoring")
         
         for iteration in range(max_iters):
-            self.log(f"▶ Auto-align iteration {iteration + 1}/{max_iters}")
-            
-            # Brief pause to let motor settle and get fresh frame
+            # Very short delay - just enough for motor movement and fresh frame
+            # First iteration: no delay. After moves: brief settle time
             if iteration > 0:
-                time.sleep(0.5)
+                time.sleep(0.12)  # 120ms - fast but allows motor to move
             
-            # Get frame from capture card
-            frame_bytes, used_stream = self.get_alignment_frame(timeout=2.0)
+            # Get fresh frame from capture card
+            frame_bytes, _ = self.get_alignment_frame(timeout=0.5)
             if not frame_bytes:
-                self.log("✗ Auto-align: No frame from capture card")
+                if iteration < 3:  # Retry a few times at start
+                    time.sleep(0.1)
+                    continue
+                self.log("✗ No frame from capture card")
                 return False, "No frame from capture card", {
                     "mode": "error",
-                    "reason": "Capture card not providing frames",
                     "iterations": iteration,
                     "total_steps": total_steps_moved,
                 }
 
-            self.log(f"   Got {len(frame_bytes)} bytes from capture card")
-
             try:
-                # Use robust detection with combined brightness + edge analysis
                 result = detect_frame_gap(
                     frame_bytes,
                     roi=None,
                     expected_gap_fraction=None,
                     gap_window_fraction=1.0,
-                    mean_threshold=0.65,
-                    std_threshold=0.15,
-                    min_gap_width=8,
-                    max_gap_width=250,
+                    mean_threshold=0.60,  # Slightly more sensitive
+                    std_threshold=0.18,
+                    min_gap_width=6,
+                    max_gap_width=300,
                     use_edge_detection=True,
                 )
             except Exception as e:
-                self.log(f"✗ Auto-align detection error: {e}")
-                import traceback
-                traceback.print_exc()
-                return False, f"Detection error: {e}", {
-                    "mode": "error",
-                    "reason": "gap detection failed",
-                    "confidence": 0.0,
-                    "iterations": iteration,
-                    "total_steps": total_steps_moved,
-                }
-
-            # Update internal alignment metrics
-            self.alignment_confidence = float(result.confidence) if result.confidence else 0.0
-            self.last_gap_px = int(result.gap_x) if result.gap_x else None
+                self.log(f"✗ Detection error: {e}")
+                continue  # Try again instead of failing
 
             debug = result.debug_info or {}
             gap_count = int(debug.get("gap_count", 0))
+            confidence = float(result.confidence) if result.confidence else 0.0
             
-            info = _to_python_type({
-                "offset_px": result.offset_px,
-                "confidence": result.confidence,
-                "gap_x": result.gap_x,
-                "polarity": result.polarity,
-                "frame_mode": self.frame_mode,
-                "gap_count": gap_count,
-                "debug": debug,
-                "iteration": iteration + 1,
-                "total_steps": total_steps_moved,
-            })
-
-            self.log(f"   Detection: {gap_count} gaps, gap_x={result.gap_x}, conf={result.confidence:.3f}")
+            # Update status for UI
+            self.alignment_confidence = confidence
+            self.last_gap_px = int(result.gap_x) if result.gap_x else None
 
             # === FULL FRAME MODE ===
             if self.frame_mode == "full":
-                # SUCCESS: No gap detected - we're aligned!
-                if gap_count == 0 or result.confidence < 0.15:
-                    self.status_msg = "✓ Aligned (no gap)"
-                    self.log(f"✓ Full frame aligned after {iteration + 1} iterations, {total_steps_moved} total steps")
-                    return True, "Aligned", {**info, "mode": "aligned"}
+                # SUCCESS: No gap detected
+                if gap_count == 0 or confidence < 0.12:
+                    self.status_msg = "✓ Aligned"
+                    self.log(f"✓ Aligned! {iteration + 1} iterations, {total_steps_moved} steps")
+                    return True, "Aligned", {
+                        "mode": "aligned",
+                        "iterations": iteration + 1,
+                        "total_steps": total_steps_moved,
+                        "confidence": confidence,
+                    }
                 
-                # Gap detected - calculate movement to push it out
+                # Gap still visible - calculate movement
                 lit_x0 = debug.get("lit_region", {}).get("x0", 0)
                 lit_x1 = debug.get("lit_region", {}).get("x1", 640)
                 frame_width = max(lit_x1 - lit_x0, 100)
                 
-                if result.gap_x:
-                    gap_local = result.gap_x - lit_x0
-                    gap_fraction = gap_local / frame_width
-                    gap_width = result.gaps[0].width if result.gaps else 20
-                    
-                    self.log(f"   Gap at {gap_fraction:.1%} of frame (local: {gap_local}px, width: {gap_width}px)")
-                    
-                    # Calculate distance to push gap completely out
-                    if gap_fraction < 0.5:
-                        # Gap on left - move backward (negative)
-                        distance_px = gap_local + gap_width + 30  # Extra margin
-                        direction = -1
-                    else:
-                        # Gap on right - move forward (positive)
-                        distance_px = (frame_width - gap_local) + gap_width + 30
-                        direction = 1
-                    
-                    # Convert to motor steps
-                    px_per_step = max(0.5, float(self.px_per_step))
-                    steps = int(direction * distance_px / px_per_step)
-                    
-                    # Ensure minimum movement
-                    if abs(steps) < min_step:
-                        steps = min_step * direction
-                    
-                    # Clamp to max
-                    steps = max(-max_step, min(max_step, steps))
-                    
-                    # Send motor command
-                    cmd = f"H{abs(steps)}" if steps > 0 else f"h{abs(steps)}"
-                    self.log(f"   Moving: {cmd} ({steps} steps) to push gap {'left' if direction < 0 else 'right'}")
-                    
-                    moved = self.send(cmd)
-                    if not moved:
-                        return False, "Motor move failed", {**info, "mode": "move_failed", "steps": steps}
-                    
-                    total_steps_moved += steps
-                    self.status_msg = f"Aligning... ({iteration + 1}/{max_iters})"
-                    
-                    # Continue to next iteration
+                if not result.gap_x:
                     continue
+                    
+                gap_local = result.gap_x - lit_x0
+                gap_fraction = gap_local / frame_width
+                gap_width = result.gaps[0].width if result.gaps else 15
+                
+                # Check if stuck (gap not moving)
+                if last_gap_x is not None and abs(result.gap_x - last_gap_x) < 3:
+                    stuck_count += 1
+                    if stuck_count > 3:
+                        # Stuck - make a bigger move
+                        self.log(f"   Stuck detected, making larger move")
+                        stuck_count = 0
+                        min_step = 50
+                else:
+                    stuck_count = 0
+                last_gap_x = result.gap_x
+                
+                # Determine direction and distance
+                if gap_fraction < 0.5:
+                    # Gap on left - push it out left (backward)
+                    direction = -1
+                    distance_px = gap_local + gap_width + 20
+                else:
+                    # Gap on right - push it out right (forward)  
+                    direction = 1
+                    distance_px = (frame_width - gap_local) + gap_width + 20
+                
+                # Proportional control - move faster when far, slower when close to edge
+                edge_distance = min(gap_fraction, 1.0 - gap_fraction)  # 0 at edges, 0.5 at center
+                speed_factor = 0.5 + edge_distance  # 0.5 at edge, 1.0 at center
+                
+                px_per_step = max(0.5, float(self.px_per_step))
+                steps = int(direction * distance_px * speed_factor / px_per_step)
+                
+                # Clamp steps
+                if abs(steps) < min_step:
+                    steps = min_step * direction
+                steps = max(-max_step, min(max_step, steps))
+                
+                # Log progress every few iterations
+                if iteration % 3 == 0:
+                    self.log(f"   [{iteration+1}] Gap at {gap_fraction:.0%}, moving {steps} steps")
+                
+                # Move motor
+                cmd = f"H{abs(steps)}" if steps > 0 else f"h{abs(steps)}"
+                moved = self.send(cmd, update_position=False)  # Skip position query for speed
+                
+                if not moved:
+                    return False, "Motor move failed", {"mode": "error", "steps": steps}
+                
+                total_steps_moved += steps
+                last_direction = direction
+                self.status_msg = f"Aligning... {gap_fraction:.0%}"
+                continue
             
             # === HALF FRAME MODE ===
             else:
-                # No gap detected - search for one
-                if gap_count == 0 or result.confidence < 0.15:
-                    self.log("   No gap detected - searching forward")
-                    cmd = "H80"
-                    moved = self.send(cmd)
-                    if moved:
-                        total_steps_moved += 80
-                        continue
-                    else:
-                        return False, "Motor move failed", {**info, "mode": "error"}
+                # No gap - search for one
+                if gap_count == 0 or confidence < 0.12:
+                    self.log(f"   [{iteration+1}] Searching for gap...")
+                    self.send("H60", update_position=False)
+                    total_steps_moved += 60
+                    continue
                 
-                # Gap detected - check if centered
+                # Check if centered (within tolerance)
                 if abs(result.offset_px) <= stop_px:
-                    self.status_msg = "✓ Aligned (gap centered)"
-                    self.log(f"✓ Half frame aligned - gap centered after {iteration + 1} iterations")
-                    return True, "Aligned", {**info, "mode": "aligned"}
+                    self.status_msg = "✓ Aligned (centered)"
+                    self.log(f"✓ Gap centered! {iteration + 1} iterations, {total_steps_moved} steps")
+                    return True, "Aligned", {
+                        "mode": "aligned",
+                        "iterations": iteration + 1,
+                        "total_steps": total_steps_moved,
+                        "offset_px": result.offset_px,
+                    }
                 
-                # Move to center the gap
+                # Move to center
                 px_per_step = max(0.5, float(self.px_per_step))
                 steps = int(result.offset_px / px_per_step)
                 
@@ -1214,23 +1217,28 @@ class FilmScanner:
                     steps = min_step if steps >= 0 else -min_step
                 steps = max(-max_step, min(max_step, steps))
                 
+                if iteration % 3 == 0:
+                    self.log(f"   [{iteration+1}] Offset {result.offset_px}px, moving {steps} steps")
+                
                 cmd = f"H{abs(steps)}" if steps > 0 else f"h{abs(steps)}"
-                self.log(f"   Moving: {cmd} ({steps} steps) to center gap")
-                
-                moved = self.send(cmd)
-                if not moved:
-                    return False, "Motor move failed", {**info, "mode": "move_failed", "steps": steps}
-                
+                self.send(cmd, update_position=False)
                 total_steps_moved += steps
                 continue
         
-        # Max iterations reached without alignment
-        self.log(f"⚠ Max iterations ({max_iters}) reached, moved {total_steps_moved} total steps")
-        self.status_msg = f"⚠ Align incomplete after {max_iters} tries"
-        return False, f"Max iterations reached", {
-            **info,
+        # Max iterations - but check one more time
+        self.log(f"⚠ Max iterations ({max_iters}), checking final state...")
+        frame_bytes, _ = self.get_alignment_frame(timeout=0.5)
+        if frame_bytes:
+            result = detect_frame_gap(frame_bytes, mean_threshold=0.60, std_threshold=0.18)
+            if result.debug_info.get("gap_count", 1) == 0:
+                self.status_msg = "✓ Aligned"
+                return True, "Aligned", {"mode": "aligned", "total_steps": total_steps_moved}
+        
+        self.status_msg = f"⚠ Incomplete ({total_steps_moved} steps)"
+        return False, "Max iterations", {
             "mode": "max_iterations",
             "total_steps": total_steps_moved,
+            "iterations": max_iters,
         }
     def detect_alignment_roi(self, padding: float = 0.0, min_area_ratio: float = 0.05):
         """
