@@ -16,47 +16,7 @@
             </div>
         </header>
 
-        <!-- Status Panel -->
-        <section class="status-panel">
-            <div class="status-grid">
-                <div class="status-item">
-                    <label>Roll:</label>
-                    <span id="roll-name">Not set</span>
-                </div>
-                <div class="status-item">
-                    <label>Strip:</label>
-                    <span id="strip-count">0</span>
-                </div>
-                <div class="status-item">
-                    <label>Frame:</label>
-                    <span id="frame-count">0</span>
-                </div>
-                <div class="status-item">
-                    <label>Position:</label>
-                    <span id="position">0</span>
-                </div>
-                <div class="status-item">
-                    <label>Mode:</label>
-                    <span id="mode">MANUAL</span>
-                </div>
-                <div class="status-item">
-                    <label>Advance:</label>
-                    <span id="frame-advance">Not set</span>
-                </div>
-            </div>
-            <div class="status-message" id="status-msg">Ready</div>
-        </section>
-
-        <!-- Roll Management -->
-        <section class="panel">
-            <h2>Roll Management</h2>
-            <div class="input-group">
-                <input type="text" id="roll-name-input" placeholder="Enter roll name...">
-                <button class="btn btn-primary" onclick="createRoll()">New Roll</button>
-            </div>
-        </section>
-
-        <!-- Camera Preview -->
+        <!-- Camera Preview (FIRST - most important for alignment) -->
         <section class="panel">
             <h2>Live Preview</h2>
             <p class="help-text">Test still preview or grab a frame from the live video stream. Invert toggle is for viewing only (not used for alignment).</p>
@@ -103,9 +63,40 @@
             </div>
         </section>
 
-        <!-- Motor Controls -->
+        <!-- Camera Controls (SECOND - capture is the main action) -->
         <section class="panel">
-            <h2>Motor Controls</h2>
+            <h2>📸 Capture</h2>
+            <div class="camera-controls">
+                <button class="btn btn-success btn-large btn-capture" onclick="capture()">
+                    📸 CAPTURE
+                </button>
+                <button class="btn btn-secondary btn-large" onclick="triggerAutofocus()">
+                    🔍 Autofocus
+                </button>
+            </div>
+            <div class="control-options">
+                <label id="auto-align-checkbox-wrapper">
+                    <input type="checkbox" id="auto-align-before-capture">
+                    Auto-align before capture
+                </label>
+            </div>
+            <div class="camera-settings">
+                <div class="setting-group inline">
+                    <strong>Aperture:</strong> <span id="cam-aperture">n/a</span>
+                </div>
+                <div class="setting-group inline">
+                    <strong>ISO:</strong> <span id="cam-iso">n/a</span>
+                </div>
+                <div class="setting-group inline">
+                    <strong>Shutter:</strong> <span id="cam-shutter">n/a</span>
+                </div>
+                <button class="btn btn-secondary" onclick="refreshCameraSettings()">Refresh Settings</button>
+            </div>
+        </section>
+
+        <!-- Motor Controls (THIRD - for fine-tuning alignment) -->
+        <section class="panel">
+            <h2>🎛️ Motor Controls</h2>
             <div class="controls-grid">
                 <button class="btn btn-secondary motor-btn" 
                         data-direction="backward" 
@@ -127,65 +118,50 @@
                         data-size="coarse">
                     Coarse Forward ⇨⇨
                 </button>
-                <button class="btn btn-secondary" onclick="backupFrame()">
-                    ↶ Full Frame Back
-                </button>
-                <button class="btn btn-secondary" onclick="advanceFrame()">
-                    Full Frame Forward ↷
-                </button>
             </div>
             <div class="control-options">
+                <button class="btn btn-primary" onclick="autoAlign()" id="auto-align-btn">
+                    🎯 Auto Align
+                </button>
                 <button class="btn btn-secondary" onclick="zeroPosition()">
                     Zero Position
                 </button>
-                <button class="btn btn-primary" onclick="autoAlign()" id="auto-align-btn">
-                    🎯 Auto Align Frame
-                </button>
+            </div>
+            <div class="control-options">
                 <span class="help-text" id="frame-mode-display">Frame: FULL</span>
                 <button class="btn btn-secondary" onclick="setFrameMode('full')">Full</button>
                 <button class="btn btn-secondary" onclick="setFrameMode('half')">Half</button>
             </div>
-            <div class="control-options">
-                <label id="auto-align-checkbox-wrapper">
-                    <input type="checkbox" id="auto-align-before-capture">
-                    Auto-align before capture
-                </label>
-                <div class="help-text" id="auto-align-status">
-                    Auto-align not run yet.
-                </div>
+            <div class="help-text" id="auto-align-status">
+                Auto-align not run yet.
             </div>
         </section>
 
-        <!-- Camera Controls -->
+        <!-- Status Panel -->
+        <section class="status-panel">
+            <div class="status-grid">
+                <div class="status-item">
+                    <label>Roll:</label>
+                    <span id="roll-name">Not set</span>
+                </div>
+                <div class="status-item">
+                    <label>Frame:</label>
+                    <span id="frame-count">0</span>
+                </div>
+                <div class="status-item">
+                    <label>Position:</label>
+                    <span id="position">0</span>
+                </div>
+            </div>
+            <div class="status-message" id="status-msg">Ready</div>
+        </section>
+
+        <!-- Roll Management -->
         <section class="panel">
-            <h2>Camera Controls</h2>
-            <div class="camera-controls">
-                <button class="btn btn-success btn-large btn-capture" onclick="capture()">
-                    📸 CAPTURE
-                </button>
-                <button class="btn btn-secondary btn-large" onclick="triggerAutofocus()">
-                    🔍 Autofocus
-                </button>
-            </div>
-            <div class="control-options">
-                <button class="btn btn-secondary" onclick="toggleMode()">
-                    Mode: <span id="mode-display">MANUAL</span>
-                </button>
-                <button class="btn btn-secondary" onclick="toggleAutoAdvance()">
-                    Auto-Advance: <span id="auto-advance">ON</span>
-                </button>
-            </div>
-            <div class="camera-settings">
-                <div class="setting-group inline">
-                    <strong>Aperture:</strong> <span id="cam-aperture">n/a</span>
-                </div>
-                <div class="setting-group inline">
-                    <strong>ISO:</strong> <span id="cam-iso">n/a</span>
-                </div>
-                <div class="setting-group inline">
-                    <strong>Shutter:</strong> <span id="cam-shutter">n/a</span>
-                </div>
-                <button class="btn btn-secondary" onclick="refreshCameraSettings()">Refresh Settings</button>
+            <h2>Roll Management</h2>
+            <div class="input-group">
+                <input type="text" id="roll-name-input" placeholder="Enter roll name...">
+                <button class="btn btn-primary" onclick="createRoll()">New Roll</button>
             </div>
         </section>
 

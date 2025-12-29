@@ -48,12 +48,8 @@ function updateUI(status) {
     
     // Status values
     document.getElementById('roll-name').textContent = status.roll_name || 'Not set';
-    document.getElementById('strip-count').textContent = status.strip_count;
     document.getElementById('frame-count').textContent = status.frame_count;
     document.getElementById('position').textContent = status.position;
-    document.getElementById('mode').textContent = status.mode.toUpperCase();
-    document.getElementById('frame-advance').textContent = 
-        status.frame_advance ? `${status.frame_advance} steps` : 'Not set';
     document.getElementById('status-msg').textContent = status.status_msg;
     const alignModeEl = document.getElementById('alignment-mode-display');
     if (alignModeEl && status.alignment_mode) {
@@ -79,24 +75,25 @@ function updateUI(status) {
         }
     }
     
-    // Mode and auto-advance displays
-    document.getElementById('mode-display').textContent = status.mode.toUpperCase();
-    document.getElementById('auto-advance').textContent = status.auto_advance ? 'ON' : 'OFF';
-    
-    // Show/hide calibration panel based on strip count and alignment mode
-    // In "stream" (auto-align) mode, calibration is NOT required
-    const needsCalibration = status.strip_count === 0 && status.roll_name && status.alignment_mode !== 'stream';
-    
-    if (needsCalibration) {
-        document.getElementById('calibration-panel').style.display = 'block';
-        document.getElementById('strip-panel').style.display = 'none';
-    } else if (status.strip_count > 0 || (status.roll_name && status.alignment_mode === 'stream')) {
-        // Show strip panel if calibrated OR if using auto-align mode
+    // Show/hide calibration and strip panels based on alignment mode
+    // In "stream" (auto-align) mode, hide both - no calibration or strip management needed
+    if (isStreamMode) {
+        // Auto-align mode: hide calibration and strip management entirely
         document.getElementById('calibration-panel').style.display = 'none';
-        document.getElementById('strip-panel').style.display = 'block';
+        document.getElementById('strip-panel').style.display = 'none';
     } else {
-        document.getElementById('calibration-panel').style.display = 'none';
-        document.getElementById('strip-panel').style.display = 'none';
+        // Calibration mode: show appropriate panel
+        const needsCalibration = status.strip_count === 0 && status.roll_name;
+        if (needsCalibration) {
+            document.getElementById('calibration-panel').style.display = 'block';
+            document.getElementById('strip-panel').style.display = 'none';
+        } else if (status.strip_count > 0) {
+            document.getElementById('calibration-panel').style.display = 'none';
+            document.getElementById('strip-panel').style.display = 'block';
+        } else {
+            document.getElementById('calibration-panel').style.display = 'none';
+            document.getElementById('strip-panel').style.display = 'none';
+        }
     }
 }
 
@@ -263,14 +260,6 @@ async function backupFrame() {
     if (!result.success) {
         alert('Cannot backup frame. Calibrate first.');
     }
-}
-
-async function toggleMode() {
-    await apiCall('toggle_mode');
-}
-
-async function toggleAutoAdvance() {
-    await apiCall('toggle_auto_advance');
 }
 
 async function zeroPosition() {
@@ -743,16 +732,6 @@ document.addEventListener('keydown', (e) => {
             e.preventDefault();
             moveMotor('forward', e.shiftKey ? 'coarse' : 'fine');
             break;
-        case 'a':
-        case 'A':
-            e.preventDefault();
-            toggleAutoAdvance();
-            break;
-        case 'm':
-        case 'M':
-            e.preventDefault();
-            toggleMode();
-            break;
         case 'p':
         case 'P':
             e.preventDefault();
@@ -769,7 +748,6 @@ setInterval(() => {
 // Initial status request
 window.addEventListener('load', () => {
     socket.emit('request_status');
-    loadAlignmentConfig();
     // Best-effort fetch camera settings on load (non-blocking)
     refreshCameraSettings();
     fetchLogs();
@@ -822,18 +800,5 @@ document.addEventListener('DOMContentLoaded', () => {
     
     document.addEventListener('touchend', () => {
         stopMotorHold();
-    });
-
-    // Track user edits on alignment inputs to avoid overwriting while typing
-    const alignInputs = ['align-x0', 'align-x1', 'align-y0', 'align-y1', 'align-min-confidence']
-        .map(id => document.getElementById(id))
-        .filter(Boolean);
-    alignInputs.forEach(input => {
-        input.addEventListener('input', () => {
-            alignmentInputEdits[input.id] = Date.now();
-        });
-        input.addEventListener('focus', () => {
-            alignmentInputEdits[input.id] = Date.now();
-        });
     });
 });
