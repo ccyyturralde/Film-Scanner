@@ -38,7 +38,16 @@ import glob
 import io
 from pathlib import Path
 from config_manager import ConfigManager
-from frame_detector import detect_frame_gap, detect_bright_region_roi
+from frame_detector import (
+    detect_frame_gap,
+    detect_bright_region_roi,
+    compute_column_stats,
+    compute_vertical_continuity,
+    find_gap_candidates_brightness,
+    find_gap_regions,
+    detect_vertical_edges,
+    _to_python_type,
+)
 import cv2
 import numpy as np
 try:
@@ -1048,7 +1057,7 @@ class FilmScanner:
     def auto_align(self, max_iters=5, stop_px=6, max_step=600, min_step=8, prefer_forward=True):
         """
         Auto alignment using capture card for preview frames.
-        Uses column-statistics approach to find gaps between film frames.
+        Uses combined brightness and edge detection to find gaps between film frames.
         
         Full frame mode: Move until no gap is visible (gap pushed to edge)
         Half frame mode: Move until gap is centered (for capturing two half-frames)
@@ -1066,16 +1075,17 @@ class FilmScanner:
         self.log(f"▶ Auto-align [{self.frame_mode}]: Got {len(frame_bytes)} bytes (stream={used_stream})")
 
         try:
-            # Use more lenient thresholds for capture card feed
-            # which may have different characteristics than DSLR samples
+            # Use robust detection with combined brightness + edge analysis
             result = detect_frame_gap(
                 frame_bytes,
                 roi=None,  # Use full frame
                 expected_gap_fraction=None,  # Search everywhere
                 gap_window_fraction=1.0,     # Wide search
-                brightness_threshold=0.25,   # More lenient (was 0.3)
-                std_threshold=0.25,          # More lenient (was 0.20)
-                min_gap_width=2,             # Smaller gaps OK (was 3)
+                mean_threshold=0.65,         # Brightness threshold (relative to max)
+                std_threshold=0.15,          # Uniformity threshold
+                min_gap_width=8,             # Minimum gap width
+                max_gap_width=250,           # Maximum gap width  
+                use_edge_detection=True,     # Use edge detection for confirmation
             )
         except Exception as e:
             self.log(f"✗ Auto-align detection error: {e}")
@@ -1088,29 +1098,23 @@ class FilmScanner:
             }
 
         # Update internal alignment metrics
-        self.alignment_confidence = result.confidence
-        self.last_gap_px = result.gap_x
+        self.alignment_confidence = float(result.confidence) if result.confidence else 0.0
+        self.last_gap_px = int(result.gap_x) if result.gap_x else None
 
-        # Include debug info in response
-        # Convert numpy types to native Python types for JSON serialization
+        # Get debug info (already converted to native Python types by detector)
         debug = result.debug_info or {}
         gap_count = int(debug.get("gap_count", 0))
         
-        # Helper to convert numpy types
-        def to_native(v):
-            if hasattr(v, 'item'):
-                return v.item()  # numpy scalar to Python
-            return v
-        
-        info = {
-            "offset_px": int(result.offset_px) if result.offset_px is not None else 0,
-            "confidence": float(result.confidence) if result.confidence is not None else 0.0,
-            "gap_x": int(result.gap_x) if result.gap_x is not None else None,
+        # Build info dict using the to_dict method which handles type conversion
+        info = _to_python_type({
+            "offset_px": result.offset_px,
+            "confidence": result.confidence,
+            "gap_x": result.gap_x,
             "polarity": result.polarity,
             "frame_mode": self.frame_mode,
             "gap_count": gap_count,
-            "debug": {k: to_native(v) if not isinstance(v, dict) else v for k, v in debug.items()},
-        }
+            "debug": debug,
+        })
 
         self.log(f"▶ Detection [{self.frame_mode}]: {gap_count} gaps, gap_x={result.gap_x}, conf={result.confidence:.3f}")
         if debug:
@@ -1905,8 +1909,6 @@ def capture_card_diagnostic_route():
     Diagnostic endpoint to test capture card and gap detection.
     Returns detailed info about what the detector sees.
     """
-    from frame_detector import compute_column_stats, find_gap_mask, find_gap_regions
-    
     result = {
         'success': False,
         'capture_card': {
@@ -1931,43 +1933,54 @@ def capture_card_diagnostic_route():
             arr = np.frombuffer(frame_bytes, dtype=np.uint8)
             img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
             if img is not None:
-                result['frame']['width'] = img.shape[1]
-                result['frame']['height'] = img.shape[0]
+                result['frame']['width'] = int(img.shape[1])
+                result['frame']['height'] = int(img.shape[0])
                 
                 # Convert to grayscale and compute stats
                 gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                gray = cv2.medianBlur(gray, 5)
-                stats = compute_column_stats(gray)
+                gray_blurred = cv2.medianBlur(gray, 5)
+                stats = compute_column_stats(gray_blurred)
+                
+                # Compute edge strength
+                edge_strength = detect_vertical_edges(gray)
                 
                 result['detection'] = {
-                    'brightness_min': float(stats['col_min'].min()),
-                    'brightness_max': float(stats['col_min'].max()),
+                    'brightness_min': float(stats['col_mean'].min()),
+                    'brightness_max': float(stats['col_mean'].max()),
                     'brightness_mean': float(stats['col_mean'].mean()),
                     'std_min': float(stats['col_std'].min()),
                     'std_max': float(stats['col_std'].max()),
-                    'diff_min': float(stats['col_diff'].min()),
-                    'diff_max': float(stats['col_diff'].max()),
+                    'uniformity_max': float(stats['col_uniformity'].max()),
+                    'edge_strength_max': float(edge_strength.max()),
+                    'edge_strength_mean': float(edge_strength.mean()),
                 }
                 
                 # Test gap detection with various thresholds
-                for thresh in [0.3, 0.4, 0.5]:
-                    gap_mask = find_gap_mask(stats, brightness_threshold=thresh)
-                    regions = find_gap_regions(gap_mask, min_width=3)
+                for thresh in [0.60, 0.70, 0.80]:
+                    gap_mask = find_gap_candidates_brightness(stats, mean_threshold=thresh, std_threshold=0.12)
+                    regions = find_gap_regions(gap_mask, min_width=8, max_width=250, stats=stats, edge_strength=edge_strength)
                     result['detection'][f'gaps_at_{thresh}'] = len(regions)
                     if regions:
-                        result['detection'][f'gap_widths_at_{thresh}'] = [r.width for r in regions[:5]]
+                        result['detection'][f'gap_widths_at_{thresh}'] = [int(r.width) for r in regions[:5]]
                 
-                # Include preview image with detected gaps overlaid
-                gap_mask = find_gap_mask(stats, brightness_threshold=0.3, std_threshold=0.20, diff_threshold=0.40)
-                regions = find_gap_regions(gap_mask, min_width=3)
+                # Use default detection for visualization
+                gap_mask = find_gap_candidates_brightness(stats, mean_threshold=0.70, std_threshold=0.12)
+                regions = find_gap_regions(gap_mask, min_width=8, max_width=250, stats=stats, edge_strength=edge_strength)
                 
                 # Draw gap regions on image
                 for region in regions:
-                    cv2.rectangle(img, (region.start_x, 0), (region.end_x, img.shape[0]), (0, 255, 0), 2)
+                    cv2.rectangle(img, (region.start_x, 0), (region.end_x, img.shape[0]), (0, 255, 0), 3)
+                    # Draw center of gap
+                    cx = (region.start_x + region.end_x) // 2
+                    cv2.line(img, (cx, 0), (cx, img.shape[0]), (0, 255, 255), 1)
                 
                 # Draw center line
                 center = img.shape[1] // 2
                 cv2.line(img, (center, 0), (center, img.shape[0]), (255, 0, 0), 2)
+                
+                # Add text info
+                cv2.putText(img, f"Gaps: {len(regions)}", (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
                 
                 success, buf = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
                 if success:
