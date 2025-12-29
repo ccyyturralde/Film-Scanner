@@ -1230,30 +1230,17 @@ class FilmScanner:
                     
                     self.log(f"   Best gap at {gap_fraction:.1%} (x={gap_center:.0f}, width={gap_width}, score={best_gap['score']:.3f})")
                     
-                    # Determine direction based on gap position
-                    # If gap is on right side (>50%), move FORWARD to push it out right
-                    # If gap is on left side (<50%), move BACKWARD to push it out left
-                    if gap_fraction > 0.5:
-                        # Gap on RIGHT - move FORWARD
-                        distance_to_edge = w - best_gap["end"]
-                        steps = max(30, min(200, int((distance_to_edge + gap_width) / 2)))
-                        direction = "FORWARD"
-                        cmd = f"H{steps}"
-                        self.log(f"   Gap on RIGHT ({gap_fraction:.0%}) -> moving FORWARD {steps} steps")
-                    else:
-                        # Gap on LEFT - move BACKWARD
-                        distance_to_edge = best_gap["start"]
-                        steps = max(30, min(200, int((distance_to_edge + gap_width) / 2)))
-                        direction = "BACKWARD"
-                        cmd = f"h{steps}"
-                        self.log(f"   Gap on LEFT ({gap_fraction:.0%}) -> moving BACKWARD {steps} steps")
+                    # ALWAYS move FORWARD - prevents going back to previous frame
+                    distance_to_right = w - best_gap["end"]
+                    steps = max(15, min(60, int((distance_to_right + gap_width) / 3)))
+                    self.log(f"   Gap at {gap_fraction:.0%} -> FORWARD {steps} steps")
                     
-                    # Execute move
-                    moved = self.send(cmd, update_position=False)
+                    # Execute move (always forward)
+                    moved = self.send(f"H{steps}", update_position=False)
                     if not moved:
                         return False, "Motor failed", {"mode": "error", "total_steps": total_steps, "confidence": 0}
                     
-                    total_steps += steps if direction == "FORWARD" else -steps
+                    total_steps += steps
                     
                     # Wait for motor to complete
                     time.sleep(0.3 + steps * 0.003)
@@ -1636,9 +1623,15 @@ class FilmScanner:
                     self.log(f"   [{iteration+1}] Gap at {gap_fraction:.1%} (width={best_gap['width']})")
                     
                     if self.frame_mode == "full":
-                        # FULL FRAME: push gap out left edge, always move forward
-                        steps = max(40, min(200, int((best_gap["center"] + best_gap["width"]) / 2)))
-                        self.log(f"   Moving FORWARD {steps} steps to push gap out left")
+                        # FULL FRAME: push gap out left edge with SMALL steps
+                        gap_x_fraction = best_gap["start"] / w
+                        if gap_x_fraction < 0.05:
+                            steps = 8   # Almost out - tiny push
+                        elif gap_x_fraction < 0.15:
+                            steps = 15  # Near left edge - small push
+                        else:
+                            steps = min(35, max(20, int(best_gap["start"] / 5)))
+                        self.log(f"   Moving FORWARD {steps} steps")
                         self.send(f"H{steps}", update_position=False)
                         total_steps_moved += steps
                     else:
