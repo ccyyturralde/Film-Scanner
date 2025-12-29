@@ -1263,6 +1263,7 @@ class FilmScanner:
             # === FINAL EDGE FINE-TUNE (BOTH SIDES) ===
             # After main alignment, check BOTH left and right edges
             # and push out any remaining gaps
+            # IMPORTANT: Check edges of the FILM area, not the total image (which has black borders)
             self.log(f"   Final edge fine-tune (both sides)...")
             
             for fine_attempt in range(5):  # More attempts since checking both sides
@@ -1281,20 +1282,28 @@ class FilmScanner:
                     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
                     h, w = gray.shape
                     
-                    y_start = int(h * 0.15)
-                    y_end = int(h * 0.85)
+                    # Use the alignment ROI to find the FILM area (not the black borders)
+                    roi = self.alignment_roi or {"x0": 0.1, "x1": 0.9, "y0": 0.1, "y1": 0.9}
+                    film_x0 = int(w * roi.get("x0", 0.1))
+                    film_x1 = int(w * roi.get("x1", 0.9))
+                    film_y0 = int(h * roi.get("y0", 0.1))
+                    film_y1 = int(h * roi.get("y1", 0.9))
                     
-                    # Check LEFT edge (first 12%)
-                    left_edge_end = int(w * 0.12)
-                    left_region = gray[y_start:y_end, 0:left_edge_end]
+                    # Crop to just the film area
+                    film_region = gray[film_y0:film_y1, film_x0:film_x1]
+                    film_h, film_w = film_region.shape
+                    
+                    # Check LEFT edge of FILM (first 15%)
+                    left_edge_end = int(film_w * 0.15)
+                    left_region = film_region[:, 0:left_edge_end]
                     left_col_mean = left_region.mean(axis=0) / 255.0
                     left_col_std = left_region.std(axis=0) / 255.0
                     left_gap_mask = (left_col_mean > 0.55) & (left_col_std < 0.10)
                     left_gap_width = left_gap_mask.sum()
                     
-                    # Check RIGHT edge (last 12%)
-                    right_edge_start = int(w * 0.88)
-                    right_region = gray[y_start:y_end, right_edge_start:]
+                    # Check RIGHT edge of FILM (last 15%)
+                    right_edge_start = int(film_w * 0.85)
+                    right_region = film_region[:, right_edge_start:]
                     right_col_mean = right_region.mean(axis=0) / 255.0
                     right_col_std = right_region.std(axis=0) / 255.0
                     right_gap_mask = (right_col_mean > 0.55) & (right_col_std < 0.10)
