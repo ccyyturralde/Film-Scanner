@@ -1075,7 +1075,7 @@ class FilmScanner:
         frame_bytes, _ = self.get_alignment_frame(timeout=1.0)
         if not frame_bytes:
             self.log("✗ No frame from capture card")
-            return False, "No frame", {"mode": "error", "total_steps": 0}
+            return False, "No frame", {"mode": "error", "total_steps": 0, "confidence": 0}
 
         try:
             result = detect_frame_gap(
@@ -1091,7 +1091,7 @@ class FilmScanner:
             )
         except Exception as e:
             self.log(f"✗ Detection error: {e}")
-            return False, f"Detection error: {e}", {"mode": "error", "total_steps": 0}
+            return False, f"Detection error: {e}", {"mode": "error", "total_steps": 0, "confidence": 0}
 
         debug = result.debug_info or {}
         gap_count = int(debug.get("gap_count", 0))
@@ -1117,10 +1117,11 @@ class FilmScanner:
                     "mode": "aligned",
                     "total_steps": 0,
                     "gap_detected": False,
+                    "confidence": confidence,
                 }
             
             if not result.gap_x:
-                return False, "Gap detected but no position", {"mode": "error", "total_steps": 0}
+                return False, "Gap detected but no position", {"mode": "error", "total_steps": 0, "confidence": confidence}
             
             # Calculate gap position
             gap_local = result.gap_x - lit_x0
@@ -1156,7 +1157,7 @@ class FilmScanner:
             moved = self.send(cmd, update_position=False)
             
             if not moved:
-                return False, "Motor failed", {"mode": "error", "steps": steps, "total_steps": 0}
+                return False, "Motor failed", {"mode": "error", "steps": steps, "total_steps": 0, "confidence": confidence}
             
             # Wait for motor to finish
             time.sleep(0.3 + abs(steps) * 0.002)  # Base delay + time per step
@@ -1189,6 +1190,7 @@ class FilmScanner:
                 "total_steps": steps,
                 "gap_fraction": gap_fraction,
                 "final_gap_count": final_gap_count,
+                "confidence": self.alignment_confidence,
             }
 
         # === HALF FRAME MODE ===
@@ -1201,6 +1203,7 @@ class FilmScanner:
                 return False, "No gap found - moved forward to search", {
                     "mode": "searching",
                     "total_steps": 100,
+                    "confidence": confidence,
                 }
             
             # Gap found - calculate move to center it
@@ -1213,6 +1216,7 @@ class FilmScanner:
                     "mode": "aligned",
                     "total_steps": 0,
                     "offset_px": offset_px,
+                    "confidence": confidence,
                 }
             
             # Calculate centering move
@@ -1235,6 +1239,7 @@ class FilmScanner:
                 "mode": "centered",
                 "total_steps": steps,
                 "offset_px": offset_px,
+                "confidence": self.alignment_confidence,
             }
     
     def advance_and_align(self, max_iters=30):
