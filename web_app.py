@@ -1638,14 +1638,15 @@ class FilmScanner:
                         self.send(f"H{steps}", update_position=False)
                         total_steps_moved += steps
                     else:
-                        # HALF FRAME: center the gap
+                        # HALF FRAME: center the gap in the middle
+                        # Prioritize FORWARD movement, only go backward for fine adjustment
                         frame_center = w / 2
                         offset = best_gap["center"] - frame_center
                         
-                        if abs(offset) <= w * 0.10:  # Within 10% of center = good enough
+                        if abs(offset) <= w * 0.08:  # Within 8% of center = good enough
                             # Check no gaps on edges
-                            left_edge = int(w * 0.15)
-                            right_edge = int(w * 0.85)
+                            left_edge = int(w * 0.12)
+                            right_edge = int(w * 0.88)
                             has_left = any(g["center"] < left_edge for g in gap_regions)
                             has_right = any(g["center"] > right_edge for g in gap_regions)
                             
@@ -1658,16 +1659,17 @@ class FilmScanner:
                                     "iterations": iteration + 1,
                                 }
                         
-                        # Move to center gap
+                        # Move to center gap - PREFER FORWARD, backward only for fine correction
                         if offset > 0:
-                            # Gap right of center - move backward
-                            steps = max(20, min(100, int(abs(offset) / 2)))
-                            self.log(f"   Gap right of center -> BACKWARD {steps}")
+                            # Gap right of center - need to move backward (fine adjustment only)
+                            # Only small backward moves allowed
+                            steps = max(15, min(40, int(abs(offset) / 3)))
+                            self.log(f"   Gap right of center -> fine BACKWARD {steps}")
                             self.send(f"h{steps}", update_position=False)
                             total_steps_moved -= steps
                         else:
-                            # Gap left of center - move forward
-                            steps = max(20, min(100, int(abs(offset) / 2)))
+                            # Gap left of center - move forward (preferred direction)
+                            steps = max(30, min(120, int(abs(offset) / 2)))
                             self.log(f"   Gap left of center -> FORWARD {steps}")
                             self.send(f"H{steps}", update_position=False)
                             total_steps_moved += steps
@@ -2140,7 +2142,17 @@ def test_capture():
         return jsonify({'success': False, 'message': str(e)})
 @app.route('/api/capture', methods=['POST'])
 def capture():
-    """Capture image"""
+    """
+    Capture image and auto-advance to next frame.
+    
+    In STREAM (auto-align) mode:
+    - Captures the current frame
+    - Automatically advances and aligns to next frame using advance_and_align
+    - ONLY moves FORWARD (right), with backward only for fine overshoot correction
+    
+    In CALIBRATION mode:
+    - Uses fixed frame_advance distance
+    """
     data = request.json or {}
     auto_align_before = data.get('auto_align', False)
 
@@ -2150,20 +2162,18 @@ def capture():
     if not scanner.check_camera():
         return jsonify({'success': False, 'message': 'Camera not connected'})
     
-    if auto_align_before:
-        if scanner.alignment_mode != "stream":
-            scanner.status_msg = "Skipping auto-align (calibration mode)"
+    # Optional pre-capture fine-tune (only does minor adjustments if gap visible on edge)
+    if auto_align_before and scanner.alignment_mode == "stream":
+        try:
+            # Only do edge fine-tune, not full realignment
+            scanner.log("Pre-capture edge check...")
+            success, msg, info = scanner.auto_align()
             scanner.broadcast_status()
-        else:
-            try:
-                success, msg, info = scanner.auto_align()
-                scanner.broadcast_status()
-                if not success:
-                    return jsonify({'success': False, 'message': f'Auto-align failed: {msg}', 'info': info})
-            except Exception as e:
-                scanner.status_msg = "✗ Auto-align error"
-                scanner.broadcast_status()
-                return jsonify({'success': False, 'message': f'Auto-align error: {str(e)}'})
+            if not success:
+                scanner.log(f"Pre-capture align note: {msg}")
+                # Don't fail capture if pre-align has issues - just log it
+        except Exception as e:
+            scanner.log(f"Pre-capture align error: {e}")
 
     scanner.status_msg = "Capturing..."
     scanner.broadcast_status()
@@ -2171,24 +2181,35 @@ def capture():
     success = scanner.capture_image()
     
     if success:
-        scanner.status_msg = f"✓ Frame {scanner.frame_count} (Strip {scanner.strip_count})"
+        scanner.status_msg = f"✓ Frame {scanner.frame_count}"
+        scanner.broadcast_status()
         
-        # Auto-advance AFTER capture (for calibrated mode)
-        # Advances to next frame position so user is ready for next capture
-        # Uses appropriate advance based on frame_mode (full or half)
-        advance = None
-        if scanner.mode == 'calibrated' and scanner.auto_advance:
+        # Auto-advance AFTER capture
+        if scanner.alignment_mode == "stream":
+            # STREAM MODE: Use advance_and_align (always moves FORWARD/right)
+            time.sleep(0.3)  # Brief pause before advancing
+            try:
+                adv_success, adv_msg, adv_info = scanner.advance_and_align()
+                if adv_success:
+                    scanner.status_msg = f"✓ Frame {scanner.frame_count} → Ready for next"
+                else:
+                    scanner.status_msg = f"✓ Frame {scanner.frame_count} (advance: {adv_msg})"
+            except Exception as e:
+                scanner.log(f"Advance error: {e}")
+                scanner.status_msg = f"✓ Frame {scanner.frame_count} (advance failed)"
+        elif scanner.mode == 'calibrated' and scanner.auto_advance:
+            # CALIBRATION MODE: Use fixed frame_advance distance
             if scanner.frame_mode == "half":
                 advance = scanner.half_frame_advance or scanner.frame_advance
             else:
                 advance = scanner.frame_advance
-        
-        if advance:
-            time.sleep(0.3)  # Brief pause before advancing
-            if scanner.send(f'H{advance}'):
-                scanner.status_msg = f"✓ Frame {scanner.frame_count} → Ready for next"
-            else:
-                scanner.status_msg = f"✓ Frame {scanner.frame_count} (advance failed)"
+            
+            if advance:
+                time.sleep(0.3)
+                if scanner.send(f'H{advance}'):
+                    scanner.status_msg = f"✓ Frame {scanner.frame_count} → Ready for next"
+                else:
+                    scanner.status_msg = f"✓ Frame {scanner.frame_count} (advance failed)"
     else:
         scanner.status_msg = "❌ Capture failed!"
     
