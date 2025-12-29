@@ -1072,10 +1072,12 @@ class FilmScanner:
         self.log(f"▶ Auto-align [{self.frame_mode}] starting...")
         
         # Get frame
-        frame_bytes, _ = self.get_alignment_frame(timeout=1.0)
+        frame_bytes, stream_used = self.get_alignment_frame(timeout=1.0)
         if not frame_bytes:
             self.log("✗ No frame from capture card")
             return False, "No frame", {"mode": "error", "total_steps": 0, "confidence": 0}
+        
+        self.log(f"   Got frame: {len(frame_bytes)} bytes (stream={stream_used})")
 
         try:
             result = detect_frame_gap(
@@ -1112,12 +1114,13 @@ class FilmScanner:
             # No gap detected = already aligned!
             if gap_count == 0 or confidence < 0.15:
                 self.status_msg = "✓ Aligned"
-                self.log(f"✓ Already aligned (no gap detected)")
+                self.log(f"✓ Already aligned (gap_count={gap_count}, confidence={confidence:.2f})")
                 return True, "Already aligned", {
                     "mode": "aligned",
                     "total_steps": 0,
                     "gap_detected": False,
                     "confidence": confidence,
+                    "debug": debug,  # Include detection debug info
                 }
             
             if not result.gap_x:
