@@ -1260,14 +1260,81 @@ class FilmScanner:
                     traceback.print_exc()
                     continue
             
-            # Max attempts reached
+            # === FINAL RIGHT-EDGE FINE-TUNE ===
+            # After main alignment, do a hyper-focused check on the right edge
+            # to push out any remaining gap
+            self.log(f"   Final right-edge fine-tune check...")
+            
+            for fine_attempt in range(3):
+                time.sleep(0.25)
+                fine_frame, _ = self.get_alignment_frame(timeout=0.8)
+                if not fine_frame:
+                    continue
+                
+                try:
+                    import numpy as np
+                    import cv2
+                    nparr = np.frombuffer(fine_frame, np.uint8)
+                    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                    if img is None:
+                        continue
+                    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                    h, w = gray.shape
+                    
+                    # Focus on just the RIGHT 12% of the frame
+                    right_edge_start = int(w * 0.88)
+                    y_start = int(h * 0.15)
+                    y_end = int(h * 0.85)
+                    right_region = gray[y_start:y_end, right_edge_start:]
+                    
+                    # Check for uniform bright stripe
+                    col_mean = right_region.mean(axis=0) / 255.0
+                    col_std = right_region.std(axis=0) / 255.0
+                    
+                    # Even stricter for fine-tuning: very bright AND very uniform
+                    gap_mask = (col_mean > 0.55) & (col_std < 0.10)
+                    gap_width = gap_mask.sum()
+                    
+                    if gap_width >= 5:  # Any gap visible on right edge
+                        # Calculate how far the gap extends from the right edge
+                        # Find where gap starts (first True from right)
+                        gap_cols = np.where(gap_mask)[0]
+                        if len(gap_cols) > 0:
+                            leftmost_gap_col = gap_cols.min()
+                            gap_extent = len(col_mean) - leftmost_gap_col  # How many cols of gap
+                            
+                            # Fine-tune: small forward movement to push it out
+                            fine_steps = max(15, min(60, int(gap_extent * 1.2)))
+                            self.log(f"   [Fine {fine_attempt+1}] Right edge gap: {gap_width}px wide, pushing FORWARD {fine_steps}")
+                            
+                            self.send(f"H{fine_steps}", update_position=False)
+                            total_steps += fine_steps
+                            time.sleep(0.2 + fine_steps * 0.003)
+                    else:
+                        # No gap on right edge - we're done!
+                        self.log(f"   [Fine {fine_attempt+1}] Right edge clear!")
+                        self.status_msg = "✓ Aligned"
+                        self.alignment_confidence = 1.0
+                        return True, "Aligned", {
+                            "mode": "aligned",
+                            "total_steps": total_steps,
+                            "attempts": max_attempts,
+                            "fine_tune_attempts": fine_attempt + 1,
+                            "confidence": 1.0,
+                        }
+                        
+                except Exception as e:
+                    self.log(f"   Fine-tune error: {e}")
+                    continue
+            
+            # If we get here, fine-tuning didn't fully clear the right edge
             self.status_msg = "⚠ May need adjustment"
-            self.log(f"   Max attempts reached, {total_steps} total steps")
-            return True, "Moved - may need fine-tuning", {
+            self.log(f"   Alignment complete, {total_steps} total steps (right edge may have residual)")
+            return True, "Aligned (check right edge)", {
                 "mode": "moved",
                 "total_steps": total_steps,
                 "attempts": max_attempts,
-                "confidence": 0.5,
+                "confidence": 0.8,
             }
 
         # === HALF FRAME MODE ===
