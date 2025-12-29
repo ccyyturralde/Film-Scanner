@@ -514,8 +514,12 @@ class FilmScanner:
 
     def get_alignment_frame(self, timeout: float = 1.0) -> Tuple[Optional[bytes], bool]:
         """
-        Get frame from capture card for alignment.
+        Get RAW frame from capture card for alignment.
         Returns (frame_bytes, used_stream_flag).
+        
+        NOTE: This always returns the original, non-inverted frame.
+        The 'invert' setting in the UI is for viewing only and does
+        NOT affect alignment detection.
         """
         # Try live stream first
         if self.ensure_preview_stream():
@@ -1292,14 +1296,14 @@ class FilmScanner:
                     if roi and roi.get("x0") and roi.get("x1"):
                         film_x0 = int(w * roi["x0"])
                         film_x1 = int(w * roi["x1"])
-                    else:
+        else:
                         # Dynamic detection: find bright region
                         col_brightness = gray.mean(axis=0) / 255.0
                         bright_cols = np.where(col_brightness > 0.15)[0]
                         if len(bright_cols) > 0:
                             film_x0 = bright_cols[0]
                             film_x1 = bright_cols[-1]
-                        else:
+                else:
                             film_x0 = int(w * 0.1)
                             film_x1 = int(w * 0.9)
                     
@@ -1330,7 +1334,7 @@ class FilmScanner:
                     
                     # Both edges clear = ALIGNED!
                     if left_gap_width < 4 and right_gap_width < 4:
-                        self.status_msg = "✓ Aligned"
+            self.status_msg = "✓ Aligned"
                         self.log(f"   ✓ Both edges clear! Total: {total_steps} steps")
                         self.alignment_confidence = 1.0
                         return True, "Aligned", {
@@ -1390,7 +1394,7 @@ class FilmScanner:
             }
 
         # === HALF FRAME MODE - CENTER THE GAP ===
-        else:
+            else:
             # Half frame: need gap in the MIDDLE, no gaps on edges
             # Use same strict detection as full frame mode
             
@@ -1519,7 +1523,7 @@ class FilmScanner:
                         direction = "BACKWARD"
                         cmd = f"h{steps}"
                         self.log(f"   Gap right of center -> moving BACKWARD {steps} steps")
-                    else:
+        else:
                         # Gap is LEFT of center - move FORWARD to shift gap right
                         steps = max(20, min(150, int(abs(offset_px) / 2)))
                         direction = "FORWARD"
@@ -1528,7 +1532,7 @@ class FilmScanner:
                     
                     # Execute move
                     moved = self.send(cmd, update_position=False)
-                    if not moved:
+        if not moved:
                         return False, "Motor failed", {"mode": "error", "total_steps": total_steps, "confidence": 0}
                     
                     total_steps += steps if direction == "FORWARD" else -steps
@@ -2217,12 +2221,12 @@ def capture():
         try:
             # Only do edge fine-tune, not full realignment
             scanner.log("Pre-capture edge check...")
-            success, msg, info = scanner.auto_align()
-            scanner.broadcast_status()
-            if not success:
+                success, msg, info = scanner.auto_align()
+                scanner.broadcast_status()
+                if not success:
                 scanner.log(f"Pre-capture align note: {msg}")
                 # Don't fail capture if pre-align has issues - just log it
-        except Exception as e:
+            except Exception as e:
             scanner.log(f"Pre-capture align error: {e}")
 
     scanner.status_msg = "Capturing..."
@@ -2253,13 +2257,13 @@ def capture():
                 advance = scanner.half_frame_advance or scanner.frame_advance
             else:
                 advance = scanner.frame_advance
-            
-            if advance:
+        
+        if advance:
                 time.sleep(0.3)
-                if scanner.send(f'H{advance}'):
-                    scanner.status_msg = f"✓ Frame {scanner.frame_count} → Ready for next"
-                else:
-                    scanner.status_msg = f"✓ Frame {scanner.frame_count} (advance failed)"
+            if scanner.send(f'H{advance}'):
+                scanner.status_msg = f"✓ Frame {scanner.frame_count} → Ready for next"
+            else:
+                scanner.status_msg = f"✓ Frame {scanner.frame_count} (advance failed)"
     else:
         scanner.status_msg = "❌ Capture failed!"
     
