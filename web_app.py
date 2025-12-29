@@ -1114,9 +1114,11 @@ class FilmScanner:
 
         # === FULL FRAME MODE - STRICT SINGLE-GAP DETECTION ===
         if self.frame_mode == "full":
-            # IMPORTANT: Auto-detect film area from the frame
-            # The film area is the bright rectangle; the edges are black borders/mask
-            # This handles varying mask positions between scanner setups
+            # Scan entire frame but be VERY strict about what qualifies as a gap:
+            # - Must be in the TOP 20% of brightness (gaps are the brightest thing)
+            # - Must have very low std (< 0.08) - gaps are perfectly uniform
+            # - Must be at least 8 pixels wide (consecutive)
+            # Find the SINGLE best gap and move based on its position
             
             total_steps = 0
             max_attempts = 5
@@ -1141,40 +1143,21 @@ class FilmScanner:
                     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
                     h, w = gray.shape
                     
-                    # ===== AUTO-DETECT FILM AREA =====
-                    # Use alignment_roi if set, otherwise detect dynamically
-                    roi = self.alignment_roi
-                    if roi and roi.get("x0") and roi.get("x1"):
-                        film_x0 = int(w * roi["x0"])
-                        film_x1 = int(w * roi["x1"])
-                        film_y0 = int(h * roi.get("y0", 0.15))
-                        film_y1 = int(h * roi.get("y1", 0.85))
-                    else:
-                        # Dynamic detection: find bright region by scanning columns
-                        col_brightness = gray.mean(axis=0) / 255.0
-                        bright_threshold = 0.15  # Columns brighter than this are "film"
-                        bright_cols = np.where(col_brightness > bright_threshold)[0]
-                        if len(bright_cols) > 0:
-                            film_x0 = bright_cols[0]
-                            film_x1 = bright_cols[-1]
-                        else:
-                            film_x0 = int(w * 0.1)
-                            film_x1 = int(w * 0.9)
-                        film_y0 = int(h * 0.15)
-                        film_y1 = int(h * 0.85)
+                    # Crop to middle 70% vertically (avoid camera overlays)
+                    y_start = int(h * 0.15)
+                    y_end = int(h * 0.85)
+                    cropped = gray[y_start:y_end, :]
                     
-                    # Crop to just the FILM area (not the black borders)
-                    film_region = gray[film_y0:film_y1, film_x0:film_x1]
-                    film_h, film_w = film_region.shape
-                    
-                    self.log(f"   Film area: x={film_x0}-{film_x1} ({film_w}px wide)")
-                    
-                    # Compute per-column stats ON THE FILM AREA ONLY
-                    col_mean = film_region.mean(axis=0) / 255.0  # 0-1 scale
-                    col_std = film_region.std(axis=0) / 255.0   # 0-1 scale
+                    # Compute per-column stats
+                    col_mean = cropped.mean(axis=0) / 255.0  # 0-1 scale
+                    col_std = cropped.std(axis=0) / 255.0   # 0-1 scale
                     
                     # STRICT gap criteria:
-                    brightness_threshold = max(np.percentile(col_mean, 80), 0.60)
+                    # 1. Brightness must be in TOP 20% of all column brightnesses
+                    brightness_threshold = np.percentile(col_mean, 80)
+                    # 2. But also must be at least 60% absolute brightness
+                    brightness_threshold = max(brightness_threshold, 0.60)
+                    # 3. Std must be very low (uniform from top to bottom)
                     std_threshold = 0.08
                     
                     # Find gap candidates
@@ -1192,10 +1175,10 @@ class FilmScanner:
                         elif not gap_mask[i] and in_gap:
                             gap_end = i
                             gap_width = gap_end - gap_start
-                            if gap_width >= 6:  # Minimum 6 pixels wide
+                            if gap_width >= 8:  # Minimum 8 pixels wide
                                 gap_center = (gap_start + gap_end) / 2
                                 gap_brightness = col_mean[gap_start:gap_end].mean()
-                                gap_uniformity = 1.0 - col_std[gap_start:gap_end].mean()
+                                gap_uniformity = 1.0 - col_std[gap_start:gap_end].mean()  # Higher = more uniform
                                 gap_score = gap_brightness * gap_uniformity
                                 gap_regions.append({
                                     "start": gap_start,
@@ -1211,7 +1194,7 @@ class FilmScanner:
                     if in_gap:
                         gap_end = len(gap_mask)
                         gap_width = gap_end - gap_start
-                        if gap_width >= 6:
+                        if gap_width >= 8:
                             gap_center = (gap_start + gap_end) / 2
                             gap_brightness = col_mean[gap_start:gap_end].mean()
                             gap_uniformity = 1.0 - col_std[gap_start:gap_end].mean()
@@ -1225,7 +1208,7 @@ class FilmScanner:
                                 "score": gap_score,
                             })
                     
-                    self.log(f"   [{attempt+1}] Found {len(gap_regions)} gap regions (bright>{brightness_threshold:.2f}, std<{std_threshold})")
+                    self.log(f"   [{attempt+1}] Found {len(gap_regions)} gap regions (thresh: bright>{brightness_threshold:.2f}, std<{std_threshold})")
                     
                     # No gaps found = ALIGNED!
                     if not gap_regions:
@@ -1243,24 +1226,36 @@ class FilmScanner:
                     best_gap = max(gap_regions, key=lambda g: g["score"])
                     gap_center = best_gap["center"]
                     gap_width = best_gap["width"]
-                    gap_fraction = gap_center / film_w  # 0 = left edge of FILM, 1 = right edge
+                    gap_fraction = gap_center / w  # 0 = left edge, 1 = right edge
                     
-                    self.log(f"   Best gap at {gap_fraction:.1%} of film (x={gap_center:.0f}, width={gap_width}, score={best_gap['score']:.3f})")
+                    self.log(f"   Best gap at {gap_fraction:.1%} (x={gap_center:.0f}, width={gap_width}, score={best_gap['score']:.3f})")
                     
-                    # CAPTURE WORKFLOW: ONLY move FORWARD (right)
-                    # Push any gap out to the right side ALWAYS
-                    # This ensures we don't accidentally move backward to a previous frame
-                    distance_to_right_edge = film_w - best_gap["end"]
-                    steps = max(15, min(60, int((distance_to_right_edge + gap_width) / 3)))
+                    # Determine direction based on gap position
+                    # If gap is on right side (>50%), move FORWARD to push it out right
+                    # If gap is on left side (<50%), move BACKWARD to push it out left
+                    if gap_fraction > 0.5:
+                        # Gap on RIGHT - move FORWARD
+                        distance_to_edge = w - best_gap["end"]
+                        steps = max(30, min(200, int((distance_to_edge + gap_width) / 2)))
+                        direction = "FORWARD"
+                        cmd = f"H{steps}"
+                        self.log(f"   Gap on RIGHT ({gap_fraction:.0%}) -> moving FORWARD {steps} steps")
+                    else:
+                        # Gap on LEFT - move BACKWARD
+                        distance_to_edge = best_gap["start"]
+                        steps = max(30, min(200, int((distance_to_edge + gap_width) / 2)))
+                        direction = "BACKWARD"
+                        cmd = f"h{steps}"
+                        self.log(f"   Gap on LEFT ({gap_fraction:.0%}) -> moving BACKWARD {steps} steps")
                     
-                    self.log(f"   Gap detected -> moving FORWARD {steps} steps")
-                    
-                    # Execute move (ALWAYS forward)
-                    moved = self.send(f"H{steps}", update_position=False)
+                    # Execute move
+                    moved = self.send(cmd, update_position=False)
                     if not moved:
                         return False, "Motor failed", {"mode": "error", "total_steps": total_steps, "confidence": 0}
                     
-                    total_steps += steps
+                    total_steps += steps if direction == "FORWARD" else -steps
+                    
+                    # Wait for motor to complete
                     time.sleep(0.3 + steps * 0.003)
                     
                 except Exception as e:
@@ -1271,12 +1266,12 @@ class FilmScanner:
             
             # === FINAL EDGE FINE-TUNE (BOTH SIDES) ===
             # After main alignment, check BOTH left and right edges
-            # and push out any remaining gaps with SMALL moves
-            # Auto-detect film area if ROI not set
+            # and push out any remaining gaps
+            # IMPORTANT: Check edges of the FILM area, not the total image (which has black borders)
             self.log(f"   Final edge fine-tune (both sides)...")
             
-            for fine_attempt in range(6):  # Multiple attempts for both sides
-                time.sleep(0.20)
+            for fine_attempt in range(5):  # More attempts since checking both sides
+                time.sleep(0.25)
                 fine_frame, _ = self.get_alignment_frame(timeout=0.8)
                 if not fine_frame:
                     continue
@@ -1291,39 +1286,27 @@ class FilmScanner:
                     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
                     h, w = gray.shape
                     
-                    # Auto-detect film area or use ROI
-                    roi = self.alignment_roi
-                    if roi and roi.get("x0") and roi.get("x1"):
-                        film_x0 = int(w * roi["x0"])
-                        film_x1 = int(w * roi["x1"])
-        else:
-                        # Dynamic detection: find bright region
-                        col_brightness = gray.mean(axis=0) / 255.0
-                        bright_cols = np.where(col_brightness > 0.15)[0]
-                        if len(bright_cols) > 0:
-                            film_x0 = bright_cols[0]
-                            film_x1 = bright_cols[-1]
-                else:
-                            film_x0 = int(w * 0.1)
-                            film_x1 = int(w * 0.9)
-                    
-                    film_y0 = int(h * 0.15)
-                    film_y1 = int(h * 0.85)
+                    # Use the alignment ROI to find the FILM area (not the black borders)
+                    roi = self.alignment_roi or {"x0": 0.1, "x1": 0.9, "y0": 0.1, "y1": 0.9}
+                    film_x0 = int(w * roi.get("x0", 0.1))
+                    film_x1 = int(w * roi.get("x1", 0.9))
+                    film_y0 = int(h * roi.get("y0", 0.1))
+                    film_y1 = int(h * roi.get("y1", 0.9))
                     
                     # Crop to just the film area
                     film_region = gray[film_y0:film_y1, film_x0:film_x1]
                     film_h, film_w = film_region.shape
                     
-                    # Check LEFT edge of FILM (first 12%)
-                    left_edge_end = int(film_w * 0.12)
+                    # Check LEFT edge of FILM (first 15%)
+                    left_edge_end = int(film_w * 0.15)
                     left_region = film_region[:, 0:left_edge_end]
                     left_col_mean = left_region.mean(axis=0) / 255.0
                     left_col_std = left_region.std(axis=0) / 255.0
                     left_gap_mask = (left_col_mean > 0.55) & (left_col_std < 0.10)
                     left_gap_width = left_gap_mask.sum()
                     
-                    # Check RIGHT edge of FILM (last 12%)
-                    right_edge_start = int(film_w * 0.88)
+                    # Check RIGHT edge of FILM (last 15%)
+                    right_edge_start = int(film_w * 0.85)
                     right_region = film_region[:, right_edge_start:]
                     right_col_mean = right_region.mean(axis=0) / 255.0
                     right_col_std = right_region.std(axis=0) / 255.0
@@ -1333,8 +1316,8 @@ class FilmScanner:
                     self.log(f"   [Fine {fine_attempt+1}] Left gap: {left_gap_width}px, Right gap: {right_gap_width}px")
                     
                     # Both edges clear = ALIGNED!
-                    if left_gap_width < 4 and right_gap_width < 4:
-            self.status_msg = "✓ Aligned"
+                    if left_gap_width < 5 and right_gap_width < 5:
+                        self.status_msg = "✓ Aligned"
                         self.log(f"   ✓ Both edges clear! Total: {total_steps} steps")
                         self.alignment_confidence = 1.0
                         return True, "Aligned", {
@@ -1345,38 +1328,34 @@ class FilmScanner:
                             "confidence": 1.0,
                         }
                     
-                    # Prioritize RIGHT edge gaps (move forward to push out)
-                    # Only do backward moves for LEFT edge if RIGHT is already clear
-                    if right_gap_width >= 4:
+                    # Gap on LEFT edge - push it out by moving BACKWARD
+                    if left_gap_width >= 5:
+                        gap_cols = np.where(left_gap_mask)[0]
+                        if len(gap_cols) > 0:
+                            rightmost_gap_col = gap_cols.max()
+                            gap_extent = rightmost_gap_col + 1  # How far gap extends into frame
+                            
+                            fine_steps = max(15, min(80, int(gap_extent * 1.5)))
+                            self.log(f"   Left edge gap -> BACKWARD {fine_steps}")
+                            
+                            self.send(f"h{fine_steps}", update_position=False)
+                            total_steps -= fine_steps
+                            time.sleep(0.2 + fine_steps * 0.003)
+                            continue  # Re-check after move
+                    
+                    # Gap on RIGHT edge - push it out by moving FORWARD
+                    if right_gap_width >= 5:
                         gap_cols = np.where(right_gap_mask)[0]
                         if len(gap_cols) > 0:
                             leftmost_gap_col = gap_cols.min()
                             gap_extent = len(right_col_mean) - leftmost_gap_col
                             
-                            # Small fine-tune steps
-                            fine_steps = max(8, min(30, int(gap_extent * 1.2)))
+                            fine_steps = max(15, min(80, int(gap_extent * 1.5)))
                             self.log(f"   Right edge gap -> FORWARD {fine_steps}")
                             
                             self.send(f"H{fine_steps}", update_position=False)
                             total_steps += fine_steps
-                            time.sleep(0.15 + fine_steps * 0.003)
-                            continue  # Re-check after move
-                    
-                    # LEFT edge gap - only if right is already clear
-                    # Use very small backward moves
-                    if left_gap_width >= 4 and right_gap_width < 4:
-                        gap_cols = np.where(left_gap_mask)[0]
-                        if len(gap_cols) > 0:
-                            rightmost_gap_col = gap_cols.max()
-                            gap_extent = rightmost_gap_col + 1
-                            
-                            # Small fine-tune steps (backward)
-                            fine_steps = max(6, min(20, int(gap_extent * 1.0)))
-                            self.log(f"   Left edge gap -> fine BACKWARD {fine_steps}")
-                            
-                            self.send(f"h{fine_steps}", update_position=False)
-                            total_steps -= fine_steps
-                            time.sleep(0.15 + fine_steps * 0.003)
+                            time.sleep(0.2 + fine_steps * 0.003)
                             continue  # Re-check after move
                         
                 except Exception as e:
@@ -1394,7 +1373,7 @@ class FilmScanner:
             }
 
         # === HALF FRAME MODE - CENTER THE GAP ===
-            else:
+        else:
             # Half frame: need gap in the MIDDLE, no gaps on edges
             # Use same strict detection as full frame mode
             
@@ -1523,7 +1502,7 @@ class FilmScanner:
                         direction = "BACKWARD"
                         cmd = f"h{steps}"
                         self.log(f"   Gap right of center -> moving BACKWARD {steps} steps")
-        else:
+                    else:
                         # Gap is LEFT of center - move FORWARD to shift gap right
                         steps = max(20, min(150, int(abs(offset_px) / 2)))
                         direction = "FORWARD"
@@ -1532,7 +1511,7 @@ class FilmScanner:
                     
                     # Execute move
                     moved = self.send(cmd, update_position=False)
-        if not moved:
+                    if not moved:
                         return False, "Motor failed", {"mode": "error", "total_steps": total_steps, "confidence": 0}
                     
                     total_steps += steps if direction == "FORWARD" else -steps
@@ -1554,33 +1533,32 @@ class FilmScanner:
                 "confidence": 0.5,
             }
     
-    def advance_and_align(self, max_iters=30):
+    def advance_and_align(self, max_iters=20):
         """
         Advance to next frame after capture.
         
-        CONSERVATIVE approach - small movements to avoid overshooting:
-        1. Small initial nudge forward to reveal the next frame gap
-        2. Once gap visible, fine adjustments to push it just out of view
-        3. Stop as soon as gap exits left edge
+        Uses the same strict gap detection as auto_align.
         
-        FULL FRAME: Push gap out left edge, stop when no gap visible
-        HALF FRAME: Center the gap in the middle
+        FULL FRAME MODE:
+        1. Move FORWARD to push current frame out
+        2. Gap appears on left, keep moving until gap exits left
+        3. Stop when no gap visible (next frame aligned)
+        
+        HALF FRAME MODE:
+        1. Move FORWARD until gap appears
+        2. Center the gap in the middle of the frame
         """
         import numpy as np
         import cv2
         
         total_steps_moved = 0
         saw_gap = False
-        initial_nudge_done = False
         
         self.log(f"▶ Advancing to next frame [{self.frame_mode}]...")
         
-        # Get alignment ROI for cropping to film area
-        roi = self.alignment_roi or {"x0": 0.15, "x1": 0.85, "y0": 0.15, "y1": 0.85}
-        
         for iteration in range(max_iters):
             if iteration > 0:
-                time.sleep(0.20)
+                time.sleep(0.25)
             
             frame_bytes, _ = self.get_alignment_frame(timeout=0.8)
             if not frame_bytes:
@@ -1594,26 +1572,23 @@ class FilmScanner:
                 gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
                 h, w = gray.shape
                 
-                # Crop to film area using ROI
-                x0 = int(w * roi["x0"])
-                x1 = int(w * roi["x1"])
-                y0 = int(h * roi["y0"])
-                y1 = int(h * roi["y1"])
-                film_region = gray[y0:y1, x0:x1]
-                film_w = x1 - x0
+                # Crop to middle 70% vertically
+                y_start = int(h * 0.15)
+                y_end = int(h * 0.85)
+                cropped = gray[y_start:y_end, :]
                 
-                # Column stats on film region only
-                col_mean = film_region.mean(axis=0) / 255.0
-                col_std = film_region.std(axis=0) / 255.0
+                # Column stats
+                col_mean = cropped.mean(axis=0) / 255.0
+                col_std = cropped.std(axis=0) / 255.0
                 
-                # Check for end of roll (entire film area is uniformly bright)
+                # Check for end of roll (entire frame is uniformly bright)
                 if col_mean.min() > 0.85 and col_std.max() < 0.10:
                     self.log("⚠ End of roll detected (uniform maximum brightness)")
                     self.status_msg = "End of roll"
                     return True, "End of roll", {"mode": "end_of_roll", "total_steps": total_steps_moved}
                 
-                # Gap detection - strict criteria
-                brightness_threshold = max(np.percentile(col_mean, 85), 0.65)
+                # STRICT gap detection
+                brightness_threshold = max(np.percentile(col_mean, 80), 0.60)
                 std_threshold = 0.08
                 gap_mask = (col_mean >= brightness_threshold) & (col_std <= std_threshold)
                 
@@ -1629,7 +1604,7 @@ class FilmScanner:
                     elif not gap_mask[i] and in_gap:
                         gap_end = i
                         gap_width = gap_end - gap_start
-                        if gap_width >= 6:
+                        if gap_width >= 8:
                             gap_center = (gap_start + gap_end) / 2
                             gap_regions.append({
                                 "start": gap_start,
@@ -1642,7 +1617,7 @@ class FilmScanner:
                 if in_gap:
                     gap_end = len(gap_mask)
                     gap_width = gap_end - gap_start
-                    if gap_width >= 6:
+                    if gap_width >= 8:
                         gap_center = (gap_start + gap_end) / 2
                         gap_regions.append({
                             "start": gap_start,
@@ -1656,47 +1631,30 @@ class FilmScanner:
                 if has_gap:
                     saw_gap = True
                     best_gap = max(gap_regions, key=lambda g: g["width"])
-                    gap_fraction = best_gap["center"] / film_w
-                    left_edge_fraction = best_gap["start"] / film_w
+                    gap_fraction = best_gap["center"] / w
                     
-                    self.log(f"   [{iteration+1}] Gap at {gap_fraction:.1%} (left edge: {left_edge_fraction:.1%}, width={best_gap['width']})")
+                    self.log(f"   [{iteration+1}] Gap at {gap_fraction:.1%} (width={best_gap['width']})")
                     
                     if self.frame_mode == "full":
-                        # FULL FRAME: push gap out left edge with TINY steps to avoid overshoot
-                        # If gap is already very close to left edge, minimal push
-                        if left_edge_fraction < 0.03:
-                            # Gap almost out - minimal push
-                            steps = 6
-                            self.log(f"   Gap almost out -> minimal FORWARD {steps}")
-                        elif left_edge_fraction < 0.08:
-                            # Gap very near left edge - tiny push
-                            steps = 12
-                            self.log(f"   Gap near left -> tiny FORWARD {steps}")
-                        elif left_edge_fraction < 0.20:
-                            # Gap approaching left edge - small push
-                            steps = 20
-                            self.log(f"   Gap approaching left -> small FORWARD {steps}")
-                        else:
-                            # Gap still visible in middle/right - moderate push
-                            steps = min(35, max(20, int(best_gap["start"] / 6)))
-                            self.log(f"   Gap visible -> FORWARD {steps}")
-                        
+                        # FULL FRAME: push gap out left edge, always move forward
+                        steps = max(40, min(200, int((best_gap["center"] + best_gap["width"]) / 2)))
+                        self.log(f"   Moving FORWARD {steps} steps to push gap out left")
                         self.send(f"H{steps}", update_position=False)
                         total_steps_moved += steps
-                        
                     else:
                         # HALF FRAME: center the gap in the middle
-                        frame_center = film_w / 2
+                        # Prioritize FORWARD movement, only go backward for fine adjustment
+                        frame_center = w / 2
                         offset = best_gap["center"] - frame_center
                         
-                        if abs(offset) <= film_w * 0.08:  # Within 8% of center
+                        if abs(offset) <= w * 0.08:  # Within 8% of center = good enough
                             # Check no gaps on edges
-                            left_edge = int(film_w * 0.12)
-                            right_edge = int(film_w * 0.88)
-                            has_left_edge = any(g["center"] < left_edge for g in gap_regions)
-                            has_right_edge = any(g["center"] > right_edge for g in gap_regions)
+                            left_edge = int(w * 0.12)
+                            right_edge = int(w * 0.88)
+                            has_left = any(g["center"] < left_edge for g in gap_regions)
+                            has_right = any(g["center"] > right_edge for g in gap_regions)
                             
-                            if not has_left_edge and not has_right_edge:
+                            if not has_left and not has_right:
                                 self.status_msg = "✓ Next frame ready (centered)"
                                 self.log(f"✓ Gap centered! Total: {total_steps_moved} steps")
                                 return True, "Next frame centered", {
@@ -1705,22 +1663,23 @@ class FilmScanner:
                                     "iterations": iteration + 1,
                                 }
                         
-                        # Move to center gap with small steps
+                        # Move to center gap - PREFER FORWARD, backward only for fine correction
                         if offset > 0:
-                            # Gap right of center - small backward
-                            steps = max(10, min(30, int(abs(offset) / 4)))
+                            # Gap right of center - need to move backward (fine adjustment only)
+                            # Only small backward moves allowed
+                            steps = max(15, min(40, int(abs(offset) / 3)))
                             self.log(f"   Gap right of center -> fine BACKWARD {steps}")
                             self.send(f"h{steps}", update_position=False)
                             total_steps_moved -= steps
                         else:
-                            # Gap left of center - small forward
-                            steps = max(15, min(40, int(abs(offset) / 3)))
+                            # Gap left of center - move forward (preferred direction)
+                            steps = max(30, min(120, int(abs(offset) / 2)))
                             self.log(f"   Gap left of center -> FORWARD {steps}")
                             self.send(f"H{steps}", update_position=False)
                             total_steps_moved += steps
                 
                 elif saw_gap and not has_gap:
-                    # We saw a gap and now it's gone = aligned!
+                    # FULL FRAME: We saw a gap and now it's gone = aligned!
                     if self.frame_mode == "full":
                         self.status_msg = "✓ Next frame ready"
                         self.log(f"✓ Advanced to next frame! {total_steps_moved} steps")
@@ -1730,24 +1689,15 @@ class FilmScanner:
                             "iterations": iteration + 1,
                         }
                     else:
-                        # HALF FRAME: gap disappeared but we need it - tiny backward
-                        self.log(f"   [{iteration+1}] Gap lost, tiny backward to recover...")
-                        self.send("h20", update_position=False)
-                        total_steps_moved -= 20
+                        # HALF FRAME: gap disappeared but we need it centered - keep searching
+                        self.log(f"   [{iteration+1}] Gap lost, searching forward...")
+                        self.send("H80", update_position=False)
+                        total_steps_moved += 80
                 else:
-                    # No gap yet - give a small nudge forward to reveal it
-                    if not initial_nudge_done:
-                        # First nudge: small to start revealing the gap
-                        steps = 40
-                        self.log(f"   [{iteration+1}] Initial nudge FORWARD {steps}...")
-                        initial_nudge_done = True
-                    else:
-                        # Subsequent: even smaller nudges
-                        steps = 25
-                        self.log(f"   [{iteration+1}] No gap yet, small FORWARD {steps}...")
-                    
-                    self.send(f"H{steps}", update_position=False)
-                    total_steps_moved += steps
+                    # No gap yet - keep moving forward
+                    self.log(f"   [{iteration+1}] No gap yet, advancing...")
+                    self.send("H100", update_position=False)
+                    total_steps_moved += 100
                     
             except Exception as e:
                 self.log(f"   Error: {e}")
@@ -2221,12 +2171,12 @@ def capture():
         try:
             # Only do edge fine-tune, not full realignment
             scanner.log("Pre-capture edge check...")
-                success, msg, info = scanner.auto_align()
-                scanner.broadcast_status()
-                if not success:
+            success, msg, info = scanner.auto_align()
+            scanner.broadcast_status()
+            if not success:
                 scanner.log(f"Pre-capture align note: {msg}")
                 # Don't fail capture if pre-align has issues - just log it
-            except Exception as e:
+        except Exception as e:
             scanner.log(f"Pre-capture align error: {e}")
 
     scanner.status_msg = "Capturing..."
@@ -2257,13 +2207,13 @@ def capture():
                 advance = scanner.half_frame_advance or scanner.frame_advance
             else:
                 advance = scanner.frame_advance
-        
-        if advance:
+            
+            if advance:
                 time.sleep(0.3)
-            if scanner.send(f'H{advance}'):
-                scanner.status_msg = f"✓ Frame {scanner.frame_count} → Ready for next"
-            else:
-                scanner.status_msg = f"✓ Frame {scanner.frame_count} (advance failed)"
+                if scanner.send(f'H{advance}'):
+                    scanner.status_msg = f"✓ Frame {scanner.frame_count} → Ready for next"
+                else:
+                    scanner.status_msg = f"✓ Frame {scanner.frame_count} (advance failed)"
     else:
         scanner.status_msg = "❌ Capture failed!"
     
