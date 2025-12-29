@@ -1054,7 +1054,7 @@ class FilmScanner:
             raise RuntimeError("No frame available from capture card")
         return frame
 
-    def auto_align(self, max_iters=25, stop_px=8, max_step=400, min_step=25, prefer_forward=True):
+    def auto_align(self, max_iters=25, stop_px=8, max_step=500, min_step=40, prefer_forward=True):
         """
         Auto alignment using CONTINUOUS capture card monitoring.
         
@@ -1062,12 +1062,9 @@ class FilmScanner:
         
         FULL FRAME MODE (test align button):
         - Aligns whichever frame is MOST visible in the window
-        - If gap is on LEFT (<50%), move BACKWARD to push gap out left, centering current frame
-        - If gap is on RIGHT (>50%), move FORWARD to push gap out right, centering current frame
-        
-        FULL FRAME MODE (after capture / advance):
-        - Always moves FORWARD to advance to next frame
-        - Pushes current frame out to right, gap appears on left, then next frame slides in
+        - If gap is on LEFT (<45%), move BACKWARD to push gap out left
+        - If gap is on RIGHT (>45%), move FORWARD to push gap out right  
+        - Uses MOMENTUM: once direction is chosen, sticks with it
         
         HALF FRAME MODE:
         - Centers the gap in the frame
@@ -1076,6 +1073,7 @@ class FilmScanner:
         stuck_count = 0
         last_gap_x = None
         consecutive_no_gap = 0
+        chosen_direction = 0  # MOMENTUM: once we pick a direction, stick with it
         
         self.log(f"▶ Auto-align [{self.frame_mode}] starting...")
         
@@ -1094,15 +1092,17 @@ class FilmScanner:
                 return False, "No frame", {"mode": "error", "total_steps": total_steps_moved}
 
             try:
+                # Use ROI to focus on middle of frame (avoid camera overlay at top/bottom)
+                # The capture card feed includes camera UI - we want to analyze just the film area
                 result = detect_frame_gap(
                     frame_bytes,
-                    roi=None,
+                    roi={"x0": 0.05, "x1": 0.95, "y0": 0.15, "y1": 0.85},  # Avoid overlay areas
                     expected_gap_fraction=None,
                     gap_window_fraction=1.0,
-                    mean_threshold=0.55,  # More sensitive
-                    std_threshold=0.20,
-                    min_gap_width=5,
-                    max_gap_width=350,
+                    mean_threshold=0.50,  # More sensitive to catch the gap
+                    std_threshold=0.22,
+                    min_gap_width=4,
+                    max_gap_width=400,
                     use_edge_detection=True,
                 )
             except Exception as e:
@@ -1166,21 +1166,28 @@ class FilmScanner:
                 
                 # Determine direction based on gap position
                 # Goal: Push gap OUT of frame to reveal a full frame
+                # Use MOMENTUM: once we pick a direction, stick with it to avoid oscillation
                 
-                if gap_fraction < 0.5:
-                    # Gap is on LEFT side of frame
-                    # Move BACKWARD (left) to push gap out left edge
-                    # This centers the frame that's currently on the right
-                    direction = -1
-                    distance_px = gap_local + gap_width + 40  # Push fully out + margin
-                    self.log(f"   [{iteration+1}] Gap LEFT at {gap_fraction:.0%}, move backward")
+                if chosen_direction == 0:
+                    # First time - choose direction based on gap position
+                    # Use 45% threshold (not 50%) to avoid oscillation at center
+                    if gap_fraction < 0.45:
+                        chosen_direction = -1  # Push gap out LEFT
+                        self.log(f"   Direction chosen: BACKWARD (gap at {gap_fraction:.0%})")
+                    else:
+                        chosen_direction = 1   # Push gap out RIGHT (prefer forward)
+                        self.log(f"   Direction chosen: FORWARD (gap at {gap_fraction:.0%})")
+                
+                direction = chosen_direction
+                
+                if direction < 0:
+                    # Moving backward - push gap out left
+                    distance_px = gap_local + gap_width + 50
+                    self.log(f"   [{iteration+1}] Gap at {gap_fraction:.0%}, pushing LEFT ({distance_px}px)")
                 else:
-                    # Gap is on RIGHT side of frame  
-                    # Move FORWARD (right) to push gap out right edge
-                    # This centers the frame that's currently on the left
-                    direction = 1
-                    distance_px = (frame_width - gap_local) + gap_width + 40
-                    self.log(f"   [{iteration+1}] Gap RIGHT at {gap_fraction:.0%}, move forward")
+                    # Moving forward - push gap out right
+                    distance_px = (frame_width - gap_local) + gap_width + 50
+                    self.log(f"   [{iteration+1}] Gap at {gap_fraction:.0%}, pushing RIGHT ({distance_px}px)")
                 
                 # Convert to steps
                 px_per_step = max(0.5, float(self.px_per_step))
@@ -1274,10 +1281,11 @@ class FilmScanner:
             try:
                 result = detect_frame_gap(
                     frame_bytes,
-                    mean_threshold=0.55,
-                    std_threshold=0.20,
-                    min_gap_width=5,
-                    max_gap_width=350,
+                    roi={"x0": 0.05, "x1": 0.95, "y0": 0.15, "y1": 0.85},
+                    mean_threshold=0.50,
+                    std_threshold=0.22,
+                    min_gap_width=4,
+                    max_gap_width=400,
                 )
             except:
                 continue
@@ -1290,10 +1298,15 @@ class FilmScanner:
             lit_x1 = debug.get("lit_region", {}).get("x1", 640)
             frame_width = max(lit_x1 - lit_x0, 100)
             
-            # Check for end of roll (very bright - no film blocking light)
+            # Check for end of roll (entire frame is uniformly very bright - no film at all)
+            # Must have BOTH high mean AND low std (uniform brightness across whole frame)
             col_mean_max = debug.get("col_mean_max", 0)
-            if col_mean_max > 0.98 and gap_count == 0:
-                self.log("⚠ End of roll detected (maximum brightness)")
+            col_mean_min = debug.get("col_mean_min", 0)
+            col_std_max = debug.get("col_std_max", 1)
+            
+            # End of roll: entire frame is bright (min > 0.85) and uniform (std < 0.1)
+            if col_mean_min > 0.85 and col_std_max < 0.10 and gap_count == 0:
+                self.log("⚠ End of roll detected (uniform maximum brightness)")
                 self.status_msg = "End of roll"
                 return True, "End of roll", {"mode": "end_of_roll", "total_steps": total_steps_moved}
             
