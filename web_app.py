@@ -1120,14 +1120,13 @@ class FilmScanner:
             max_attempts = 5
             
             for attempt in range(max_attempts):
-                # Get fresh frame
+                # Get fresh frame (use initial frame_bytes on first attempt)
                 if attempt > 0:
                     time.sleep(0.3)
                     frame_bytes, _ = self.get_alignment_frame(timeout=0.8)
                     if not frame_bytes:
                         continue
-                else:
-                    frame_bytes = img_bytes
+                # else: use frame_bytes from line 1075
                 
                 # Decode frame
                 try:
