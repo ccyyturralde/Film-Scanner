@@ -1108,10 +1108,13 @@ class FilmScanner:
         frame_width = max(lit_x1 - lit_x0, 100)
         center_x = frame_width / 2
 
-        # === FULL FRAME MODE - SIMPLE EDGE-ONLY DETECTION ===
+        # === FULL FRAME MODE - STRICT SINGLE-GAP DETECTION ===
         if self.frame_mode == "full":
-            # Instead of complex gap detection, use simple edge-only approach:
-            # Check LEFT edge and RIGHT edge for bright uniform stripes
+            # Scan entire frame but be VERY strict about what qualifies as a gap:
+            # - Must be in the TOP 20% of brightness (gaps are the brightest thing)
+            # - Must have very low std (< 0.08) - gaps are perfectly uniform
+            # - Must be at least 8 pixels wide (consecutive)
+            # Find the SINGLE best gap and move based on its position
             
             total_steps = 0
             max_attempts = 5
@@ -1137,50 +1140,77 @@ class FilmScanner:
                     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
                     h, w = gray.shape
                     
-                    # Define edge regions (15% of width on each side, middle 70% vertically to avoid overlays)
-                    edge_width = int(w * 0.15)
+                    # Crop to middle 70% vertically (avoid camera overlays)
                     y_start = int(h * 0.15)
                     y_end = int(h * 0.85)
+                    cropped = gray[y_start:y_end, :]
                     
-                    left_edge = gray[y_start:y_end, 0:edge_width]
-                    right_edge = gray[y_start:y_end, w-edge_width:w]
+                    # Compute per-column stats
+                    col_mean = cropped.mean(axis=0) / 255.0  # 0-1 scale
+                    col_std = cropped.std(axis=0) / 255.0   # 0-1 scale
                     
-                    # Check for uniform bright stripe (gap signature)
-                    # A gap will have: high mean brightness AND low std (uniform)
-                    def check_edge_for_gap(edge_region):
-                        """Check if edge region contains a uniform bright stripe"""
-                        # Compute column stats
-                        col_mean = edge_region.mean(axis=0) / 255.0
-                        col_std = edge_region.std(axis=0) / 255.0
-                        
-                        # Find columns that are bright AND uniform
-                        bright_threshold = 0.5  # 50% brightness
-                        uniform_threshold = 0.15  # low std = uniform
-                        
-                        gap_mask = (col_mean > bright_threshold) & (col_std < uniform_threshold)
-                        gap_width = gap_mask.sum()
-                        
-                        # Need at least 10 consecutive gap-like columns
-                        if gap_width >= 10:
-                            # Check for consecutiveness using run-length
-                            runs = np.diff(np.concatenate([[0], gap_mask.astype(int), [0]]))
-                            run_starts = np.where(runs == 1)[0]
-                            run_ends = np.where(runs == -1)[0]
-                            if len(run_starts) > 0:
-                                max_run = max(run_ends - run_starts)
-                                if max_run >= 10:
-                                    return True, gap_width, float(col_mean[gap_mask].mean())
-                        return False, 0, 0.0
+                    # STRICT gap criteria:
+                    # 1. Brightness must be in TOP 20% of all column brightnesses
+                    brightness_threshold = np.percentile(col_mean, 80)
+                    # 2. But also must be at least 60% absolute brightness
+                    brightness_threshold = max(brightness_threshold, 0.60)
+                    # 3. Std must be very low (uniform from top to bottom)
+                    std_threshold = 0.08
                     
-                    has_left_gap, left_gap_width, left_brightness = check_edge_for_gap(left_edge)
-                    has_right_gap, right_gap_width, right_brightness = check_edge_for_gap(right_edge)
+                    # Find gap candidates
+                    gap_mask = (col_mean >= brightness_threshold) & (col_std <= std_threshold)
                     
-                    self.log(f"   [{attempt+1}] L: {has_left_gap} ({left_gap_width}px), R: {has_right_gap} ({right_gap_width}px)")
+                    # Find consecutive runs of gap columns
+                    gap_regions = []
+                    in_gap = False
+                    gap_start = 0
                     
-                    # Neither edge has gap = ALIGNED!
-                    if not has_left_gap and not has_right_gap:
+                    for i in range(len(gap_mask)):
+                        if gap_mask[i] and not in_gap:
+                            gap_start = i
+                            in_gap = True
+                        elif not gap_mask[i] and in_gap:
+                            gap_end = i
+                            gap_width = gap_end - gap_start
+                            if gap_width >= 8:  # Minimum 8 pixels wide
+                                gap_center = (gap_start + gap_end) / 2
+                                gap_brightness = col_mean[gap_start:gap_end].mean()
+                                gap_uniformity = 1.0 - col_std[gap_start:gap_end].mean()  # Higher = more uniform
+                                gap_score = gap_brightness * gap_uniformity
+                                gap_regions.append({
+                                    "start": gap_start,
+                                    "end": gap_end,
+                                    "center": gap_center,
+                                    "width": gap_width,
+                                    "brightness": gap_brightness,
+                                    "score": gap_score,
+                                })
+                            in_gap = False
+                    
+                    # Handle gap at end of frame
+                    if in_gap:
+                        gap_end = len(gap_mask)
+                        gap_width = gap_end - gap_start
+                        if gap_width >= 8:
+                            gap_center = (gap_start + gap_end) / 2
+                            gap_brightness = col_mean[gap_start:gap_end].mean()
+                            gap_uniformity = 1.0 - col_std[gap_start:gap_end].mean()
+                            gap_score = gap_brightness * gap_uniformity
+                            gap_regions.append({
+                                "start": gap_start,
+                                "end": gap_end,
+                                "center": gap_center,
+                                "width": gap_width,
+                                "brightness": gap_brightness,
+                                "score": gap_score,
+                            })
+                    
+                    self.log(f"   [{attempt+1}] Found {len(gap_regions)} gap regions (thresh: bright>{brightness_threshold:.2f}, std<{std_threshold})")
+                    
+                    # No gaps found = ALIGNED!
+                    if not gap_regions:
                         self.status_msg = "✓ Aligned"
-                        self.log(f"   ✓ Aligned! No gaps on edges. Total: {total_steps} steps")
+                        self.log(f"   ✓ Aligned! No gaps detected. Total: {total_steps} steps")
                         self.alignment_confidence = 1.0
                         return True, "Aligned", {
                             "mode": "aligned",
@@ -1189,20 +1219,31 @@ class FilmScanner:
                             "confidence": 1.0,
                         }
                     
-                    # Determine direction: push gap out of frame
-                    # Priority: push out the larger/brighter gap first
-                    if has_right_gap and (not has_left_gap or right_gap_width >= left_gap_width):
-                        # Gap on RIGHT - move FORWARD (positive) to push it out
-                        steps = max(30, min(150, int(right_gap_width * 1.5)))
+                    # Pick the SINGLE BEST gap (highest score)
+                    best_gap = max(gap_regions, key=lambda g: g["score"])
+                    gap_center = best_gap["center"]
+                    gap_width = best_gap["width"]
+                    gap_fraction = gap_center / w  # 0 = left edge, 1 = right edge
+                    
+                    self.log(f"   Best gap at {gap_fraction:.1%} (x={gap_center:.0f}, width={gap_width}, score={best_gap['score']:.3f})")
+                    
+                    # Determine direction based on gap position
+                    # If gap is on right side (>50%), move FORWARD to push it out right
+                    # If gap is on left side (<50%), move BACKWARD to push it out left
+                    if gap_fraction > 0.5:
+                        # Gap on RIGHT - move FORWARD
+                        distance_to_edge = w - best_gap["end"]
+                        steps = max(30, min(200, int((distance_to_edge + gap_width) / 2)))
                         direction = "FORWARD"
                         cmd = f"H{steps}"
+                        self.log(f"   Gap on RIGHT ({gap_fraction:.0%}) -> moving FORWARD {steps} steps")
                     else:
-                        # Gap on LEFT - move BACKWARD (negative) to push it out  
-                        steps = max(30, min(150, int(left_gap_width * 1.5)))
+                        # Gap on LEFT - move BACKWARD
+                        distance_to_edge = best_gap["start"]
+                        steps = max(30, min(200, int((distance_to_edge + gap_width) / 2)))
                         direction = "BACKWARD"
                         cmd = f"h{steps}"
-                    
-                    self.log(f"   Moving {direction}: {steps} steps")
+                        self.log(f"   Gap on LEFT ({gap_fraction:.0%}) -> moving BACKWARD {steps} steps")
                     
                     # Execute move
                     moved = self.send(cmd, update_position=False)
@@ -1216,6 +1257,8 @@ class FilmScanner:
                     
                 except Exception as e:
                     self.log(f"   Error: {e}")
+                    import traceback
+                    traceback.print_exc()
                     continue
             
             # Max attempts reached
