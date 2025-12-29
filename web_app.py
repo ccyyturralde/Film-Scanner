@@ -1108,121 +1108,124 @@ class FilmScanner:
         frame_width = max(lit_x1 - lit_x0, 100)
         center_x = frame_width / 2
 
-        # === FULL FRAME MODE ===
+        # === FULL FRAME MODE - SIMPLE EDGE-ONLY DETECTION ===
         if self.frame_mode == "full":
+            # Instead of complex gap detection, use simple edge-only approach:
+            # Check LEFT edge and RIGHT edge for bright uniform stripes
             
-            # No gap detected = already aligned!
-            if gap_count == 0 or confidence < 0.15:
-                self.status_msg = "✓ Aligned"
-                self.log(f"✓ Already aligned (gap_count={gap_count}, confidence={confidence:.2f})")
-                return True, "Already aligned", {
-                    "mode": "aligned",
-                    "total_steps": 0,
-                    "gap_detected": False,
-                    "confidence": confidence,
-                    "debug": debug,  # Include detection debug info
-                }
-            
-            if not result.gap_x:
-                return False, "Gap detected but no position", {"mode": "error", "total_steps": 0, "confidence": confidence}
-            
-            # Loop to push gap out (up to 3 attempts)
             total_steps = 0
-            max_attempts = 3
-            current_gap_x = result.gap_x
-            current_gap_count = gap_count
-            current_confidence = confidence
+            max_attempts = 5
             
             for attempt in range(max_attempts):
-                # Calculate gap position
-                gap_local = current_gap_x - lit_x0
-                gap_fraction = gap_local / frame_width
-                gap_width = result.gaps[0].width if result.gaps else 20
-                
-                self.log(f"   [{attempt+1}] Gap at {gap_fraction:.0%} (x={gap_local}px)")
-                
-                # If gap is very close to edge, just nudge it out
-                if gap_fraction < 0.12:
-                    # Gap almost out left - small nudge
-                    steps = -40
-                    self.log(f"   Gap near left edge, small nudge: {steps}")
-                elif gap_fraction > 0.88:
-                    # Gap almost out right - small nudge
-                    steps = 40
-                    self.log(f"   Gap near right edge, small nudge: {steps}")
-                elif gap_fraction < 0.5:
-                    # Gap on left - push out left
-                    distance_px = gap_local + gap_width + margin_px
-                    px_per_step = max(0.5, float(self.px_per_step))
-                    steps = -int(distance_px / px_per_step)
-                    steps = max(-max_step, min(-min_step, steps))
-                    self.log(f"   Pushing LEFT: {distance_px}px = {steps} steps")
+                # Get fresh frame
+                if attempt > 0:
+                    time.sleep(0.3)
+                    frame_bytes, _ = self.get_alignment_frame(timeout=0.8)
+                    if not frame_bytes:
+                        continue
                 else:
-                    # Gap on right - push out right
-                    distance_px = (frame_width - gap_local) + margin_px
-                    px_per_step = max(0.5, float(self.px_per_step))
-                    steps = int(distance_px / px_per_step)
-                    steps = max(min_step, min(max_step, steps))
-                    self.log(f"   Pushing RIGHT: {distance_px}px = {steps} steps")
+                    frame_bytes = img_bytes
                 
-                # Execute move
-                cmd = f"H{abs(steps)}" if steps > 0 else f"h{abs(steps)}"
-                moved = self.send(cmd, update_position=False)
-                if not moved:
-                    return False, "Motor failed", {"mode": "error", "total_steps": total_steps, "confidence": current_confidence}
-                
-                total_steps += steps
-                
-                # Wait for motor
-                time.sleep(0.4 + abs(steps) * 0.003)
-                
-                # Check if gap is now gone
-                verify_bytes, _ = self.get_alignment_frame(timeout=0.8)
-                if not verify_bytes:
-                    continue
-                    
+                # Decode frame
                 try:
-                    verify_result = detect_frame_gap(
-                        verify_bytes,
-                        roi={"x0": 0.05, "x1": 0.95, "y0": 0.15, "y1": 0.85},
-                        mean_threshold=0.70,  # Same as initial detection
-                        std_threshold=0.25,   # Same as initial detection
-                        min_gap_width=6,
-                        max_gap_width=400,
-                        use_edge_detection=True,
-                    )
-                    current_gap_count = int(verify_result.debug_info.get("gap_count", 0)) if verify_result.debug_info else 0
-                    current_confidence = float(verify_result.confidence) if verify_result.confidence else 0.0
-                    self.alignment_confidence = current_confidence
+                    import numpy as np
+                    import cv2
+                    nparr = np.frombuffer(frame_bytes, np.uint8)
+                    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                    if img is None:
+                        continue
+                    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                    h, w = gray.shape
                     
-                    # Success - no more gaps!
-                    if current_gap_count == 0 or current_confidence < 0.15:
+                    # Define edge regions (15% of width on each side, middle 70% vertically to avoid overlays)
+                    edge_width = int(w * 0.15)
+                    y_start = int(h * 0.15)
+                    y_end = int(h * 0.85)
+                    
+                    left_edge = gray[y_start:y_end, 0:edge_width]
+                    right_edge = gray[y_start:y_end, w-edge_width:w]
+                    
+                    # Check for uniform bright stripe (gap signature)
+                    # A gap will have: high mean brightness AND low std (uniform)
+                    def check_edge_for_gap(edge_region):
+                        """Check if edge region contains a uniform bright stripe"""
+                        # Compute column stats
+                        col_mean = edge_region.mean(axis=0) / 255.0
+                        col_std = edge_region.std(axis=0) / 255.0
+                        
+                        # Find columns that are bright AND uniform
+                        bright_threshold = 0.5  # 50% brightness
+                        uniform_threshold = 0.15  # low std = uniform
+                        
+                        gap_mask = (col_mean > bright_threshold) & (col_std < uniform_threshold)
+                        gap_width = gap_mask.sum()
+                        
+                        # Need at least 10 consecutive gap-like columns
+                        if gap_width >= 10:
+                            # Check for consecutiveness using run-length
+                            runs = np.diff(np.concatenate([[0], gap_mask.astype(int), [0]]))
+                            run_starts = np.where(runs == 1)[0]
+                            run_ends = np.where(runs == -1)[0]
+                            if len(run_starts) > 0:
+                                max_run = max(run_ends - run_starts)
+                                if max_run >= 10:
+                                    return True, gap_width, float(col_mean[gap_mask].mean())
+                        return False, 0, 0.0
+                    
+                    has_left_gap, left_gap_width, left_brightness = check_edge_for_gap(left_edge)
+                    has_right_gap, right_gap_width, right_brightness = check_edge_for_gap(right_edge)
+                    
+                    self.log(f"   [{attempt+1}] L: {has_left_gap} ({left_gap_width}px), R: {has_right_gap} ({right_gap_width}px)")
+                    
+                    # Neither edge has gap = ALIGNED!
+                    if not has_left_gap and not has_right_gap:
                         self.status_msg = "✓ Aligned"
-                        self.log(f"   ✓ Aligned after {attempt+1} moves, {total_steps} total steps")
+                        self.log(f"   ✓ Aligned! No gaps on edges. Total: {total_steps} steps")
+                        self.alignment_confidence = 1.0
                         return True, "Aligned", {
                             "mode": "aligned",
                             "total_steps": total_steps,
                             "attempts": attempt + 1,
-                            "confidence": current_confidence,
+                            "confidence": 1.0,
                         }
                     
-                    # Still have gap - update position for next iteration
-                    if verify_result.gap_x:
-                        current_gap_x = verify_result.gap_x
-                        
+                    # Determine direction: push gap out of frame
+                    # Priority: push out the larger/brighter gap first
+                    if has_right_gap and (not has_left_gap or right_gap_width >= left_gap_width):
+                        # Gap on RIGHT - move FORWARD (positive) to push it out
+                        steps = max(30, min(150, int(right_gap_width * 1.5)))
+                        direction = "FORWARD"
+                        cmd = f"H{steps}"
+                    else:
+                        # Gap on LEFT - move BACKWARD (negative) to push it out  
+                        steps = max(30, min(150, int(left_gap_width * 1.5)))
+                        direction = "BACKWARD"
+                        cmd = f"h{steps}"
+                    
+                    self.log(f"   Moving {direction}: {steps} steps")
+                    
+                    # Execute move
+                    moved = self.send(cmd, update_position=False)
+                    if not moved:
+                        return False, "Motor failed", {"mode": "error", "total_steps": total_steps, "confidence": 0}
+                    
+                    total_steps += steps if direction == "FORWARD" else -steps
+                    
+                    # Wait for motor to complete
+                    time.sleep(0.3 + steps * 0.003)
+                    
                 except Exception as e:
-                    self.log(f"   Verify error: {e}")
+                    self.log(f"   Error: {e}")
                     continue
             
             # Max attempts reached
             self.status_msg = "⚠ May need adjustment"
-            self.log(f"   Max attempts reached, {total_steps} total steps, gap_count={current_gap_count}")
+            self.log(f"   Max attempts reached, {total_steps} total steps")
             return True, "Moved - may need fine-tuning", {
                 "mode": "moved",
                 "total_steps": total_steps,
                 "attempts": max_attempts,
-                "final_gap_count": current_gap_count,
-                "confidence": current_confidence,
+                "confidence": 0.5,
             }
 
         # === HALF FRAME MODE ===
