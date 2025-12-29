@@ -1126,74 +1126,103 @@ class FilmScanner:
             if not result.gap_x:
                 return False, "Gap detected but no position", {"mode": "error", "total_steps": 0, "confidence": confidence}
             
-            # Calculate gap position
-            gap_local = result.gap_x - lit_x0
-            gap_fraction = gap_local / frame_width
-            gap_width = result.gaps[0].width if result.gaps else 20
+            # Loop to push gap out (up to 3 attempts)
+            total_steps = 0
+            max_attempts = 3
+            current_gap_x = result.gap_x
+            current_gap_count = gap_count
+            current_confidence = confidence
             
-            self.log(f"   Gap detected at {gap_fraction:.0%} of frame (x={gap_local}px, width={gap_width}px)")
-            
-            # Decide direction: push gap out the NEAREST edge
-            if gap_fraction < 0.5:
-                # Gap is on left - push it out left (move backward)
-                distance_px = gap_local + gap_width + margin_px
-                direction = -1
-                self.log(f"   Pushing gap out LEFT: {distance_px}px")
-            else:
-                # Gap is on right - push it out right (move forward)
-                distance_px = (frame_width - gap_local) + margin_px
-                direction = 1
-                self.log(f"   Pushing gap out RIGHT: {distance_px}px")
-            
-            # Convert to steps
-            px_per_step = max(0.5, float(self.px_per_step))
-            steps = int(direction * distance_px / px_per_step)
-            
-            # Clamp to reasonable range
-            if abs(steps) < min_step:
-                steps = min_step * direction
-            steps = max(-max_step, min(max_step, steps))
-            
-            # Execute ONE move
-            cmd = f"H{abs(steps)}" if steps > 0 else f"h{abs(steps)}"
-            self.log(f"   Executing: {cmd} ({steps} steps)")
-            moved = self.send(cmd, update_position=False)
-            
-            if not moved:
-                return False, "Motor failed", {"mode": "error", "steps": steps, "total_steps": 0, "confidence": confidence}
-            
-            # Wait for motor to finish
-            time.sleep(0.3 + abs(steps) * 0.002)  # Base delay + time per step
-            
-            # Verification read
-            time.sleep(0.2)
-            verify_bytes, _ = self.get_alignment_frame(timeout=0.8)
-            final_gap_count = gap_count
-            if verify_bytes:
+            for attempt in range(max_attempts):
+                # Calculate gap position
+                gap_local = current_gap_x - lit_x0
+                gap_fraction = gap_local / frame_width
+                gap_width = result.gaps[0].width if result.gaps else 20
+                
+                self.log(f"   [{attempt+1}] Gap at {gap_fraction:.0%} (x={gap_local}px)")
+                
+                # If gap is very close to edge, just nudge it out
+                if gap_fraction < 0.12:
+                    # Gap almost out left - small nudge
+                    steps = -40
+                    self.log(f"   Gap near left edge, small nudge: {steps}")
+                elif gap_fraction > 0.88:
+                    # Gap almost out right - small nudge
+                    steps = 40
+                    self.log(f"   Gap near right edge, small nudge: {steps}")
+                elif gap_fraction < 0.5:
+                    # Gap on left - push out left
+                    distance_px = gap_local + gap_width + margin_px
+                    px_per_step = max(0.5, float(self.px_per_step))
+                    steps = -int(distance_px / px_per_step)
+                    steps = max(-max_step, min(-min_step, steps))
+                    self.log(f"   Pushing LEFT: {distance_px}px = {steps} steps")
+                else:
+                    # Gap on right - push out right
+                    distance_px = (frame_width - gap_local) + margin_px
+                    px_per_step = max(0.5, float(self.px_per_step))
+                    steps = int(distance_px / px_per_step)
+                    steps = max(min_step, min(max_step, steps))
+                    self.log(f"   Pushing RIGHT: {distance_px}px = {steps} steps")
+                
+                # Execute move
+                cmd = f"H{abs(steps)}" if steps > 0 else f"h{abs(steps)}"
+                moved = self.send(cmd, update_position=False)
+                if not moved:
+                    return False, "Motor failed", {"mode": "error", "total_steps": total_steps, "confidence": current_confidence}
+                
+                total_steps += steps
+                
+                # Wait for motor
+                time.sleep(0.4 + abs(steps) * 0.003)
+                
+                # Check if gap is now gone
+                verify_bytes, _ = self.get_alignment_frame(timeout=0.8)
+                if not verify_bytes:
+                    continue
+                    
                 try:
                     verify_result = detect_frame_gap(
                         verify_bytes,
                         roi={"x0": 0.05, "x1": 0.95, "y0": 0.15, "y1": 0.85},
-                        mean_threshold=0.50,
-                        std_threshold=0.22,
+                        mean_threshold=0.45,  # Same as initial detection
+                        std_threshold=0.30,   # Same as initial detection
                         min_gap_width=4,
+                        max_gap_width=400,
                         use_edge_detection=True,
                     )
-                    final_gap_count = int(verify_result.debug_info.get("gap_count", 0)) if verify_result.debug_info else 0
-                    self.alignment_confidence = float(verify_result.confidence) if verify_result.confidence else 0.0
-                except:
-                    pass
+                    current_gap_count = int(verify_result.debug_info.get("gap_count", 0)) if verify_result.debug_info else 0
+                    current_confidence = float(verify_result.confidence) if verify_result.confidence else 0.0
+                    self.alignment_confidence = current_confidence
+                    
+                    # Success - no more gaps!
+                    if current_gap_count == 0 or current_confidence < 0.15:
+                        self.status_msg = "✓ Aligned"
+                        self.log(f"   ✓ Aligned after {attempt+1} moves, {total_steps} total steps")
+                        return True, "Aligned", {
+                            "mode": "aligned",
+                            "total_steps": total_steps,
+                            "attempts": attempt + 1,
+                            "confidence": current_confidence,
+                        }
+                    
+                    # Still have gap - update position for next iteration
+                    if verify_result.gap_x:
+                        current_gap_x = verify_result.gap_x
+                        
+                except Exception as e:
+                    self.log(f"   Verify error: {e}")
+                    continue
             
-            success = final_gap_count == 0
-            self.status_msg = "✓ Aligned" if success else "⚠ May need adjustment"
-            self.log(f"   Result: {'Aligned!' if success else 'Gap may still be visible'} ({steps} steps)")
-            
-            return True, "Aligned" if success else "Moved - may need fine-tuning", {
-                "mode": "aligned" if success else "moved",
-                "total_steps": steps,
-                "gap_fraction": gap_fraction,
-                "final_gap_count": final_gap_count,
-                "confidence": self.alignment_confidence,
+            # Max attempts reached
+            self.status_msg = "⚠ May need adjustment"
+            self.log(f"   Max attempts reached, {total_steps} total steps, gap_count={current_gap_count}")
+            return True, "Moved - may need fine-tuning", {
+                "mode": "moved",
+                "total_steps": total_steps,
+                "attempts": max_attempts,
+                "final_gap_count": current_gap_count,
+                "confidence": current_confidence,
             }
 
         # === HALF FRAME MODE ===
