@@ -26,11 +26,6 @@ let settingsState = {
     coarseStep: 192
 };
 
-let alignmentSettings = {
-    roi: null,
-    minConfidence: 0.03
-};
-const alignmentInputEdits = {};
 
 // Connect to WebSocket
 socket.on('connect', () => {
@@ -64,18 +59,13 @@ function updateUI(status) {
     if (alignModeEl && status.alignment_mode) {
         alignModeEl.textContent = `Mode: ${status.alignment_mode}`;
     }
-    const roiSection = document.getElementById('alignment-roi-section');
-    const roiRegionSection = document.getElementById('alignment-region-section');
     const autoAlignBtn = document.getElementById('auto-align-btn');
     const autoAlignCheckbox = document.getElementById('auto-align-before-capture');
     const autoAlignCheckboxWrap = document.getElementById('auto-align-checkbox-wrapper');
     const isStreamMode = status.alignment_mode === 'stream';
-    if (roiSection) roiSection.style.display = isStreamMode ? 'block' : 'none';
-    if (roiRegionSection) roiRegionSection.style.display = isStreamMode ? 'block' : 'none';
     if (autoAlignBtn) autoAlignBtn.style.display = isStreamMode ? 'inline-block' : 'none';
     if (autoAlignCheckboxWrap) autoAlignCheckboxWrap.style.display = isStreamMode ? 'inline-block' : 'none';
     if (autoAlignCheckbox) autoAlignCheckbox.disabled = !isStreamMode;
-    // camera settings display is fetched separately via refreshCameraSettings()
     
     // Auto-align status
     const alignText = document.getElementById('auto-align-status');
@@ -88,26 +78,6 @@ function updateUI(status) {
             alignText.textContent = 'Auto-align not run yet.';
         }
     }
-
-    // Alignment ROI + threshold display
-    const roiDisplay = document.getElementById('alignment-roi-display');
-    const minConfDisplay = document.getElementById('alignment-min-confidence-display');
-    const roi = status.alignment_roi || null;
-    const minConf = status.alignment_min_confidence ?? alignmentSettings.minConfidence;
-    alignmentSettings.roi = roi;
-    alignmentSettings.minConfidence = minConf;
-    if (roiDisplay) {
-        if (roi) {
-            const toPct = (v) => Math.round(v * 1000) / 10;
-            roiDisplay.textContent = `ROI X: ${toPct(roi.x0)}% → ${toPct(roi.x1)}%, Y: ${toPct(roi.y0)}% → ${toPct(roi.y1)}%`;
-        } else {
-            roiDisplay.textContent = 'ROI: full frame';
-        }
-    }
-    if (minConfDisplay) {
-        minConfDisplay.textContent = `Min confidence: ${(minConf * 100).toFixed(0)}%`;
-    }
-    syncAlignmentInputs(roi, minConf);
     
     // Mode and auto-advance displays
     document.getElementById('mode-display').textContent = status.mode.toUpperCase();
@@ -464,124 +434,6 @@ async function autoAlign() {
     }
 }
 
-// Alignment ROI helpers
-function syncAlignmentInputs(roi, minConfidence) {
-    const x0Input = document.getElementById('align-x0');
-    const x1Input = document.getElementById('align-x1');
-    const y0Input = document.getElementById('align-y0');
-    const y1Input = document.getElementById('align-y1');
-    const minConfInput = document.getElementById('align-min-confidence');
-
-    const activeId = document.activeElement && document.activeElement.id;
-    const editingIds = ['align-x0', 'align-x1', 'align-y0', 'align-y1', 'align-min-confidence'];
-    const editing = editingIds.includes(activeId);
-    const now = Date.now();
-    const recentlyEdited = (id) => {
-        const ts = alignmentInputEdits[id];
-        return ts && (now - ts < 2000);
-    };
-
-    const toPct = (v) => (v * 100).toFixed(1);
-
-    if (!editing) {
-        if (roi) {
-            if (x0Input && !recentlyEdited('align-x0')) x0Input.value = toPct(roi.x0);
-            if (x1Input && !recentlyEdited('align-x1')) x1Input.value = toPct(roi.x1);
-            if (y0Input && !recentlyEdited('align-y0')) y0Input.value = toPct(roi.y0);
-            if (y1Input && !recentlyEdited('align-y1')) y1Input.value = toPct(roi.y1);
-        } else {
-            if (x0Input && !x0Input.value && !recentlyEdited('align-x0')) x0Input.value = '0';
-            if (x1Input && !x1Input.value && !recentlyEdited('align-x1')) x1Input.value = '100';
-            if (y0Input && !y0Input.value && !recentlyEdited('align-y0')) y0Input.value = '0';
-            if (y1Input && !y1Input.value && !recentlyEdited('align-y1')) y1Input.value = '100';
-        }
-
-        if (minConfInput && minConfidence !== undefined && !recentlyEdited('align-min-confidence')) {
-            minConfInput.value = (minConfidence * 100).toFixed(0);
-        }
-    }
-}
-
-async function loadAlignmentConfig() {
-    const result = await apiCall('get_alignment_config');
-    if (result.success) {
-        syncAlignmentInputs(result.roi, result.min_confidence);
-        const alignModeEl = document.getElementById('alignment-mode-display');
-        if (alignModeEl && result.alignment_mode) {
-            alignModeEl.textContent = `Mode: ${result.alignment_mode}`;
-        }
-        const frameModeEl = document.getElementById('frame-mode-display');
-        if (frameModeEl && result.frame_mode) {
-            frameModeEl.textContent = `Frame: ${result.frame_mode.toUpperCase()}`;
-        }
-    }
-}
-
-async function applyAlignmentConfig(clear = false) {
-    const btn = event && event.target;
-    if (btn) setButtonProcessing(btn, true);
-
-    const payload = {};
-    const minConfInput = document.getElementById('align-min-confidence');
-    if (minConfInput && minConfInput.value) {
-        payload.min_confidence = parseFloat(minConfInput.value) / 100;
-    }
-
-    if (clear) {
-        payload.clear = true;
-    } else {
-        const x0El = document.getElementById('align-x0');
-        const x1El = document.getElementById('align-x1');
-        const y0El = document.getElementById('align-y0');
-        const y1El = document.getElementById('align-y1');
-        const x0 = parseFloat((x0El && x0El.value) || '0');
-        const x1 = parseFloat((x1El && x1El.value) || '100');
-        const y0 = parseFloat((y0El && y0El.value) || '0');
-        const y1 = parseFloat((y1El && y1El.value) || '100');
-        payload.roi = { x0, x1, y0, y1 };
-    }
-
-    const result = await apiCall('set_alignment_config', payload);
-    if (btn) setButtonProcessing(btn, false);
-
-    if (!result.success) {
-        alert('Failed to update alignment settings: ' + (result.message || 'Unknown error'));
-    } else {
-        syncAlignmentInputs(result.roi, result.min_confidence);
-        alert(clear ? 'Alignment ROI cleared (full frame).' : 'Alignment ROI updated.');
-    }
-}
-
-async function detectAlignmentRoi() {
-    const btn = event && event.target;
-    if (btn) setButtonProcessing(btn, true);
-    const result = await apiCall('preview_roi', { apply: false });
-    if (btn) setButtonProcessing(btn, false);
-
-    if (result.success && result.roi) {
-        syncAlignmentInputs(result.roi, alignmentSettings.minConfidence);
-        // Show image with ROI overlay if provided
-        if (result.image) {
-            const previewImg = document.getElementById('preview-image');
-            const previewContainer = document.getElementById('preview-container');
-            const timestamp = document.getElementById('preview-timestamp');
-            if (previewImg && previewContainer && timestamp) {
-                previewImg.src = 'data:image/jpeg;base64,' + result.image;
-                previewContainer.style.display = 'block';
-                const now = new Date();
-                timestamp.textContent = 'ROI preview at ' + now.toLocaleTimeString();
-            }
-        }
-        alert('Detected ROI from preview. Red box shown on preview.');
-    } else {
-        alert('Could not detect ROI automatically: ' + (result.message || 'Unknown error'));
-    }
-}
-
-function clearAlignmentConfig() {
-    applyAlignmentConfig(true);
-}
-
 async function setAlignmentMode(mode) {
     const result = await apiCall('set_alignment_mode', { mode });
     if (!result.success) {
@@ -609,8 +461,6 @@ async function setFrameMode(mode) {
     if (frameModeEl && result.frame_mode) {
         frameModeEl.textContent = `Frame: ${result.frame_mode.toUpperCase()}`;
     }
-    // Reload alignment config to reflect defaults if needed
-    loadAlignmentConfig();
 }
 
 function togglePreviewInvert() {

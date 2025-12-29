@@ -1337,146 +1337,334 @@ class FilmScanner:
                 "confidence": 0.8,
             }
 
-        # === HALF FRAME MODE ===
+        # === HALF FRAME MODE - CENTER THE GAP ===
         else:
-            # No gap detected - need to search forward
-            if gap_count == 0 or confidence < 0.15:
-                self.log(f"   No gap detected, searching forward...")
-                self.send("H100", update_position=False)
-                time.sleep(0.5)
-                return False, "No gap found - moved forward to search", {
-                    "mode": "searching",
-                    "total_steps": 100,
-                    "confidence": confidence,
-                }
+            # Half frame: need gap in the MIDDLE, no gaps on edges
+            # Use same strict detection as full frame mode
             
-            # Gap found - calculate move to center it
-            offset_px = result.offset_px if result.offset_px else 0
+            total_steps = 0
+            max_attempts = 5
             
-            if abs(offset_px) <= 10:
-                self.status_msg = "✓ Aligned (centered)"
-                self.log(f"✓ Gap already centered!")
-                return True, "Already centered", {
-                    "mode": "aligned",
-                    "total_steps": 0,
-                    "offset_px": offset_px,
-                    "confidence": confidence,
-                }
+            for attempt in range(max_attempts):
+                # Get fresh frame
+                if attempt > 0:
+                    time.sleep(0.3)
+                    frame_bytes, _ = self.get_alignment_frame(timeout=0.8)
+                    if not frame_bytes:
+                        continue
+                
+                try:
+                    import numpy as np
+                    import cv2
+                    nparr = np.frombuffer(frame_bytes, np.uint8)
+                    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                    if img is None:
+                        continue
+                    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                    h, w = gray.shape
+                    
+                    # Crop to middle 70% vertically (avoid camera overlays)
+                    y_start = int(h * 0.15)
+                    y_end = int(h * 0.85)
+                    cropped = gray[y_start:y_end, :]
+                    
+                    # Compute per-column stats (same as full frame mode)
+                    col_mean = cropped.mean(axis=0) / 255.0
+                    col_std = cropped.std(axis=0) / 255.0
+                    
+                    # STRICT gap criteria
+                    brightness_threshold = max(np.percentile(col_mean, 80), 0.60)
+                    std_threshold = 0.08
+                    
+                    gap_mask = (col_mean >= brightness_threshold) & (col_std <= std_threshold)
+                    
+                    # Find gap regions
+                    gap_regions = []
+                    in_gap = False
+                    gap_start = 0
+                    
+                    for i in range(len(gap_mask)):
+                        if gap_mask[i] and not in_gap:
+                            gap_start = i
+                            in_gap = True
+                        elif not gap_mask[i] and in_gap:
+                            gap_end = i
+                            gap_width = gap_end - gap_start
+                            if gap_width >= 8:
+                                gap_center = (gap_start + gap_end) / 2
+                                gap_brightness = col_mean[gap_start:gap_end].mean()
+                                gap_uniformity = 1.0 - col_std[gap_start:gap_end].mean()
+                                gap_score = gap_brightness * gap_uniformity
+                                gap_regions.append({
+                                    "start": gap_start,
+                                    "end": gap_end,
+                                    "center": gap_center,
+                                    "width": gap_width,
+                                    "score": gap_score,
+                                })
+                            in_gap = False
+                    
+                    if in_gap:
+                        gap_end = len(gap_mask)
+                        gap_width = gap_end - gap_start
+                        if gap_width >= 8:
+                            gap_center = (gap_start + gap_end) / 2
+                            gap_brightness = col_mean[gap_start:gap_end].mean()
+                            gap_uniformity = 1.0 - col_std[gap_start:gap_end].mean()
+                            gap_score = gap_brightness * gap_uniformity
+                            gap_regions.append({
+                                "start": gap_start,
+                                "end": gap_end,
+                                "center": gap_center,
+                                "width": gap_width,
+                                "score": gap_score,
+                            })
+                    
+                    self.log(f"   [{attempt+1}] Found {len(gap_regions)} gap regions")
+                    
+                    # No gap found - search forward
+                    if not gap_regions:
+                        self.log(f"   No gap detected, searching forward...")
+                        self.send("H100", update_position=False)
+                        total_steps += 100
+                        time.sleep(0.4)
+                        continue
+                    
+                    # Pick the best gap
+                    best_gap = max(gap_regions, key=lambda g: g["score"])
+                    gap_center = best_gap["center"]
+                    gap_fraction = gap_center / w  # 0 = left, 1 = right
+                    frame_center = w / 2
+                    
+                    self.log(f"   Best gap at {gap_fraction:.1%} (center_x={gap_center:.0f}, frame_center={frame_center:.0f})")
+                    
+                    # Check if gap is centered (within 40-60% of frame)
+                    if 0.40 <= gap_fraction <= 0.60:
+                        # Check edges are clear (no gaps in left/right 15%)
+                        left_edge = int(w * 0.15)
+                        right_edge = int(w * 0.85)
+                        
+                        has_left_gap = any(g["center"] < left_edge for g in gap_regions)
+                        has_right_gap = any(g["center"] > right_edge for g in gap_regions)
+                        
+                        if not has_left_gap and not has_right_gap:
+                            self.status_msg = "✓ Centered"
+                            self.log(f"   ✓ Gap centered! No edge gaps. Total: {total_steps} steps")
+                            self.alignment_confidence = 1.0
+                            return True, "Centered", {
+                                "mode": "aligned",
+                                "total_steps": total_steps,
+                                "attempts": attempt + 1,
+                                "confidence": 1.0,
+                            }
+                    
+                    # Gap not centered - calculate move to center it
+                    offset_px = gap_center - frame_center  # Positive = gap is right of center
+                    
+                    if offset_px > 0:
+                        # Gap is RIGHT of center - move BACKWARD to shift gap left
+                        steps = max(20, min(150, int(abs(offset_px) / 2)))
+                        direction = "BACKWARD"
+                        cmd = f"h{steps}"
+                        self.log(f"   Gap right of center -> moving BACKWARD {steps} steps")
+                    else:
+                        # Gap is LEFT of center - move FORWARD to shift gap right
+                        steps = max(20, min(150, int(abs(offset_px) / 2)))
+                        direction = "FORWARD"
+                        cmd = f"H{steps}"
+                        self.log(f"   Gap left of center -> moving FORWARD {steps} steps")
+                    
+                    # Execute move
+                    moved = self.send(cmd, update_position=False)
+                    if not moved:
+                        return False, "Motor failed", {"mode": "error", "total_steps": total_steps, "confidence": 0}
+                    
+                    total_steps += steps if direction == "FORWARD" else -steps
+                    time.sleep(0.3 + steps * 0.003)
+                    
+                except Exception as e:
+                    self.log(f"   Error: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    continue
             
-            # Calculate centering move
-            px_per_step = max(0.5, float(self.px_per_step))
-            steps = int(offset_px / px_per_step)
-            
-            if abs(steps) < min_step:
-                steps = min_step if steps >= 0 else -min_step
-            steps = max(-max_step, min(max_step, steps))
-            
-            self.log(f"   Gap offset: {offset_px}px, centering with {steps} steps")
-            
-            cmd = f"H{abs(steps)}" if steps > 0 else f"h{abs(steps)}"
-            self.send(cmd, update_position=False)
-            
-            time.sleep(0.3 + abs(steps) * 0.002)
-            
-            self.status_msg = "✓ Centered"
-            return True, "Centered", {
-                "mode": "centered",
-                "total_steps": steps,
-                "offset_px": offset_px,
-                "confidence": self.alignment_confidence,
+            # Max attempts
+            self.status_msg = "⚠ May need adjustment"
+            self.log(f"   Max attempts reached, {total_steps} total steps")
+            return True, "Moved - check centering", {
+                "mode": "moved",
+                "total_steps": total_steps,
+                "attempts": max_attempts,
+                "confidence": 0.5,
             }
     
-    def advance_and_align(self, max_iters=30):
+    def advance_and_align(self, max_iters=20):
         """
         Advance to next frame after capture.
         
-        Workflow:
-        1. Move FORWARD to push current frame out to the right
-        2. Gap will appear on the left
-        3. Keep moving forward until gap exits left side
-        4. Next frame is now centered
+        Uses the same strict gap detection as auto_align.
         
-        This is the "after capture" alignment - always moves forward.
+        FULL FRAME MODE:
+        1. Move FORWARD to push current frame out
+        2. Gap appears on left, keep moving until gap exits left
+        3. Stop when no gap visible (next frame aligned)
+        
+        HALF FRAME MODE:
+        1. Move FORWARD until gap appears
+        2. Center the gap in the middle of the frame
         """
+        import numpy as np
+        import cv2
+        
         total_steps_moved = 0
         saw_gap = False
         
-        self.log(f"▶ Advancing to next frame...")
+        self.log(f"▶ Advancing to next frame [{self.frame_mode}]...")
         
         for iteration in range(max_iters):
             if iteration > 0:
-                time.sleep(0.15)
+                time.sleep(0.25)
             
             frame_bytes, _ = self.get_alignment_frame(timeout=0.8)
             if not frame_bytes:
                 continue
             
             try:
-                result = detect_frame_gap(
-                    frame_bytes,
-                    roi={"x0": 0.05, "x1": 0.95, "y0": 0.15, "y1": 0.85},
-                    mean_threshold=0.50,
-                    std_threshold=0.22,
-                    min_gap_width=4,
-                    max_gap_width=400,
-                )
-            except:
+                nparr = np.frombuffer(frame_bytes, np.uint8)
+                img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                if img is None:
+                    continue
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                h, w = gray.shape
+                
+                # Crop to middle 70% vertically
+                y_start = int(h * 0.15)
+                y_end = int(h * 0.85)
+                cropped = gray[y_start:y_end, :]
+                
+                # Column stats
+                col_mean = cropped.mean(axis=0) / 255.0
+                col_std = cropped.std(axis=0) / 255.0
+                
+                # Check for end of roll (entire frame is uniformly bright)
+                if col_mean.min() > 0.85 and col_std.max() < 0.10:
+                    self.log("⚠ End of roll detected (uniform maximum brightness)")
+                    self.status_msg = "End of roll"
+                    return True, "End of roll", {"mode": "end_of_roll", "total_steps": total_steps_moved}
+                
+                # STRICT gap detection
+                brightness_threshold = max(np.percentile(col_mean, 80), 0.60)
+                std_threshold = 0.08
+                gap_mask = (col_mean >= brightness_threshold) & (col_std <= std_threshold)
+                
+                # Find gap regions
+                gap_regions = []
+                in_gap = False
+                gap_start = 0
+                
+                for i in range(len(gap_mask)):
+                    if gap_mask[i] and not in_gap:
+                        gap_start = i
+                        in_gap = True
+                    elif not gap_mask[i] and in_gap:
+                        gap_end = i
+                        gap_width = gap_end - gap_start
+                        if gap_width >= 8:
+                            gap_center = (gap_start + gap_end) / 2
+                            gap_regions.append({
+                                "start": gap_start,
+                                "end": gap_end,
+                                "center": gap_center,
+                                "width": gap_width,
+                            })
+                        in_gap = False
+                
+                if in_gap:
+                    gap_end = len(gap_mask)
+                    gap_width = gap_end - gap_start
+                    if gap_width >= 8:
+                        gap_center = (gap_start + gap_end) / 2
+                        gap_regions.append({
+                            "start": gap_start,
+                            "end": gap_end,
+                            "center": gap_center,
+                            "width": gap_width,
+                        })
+                
+                has_gap = len(gap_regions) > 0
+                
+                if has_gap:
+                    saw_gap = True
+                    best_gap = max(gap_regions, key=lambda g: g["width"])
+                    gap_fraction = best_gap["center"] / w
+                    
+                    self.log(f"   [{iteration+1}] Gap at {gap_fraction:.1%} (width={best_gap['width']})")
+                    
+                    if self.frame_mode == "full":
+                        # FULL FRAME: push gap out left edge, always move forward
+                        steps = max(40, min(200, int((best_gap["center"] + best_gap["width"]) / 2)))
+                        self.log(f"   Moving FORWARD {steps} steps to push gap out left")
+                        self.send(f"H{steps}", update_position=False)
+                        total_steps_moved += steps
+                    else:
+                        # HALF FRAME: center the gap
+                        frame_center = w / 2
+                        offset = best_gap["center"] - frame_center
+                        
+                        if abs(offset) <= w * 0.10:  # Within 10% of center = good enough
+                            # Check no gaps on edges
+                            left_edge = int(w * 0.15)
+                            right_edge = int(w * 0.85)
+                            has_left = any(g["center"] < left_edge for g in gap_regions)
+                            has_right = any(g["center"] > right_edge for g in gap_regions)
+                            
+                            if not has_left and not has_right:
+                                self.status_msg = "✓ Next frame ready (centered)"
+                                self.log(f"✓ Gap centered! Total: {total_steps_moved} steps")
+                                return True, "Next frame centered", {
+                                    "mode": "aligned",
+                                    "total_steps": total_steps_moved,
+                                    "iterations": iteration + 1,
+                                }
+                        
+                        # Move to center gap
+                        if offset > 0:
+                            # Gap right of center - move backward
+                            steps = max(20, min(100, int(abs(offset) / 2)))
+                            self.log(f"   Gap right of center -> BACKWARD {steps}")
+                            self.send(f"h{steps}", update_position=False)
+                            total_steps_moved -= steps
+                        else:
+                            # Gap left of center - move forward
+                            steps = max(20, min(100, int(abs(offset) / 2)))
+                            self.log(f"   Gap left of center -> FORWARD {steps}")
+                            self.send(f"H{steps}", update_position=False)
+                            total_steps_moved += steps
+                
+                elif saw_gap and not has_gap:
+                    # FULL FRAME: We saw a gap and now it's gone = aligned!
+                    if self.frame_mode == "full":
+                        self.status_msg = "✓ Next frame ready"
+                        self.log(f"✓ Advanced to next frame! {total_steps_moved} steps")
+                        return True, "Next frame aligned", {
+                            "mode": "aligned",
+                            "total_steps": total_steps_moved,
+                            "iterations": iteration + 1,
+                        }
+                    else:
+                        # HALF FRAME: gap disappeared but we need it centered - keep searching
+                        self.log(f"   [{iteration+1}] Gap lost, searching forward...")
+                        self.send("H80", update_position=False)
+                        total_steps_moved += 80
+                else:
+                    # No gap yet - keep moving forward
+                    self.log(f"   [{iteration+1}] No gap yet, advancing...")
+                    self.send("H100", update_position=False)
+                    total_steps_moved += 100
+                    
+            except Exception as e:
+                self.log(f"   Error: {e}")
                 continue
-            
-            debug = result.debug_info or {}
-            gap_count = int(debug.get("gap_count", 0))
-            confidence = float(result.confidence) if result.confidence else 0.0
-            
-            lit_x0 = debug.get("lit_region", {}).get("x0", 0)
-            lit_x1 = debug.get("lit_region", {}).get("x1", 640)
-            frame_width = max(lit_x1 - lit_x0, 100)
-            
-            # Check for end of roll (entire frame is uniformly very bright - no film at all)
-            # Must have BOTH high mean AND low std (uniform brightness across whole frame)
-            col_mean_max = debug.get("col_mean_max", 0)
-            col_mean_min = debug.get("col_mean_min", 0)
-            col_std_max = debug.get("col_std_max", 1)
-            
-            # End of roll: entire frame is bright (min > 0.85) and uniform (std < 0.1)
-            if col_mean_min > 0.85 and col_std_max < 0.10 and gap_count == 0:
-                self.log("⚠ End of roll detected (uniform maximum brightness)")
-                self.status_msg = "End of roll"
-                return True, "End of roll", {"mode": "end_of_roll", "total_steps": total_steps_moved}
-            
-            if gap_count > 0 and confidence > 0.10:
-                saw_gap = True
-                gap_local = result.gap_x - lit_x0
-                gap_fraction = gap_local / frame_width
-                
-                self.log(f"   [{iteration+1}] Gap at {gap_fraction:.0%}, advancing...")
-                
-                # Always move forward - we're advancing to next frame
-                # Calculate how far to push gap out the left side
-                gap_width = result.gaps[0].width if result.gaps else 20
-                distance_px = gap_local + gap_width + 50  # Push gap out left + margin
-                
-                px_per_step = max(0.5, float(self.px_per_step))
-                steps = max(30, int(distance_px / px_per_step))
-                steps = min(steps, 400)
-                
-                cmd = f"H{steps}"  # Always forward
-                self.send(cmd, update_position=False)
-                total_steps_moved += steps
-                
-            elif saw_gap and gap_count == 0:
-                # We saw a gap and now it's gone = next frame is aligned!
-                self.status_msg = "✓ Next frame ready"
-                self.log(f"✓ Advanced to next frame! {total_steps_moved} steps")
-                return True, "Next frame aligned", {
-                    "mode": "aligned",
-                    "total_steps": total_steps_moved,
-                    "iterations": iteration + 1,
-                }
-            else:
-                # No gap yet - keep moving forward to find one
-                self.log(f"   [{iteration+1}] No gap yet, advancing...")
-                self.send("H100", update_position=False)
-                total_steps_moved += 100
         
         self.log(f"⚠ Advance incomplete after {max_iters} iterations")
         return False, "Max iterations", {"mode": "max_iterations", "total_steps": total_steps_moved}

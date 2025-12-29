@@ -154,49 +154,6 @@
                     Auto-align not run yet.
                 </div>
             </div>
-            <div class="settings-section" id="alignment-region-section">
-                <h3>Auto-Align Region</h3>
-                <div class="setting-group">
-                    <label for="align-x0">X start (%)</label>
-                    <input type="number" id="align-x0" min="0" max="100" step="1" value="0">
-                </div>
-                <div class="setting-group">
-                    <label for="align-x1">X end (%)</label>
-                    <input type="number" id="align-x1" min="0" max="100" step="1" value="100">
-                </div>
-                <div class="setting-group">
-                    <label for="align-y0">Y start (%)</label>
-                    <input type="number" id="align-y0" min="0" max="100" step="1" value="0">
-                </div>
-                <div class="setting-group">
-                    <label for="align-y1">Y end (%)</label>
-                    <input type="number" id="align-y1" min="0" max="100" step="1" value="100">
-                </div>
-                <div class="setting-group">
-                    <label for="align-min-confidence">Min confidence (%)</label>
-                    <input type="number" id="align-min-confidence" min="1" max="90" step="1" value="3">
-                </div>
-                <div class="control-options">
-                    <button class="btn btn-primary" onclick="applyAlignmentConfig()">
-                        Save Alignment ROI
-                    </button>
-                    <button class="btn btn-secondary" onclick="clearAlignmentConfig()">
-                        Use Full Frame
-                    </button>
-                    <button class="btn btn-secondary" onclick="detectAlignmentRoi()">
-                        Detect ROI from Preview
-                    </button>
-                </div>
-                <div class="help-text" id="alignment-roi-display">
-                    ROI: full frame
-                </div>
-                <div class="help-text" id="alignment-min-confidence-display">
-                    Min confidence: 10%
-                </div>
-                <div class="help-text">
-                    Tip: Set the ROI to the masked portion where the film is visible to avoid blank areas.
-                </div>
-            </div>
         </section>
 
         <!-- Camera Controls -->
@@ -275,11 +232,6 @@
                     <button class="btn btn-secondary" onclick="setAlignmentMode('calibration')">Calibration Only</button>
                 </div>
                 <div class="help-text" id="alignment-mode-display">Mode: stream</div>
-            </div>
-
-            <div class="settings-section" id="alignment-roi-section">
-                <h3>Alignment ROI</h3>
-                <p class="help-text">ROI and Detect/Save are still used by stream auto-align to focus on the film window.</p>
             </div>
 
             <div class="settings-section">
