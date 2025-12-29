@@ -1122,28 +1122,61 @@ class FilmScanner:
 
         # Handle different frame modes differently
         if self.frame_mode == "full":
-            # FULL FRAME MODE: We want NO gap visible (or gap pushed to edge)
+            # FULL FRAME MODE: We want NO gap visible - push any detected gap OUT of frame
             # If no gaps detected, we're aligned!
             if gap_count == 0 or result.confidence == 0:
                 self.status_msg = "✓ Aligned (no gap)"
                 self.log("✓ Full frame aligned - no gap visible")
                 return True, "Aligned", {**info, "mode": "aligned"}
             
-            # For full frame, only consider gaps in the middle 80% of the frame
-            # (gaps at edges <10% or >90% are nearly out and we can consider aligned)
-            frame_width = debug.get("lit_region", {}).get("x1", 1920) - debug.get("lit_region", {}).get("x0", 0)
+            # Calculate gap position relative to lit region
+            lit_x0 = debug.get("lit_region", {}).get("x0", 0)
+            lit_x1 = debug.get("lit_region", {}).get("x1", 1920)
+            frame_width = lit_x1 - lit_x0
             if frame_width <= 0:
                 frame_width = 1920  # Default
             
             if result.gap_x:
-                gap_fraction = result.gap_x / frame_width
-                if gap_fraction < 0.10 or gap_fraction > 0.90:
-                    self.status_msg = "✓ Aligned (gap at edge)"
-                    self.log(f"✓ Full frame aligned - gap at edge ({gap_fraction:.1%})")
-                    return True, "Aligned", {**info, "mode": "aligned_edge"}
+                # Calculate position relative to lit region (not global coords)
+                gap_local = result.gap_x - lit_x0
+                gap_fraction = gap_local / frame_width
+                center_of_lit = (lit_x0 + lit_x1) // 2
                 
-                # Gap detected in center area - need to move it out of frame
-                self.log(f"▶ Full frame: gap at {result.gap_x}px ({gap_fraction:.1%}), offset: {result.offset_px}px")
+                self.log(f"▶ Full frame: gap at {result.gap_x}px (local: {gap_local}px, {gap_fraction:.1%}), offset: {result.offset_px}px")
+                
+                # For full frame: ANY visible gap means we need to move
+                # Calculate direction: push gap toward nearest edge
+                if gap_fraction < 0.5:
+                    # Gap is on left side - move backward to push it out left
+                    direction = -1
+                    distance_to_edge = gap_local + (result.gaps[0].width if result.gaps else 20)
+                else:
+                    # Gap is on right side - move forward to push it out right
+                    direction = 1
+                    distance_to_edge = frame_width - gap_local + (result.gaps[0].width if result.gaps else 20)
+                
+                # Convert to steps and move
+                px_per_step = max(0.5, float(self.px_per_step))
+                steps = int(direction * distance_to_edge / px_per_step)
+                
+                # Add extra margin to ensure gap is pushed out
+                steps = int(steps * 1.3) + (30 * direction)
+                
+                # Clamp to reasonable range
+                steps = max(-max_step, min(max_step, steps))
+                
+                if abs(steps) < min_step:
+                    steps = min_step * direction
+                
+                cmd = f"H{abs(steps)}" if steps > 0 else f"h{abs(steps)}"
+                self.log(f"▶ Moving motor to push gap out: {cmd} ({steps} steps)")
+                
+                moved = self.send(cmd)
+                if not moved:
+                    return False, "Motor move failed", {**info, "mode": "move_failed", "steps": steps}
+                
+                self.status_msg = f"Pushing gap out: {steps} steps"
+                return True, "Moving to push gap out", {**info, "mode": "moving", "steps": steps}
             
         else:
             # HALF FRAME MODE: We want gap CENTERED at ~50%
