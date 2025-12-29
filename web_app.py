@@ -1190,11 +1190,7 @@ class FilmScanner:
                 "gap_fraction": gap_fraction,
                 "final_gap_count": final_gap_count,
             }
-                
-                total_steps_moved += steps
-                self.status_msg = f"Aligning... gap at {gap_fraction:.0%}"
-                continue
-            
+
         # === HALF FRAME MODE ===
         else:
             # No gap detected - need to search forward
