@@ -113,11 +113,15 @@ function updateUI(status) {
     document.getElementById('mode-display').textContent = status.mode.toUpperCase();
     document.getElementById('auto-advance').textContent = status.auto_advance ? 'ON' : 'OFF';
     
-    // Show/hide calibration panel based on strip count
-    if (status.strip_count === 0 && status.roll_name) {
+    // Show/hide calibration panel based on strip count and alignment mode
+    // In "stream" (auto-align) mode, calibration is NOT required
+    const needsCalibration = status.strip_count === 0 && status.roll_name && status.alignment_mode !== 'stream';
+    
+    if (needsCalibration) {
         document.getElementById('calibration-panel').style.display = 'block';
         document.getElementById('strip-panel').style.display = 'none';
-    } else if (status.strip_count > 0) {
+    } else if (status.strip_count > 0 || (status.roll_name && status.alignment_mode === 'stream')) {
+        // Show strip panel if calibrated OR if using auto-align mode
         document.getElementById('calibration-panel').style.display = 'none';
         document.getElementById('strip-panel').style.display = 'block';
     } else {
