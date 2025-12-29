@@ -386,9 +386,7 @@ class AppManager:
             True if stopped successfully
         """
         with self._lock:
-            if self.state == AppState.STOPPED:
-                return True
-            
+            # Don't skip if STOPPED - there might be orphan processes
             self._set_state(AppState.STOPPING)
         
         self._stop_event.set()
@@ -415,17 +413,15 @@ class AppManager:
                         self.process.kill()
                     self.process.wait(timeout=5)
                 
-                # Also kill any remaining processes on port 5000
-                self._kill_port_processes(5000)
-                
                 self.process = None
                 self.status.pid = None
                 
             except Exception as e:
                 self.status.last_error = f"Stop error: {e}"
-                # Try to kill by port as last resort
-                self._kill_port_processes(5000)
-                return False
+        
+        # ALWAYS kill any processes on port 5000, even if self.process is None
+        # This handles cases where the app was started outside the touch UI
+        self._kill_port_processes(5000)
         
         # Close log file if open
         if self._log_file:
