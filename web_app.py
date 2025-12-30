@@ -448,6 +448,11 @@ class FilmScanner:
         self.alignment_mode = "stream"  # stream (auto) or calibration (distance-only)
         self.frame_mode = "full"  # full or half
         
+        # Scanner mode: "35mm" (Arduino motor control) or "120" (hand feed, no Arduino)
+        self.scanner_mode = "35mm"
+        # Auto-alignment toggle: when False, skip all auto alignment
+        self.auto_alignment_enabled = True
+        
         # State persistence
         self.state_file = None
         self.settings_dir = Path.home() / ".film_scanner"
@@ -1656,20 +1661,21 @@ class FilmScanner:
                                     "iterations": iteration + 1,
                                 }
                         
-                        # Move to center gap - PREFER FORWARD, backward only for fine correction
+                        # Move to center gap
+                        # offset > 0 means gap is RIGHT of center (needs more forward)
+                        # offset < 0 means gap is LEFT of center (we overshot)
                         if offset > 0:
-                            # Gap right of center - need to move backward (fine adjustment only)
-                            # Only small backward moves allowed
-                            steps = max(15, min(40, int(abs(offset) / 3)))
-                            self.log(f"   Gap right of center -> fine BACKWARD {steps}")
-                            self.send(f"h{steps}", update_position=False)
-                            total_steps_moved -= steps
-                        else:
-                            # Gap left of center - move forward (preferred direction)
-                            steps = max(30, min(120, int(abs(offset) / 2)))
-                            self.log(f"   Gap left of center -> FORWARD {steps}")
+                            # Gap RIGHT of center - move FORWARD to bring it to center
+                            steps = max(10, min(40, int(abs(offset) / 4)))
+                            self.log(f"   Gap right of center -> FORWARD {steps}")
                             self.send(f"H{steps}", update_position=False)
                             total_steps_moved += steps
+                        else:
+                            # Gap LEFT of center - we overshot, small backward correction
+                            steps = max(8, min(25, int(abs(offset) / 4)))
+                            self.log(f"   Gap left of center (overshot) -> BACKWARD {steps}")
+                            self.send(f"h{steps}", update_position=False)
+                            total_steps_moved -= steps
                 
                 elif saw_gap and not has_gap:
                     # FULL FRAME: We saw a gap and now it's gone = aligned!
@@ -1843,6 +1849,8 @@ class FilmScanner:
             'mode': self.mode,
             'auto_advance': self.auto_advance,
             'alignment_mode': self.alignment_mode,
+            'scanner_mode': self.scanner_mode,
+            'auto_alignment_enabled': self.auto_alignment_enabled,
             'updated': datetime.now().isoformat()
         }
         
@@ -1866,6 +1874,8 @@ class FilmScanner:
                 self.mode = state.get('mode', 'manual')
                 self.auto_advance = state.get('auto_advance', True)
                 self.alignment_mode = state.get('alignment_mode', self.alignment_mode)
+                self.scanner_mode = state.get('scanner_mode', self.scanner_mode)
+                self.auto_alignment_enabled = state.get('auto_alignment_enabled', self.auto_alignment_enabled)
                 return True
         return False
     
@@ -1939,6 +1949,8 @@ class FilmScanner:
                 'auto_advance': self.auto_advance,
                 'alignment_mode': self.alignment_mode,
                 'frame_mode': self.frame_mode,
+                'scanner_mode': self.scanner_mode,
+                'auto_alignment_enabled': self.auto_alignment_enabled,
                 'camera_connected': self.camera_connected,
                 'camera_model': self.camera_model,
                 'camera_error': self.camera_error,
@@ -2160,7 +2172,8 @@ def capture():
         return jsonify({'success': False, 'message': 'Camera not connected'})
     
     # Optional pre-capture fine-tune (only does minor adjustments if gap visible on edge)
-    if auto_align_before and scanner.alignment_mode == "stream":
+    # Respects both the checkbox AND the global auto_alignment_enabled setting
+    if auto_align_before and scanner.alignment_mode == "stream" and scanner.auto_alignment_enabled:
         try:
             # Only do edge fine-tune, not full realignment
             scanner.log("Pre-capture edge check...")
@@ -2181,9 +2194,13 @@ def capture():
         scanner.status_msg = f"✓ Frame {scanner.frame_count}"
         scanner.broadcast_status()
         
-        # Auto-advance AFTER capture
-        if scanner.alignment_mode == "stream":
-            # STREAM MODE: Use advance_and_align (always moves FORWARD/right)
+        # Auto-advance AFTER capture (only in 35mm mode with Arduino)
+        # In 120 mode (hand feed), skip all motor operations
+        if scanner.scanner_mode == "120":
+            # 120 mode: No auto-advance, user manually feeds film
+            scanner.status_msg = f"✓ Frame {scanner.frame_count} (hand feed next)"
+        elif scanner.alignment_mode == "stream" and scanner.auto_alignment_enabled:
+            # STREAM MODE with auto-alignment: Use advance_and_align (always moves FORWARD/right)
             time.sleep(0.3)  # Brief pause before advancing
             try:
                 adv_success, adv_msg, adv_info = scanner.advance_and_align()
@@ -2320,6 +2337,67 @@ def set_alignment_mode_route():
             })
     except ValueError as e:
         return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/set_scanner_mode', methods=['POST'])
+def set_scanner_mode_route():
+    """
+    Set scanner mode: 35mm (Arduino motor control) or 120 (hand feed, no Arduino).
+    
+    120 mode is for medium format film scanning with manual film advancement.
+    In this mode, Arduino/motor controls are hidden and only preview/capture is available.
+    """
+    data = request.json or {}
+    mode = (data.get('mode') or '').strip().lower()
+    
+    # Normalize mode names
+    if mode in ('35mm', '35'):
+        mode = '35mm'
+    elif mode in ('120', 'medium', 'medium format'):
+        mode = '120'
+    else:
+        return jsonify({'success': False, 'message': "mode must be '35mm' or '120'"})
+    
+    with scanner.lock:
+        scanner.scanner_mode = mode
+    scanner.status_msg = f"Scanner mode: {scanner.scanner_mode}"
+    scanner.save_state()
+    scanner.broadcast_status()
+    
+    return jsonify({
+        'success': True,
+        'scanner_mode': scanner.scanner_mode,
+    })
+
+
+@app.route('/api/set_auto_alignment', methods=['POST'])
+def set_auto_alignment_route():
+    """
+    Toggle auto-alignment on or off.
+    
+    When disabled, no automatic frame alignment is performed - useful for manual control
+    or when the auto-alignment detection isn't working well for a particular film type.
+    """
+    data = request.json or {}
+    enabled = data.get('enabled')
+    
+    if enabled is None:
+        # Toggle if not specified
+        with scanner.lock:
+            scanner.auto_alignment_enabled = not scanner.auto_alignment_enabled
+    else:
+        with scanner.lock:
+            scanner.auto_alignment_enabled = bool(enabled)
+    
+    state = "enabled" if scanner.auto_alignment_enabled else "disabled"
+    scanner.status_msg = f"Auto-alignment: {state}"
+    scanner.save_state()
+    scanner.broadcast_status()
+    
+    return jsonify({
+        'success': True,
+        'auto_alignment_enabled': scanner.auto_alignment_enabled,
+    })
 
 
 @app.route('/api/set_frame_mode', methods=['POST'])
