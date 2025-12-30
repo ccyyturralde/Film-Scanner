@@ -26,6 +26,11 @@ let settingsState = {
     coarseStep: 192
 };
 
+let scannerState = {
+    mode: '35mm',  // '35mm' or '120'
+    autoAlignmentEnabled: true
+};
+
 
 // Connect to WebSocket
 socket.on('connect', () => {
@@ -40,9 +45,58 @@ socket.on('status_update', (status) => {
 
 // Update UI with status
 function updateUI(status) {
-    // Connection status
-    document.getElementById('arduino-status').className = 
-        status.arduino_connected ? 'status-badge connected' : 'status-badge disconnected';
+    // Update scanner mode state
+    if (status.scanner_mode) {
+        scannerState.mode = status.scanner_mode;
+    }
+    if (status.auto_alignment_enabled !== undefined) {
+        scannerState.autoAlignmentEnabled = status.auto_alignment_enabled;
+    }
+    
+    // Handle scanner mode (35mm vs 120)
+    const is120Mode = scannerState.mode === '120';
+    
+    // Update mode buttons
+    const mode35mmBtn = document.getElementById('mode-35mm-btn');
+    const mode120Btn = document.getElementById('mode-120-btn');
+    const settingsMode35mm = document.getElementById('settings-mode-35mm');
+    const settingsMode120 = document.getElementById('settings-mode-120');
+    
+    if (mode35mmBtn) mode35mmBtn.classList.toggle('active', !is120Mode);
+    if (mode120Btn) mode120Btn.classList.toggle('active', is120Mode);
+    if (settingsMode35mm) settingsMode35mm.classList.toggle('active', !is120Mode);
+    if (settingsMode120) settingsMode120.classList.toggle('active', is120Mode);
+    
+    // Update title based on mode
+    const appTitle = document.getElementById('app-title');
+    if (appTitle) {
+        appTitle.textContent = is120Mode ? '📷 120 Film Scanner' : '📷 35mm Film Scanner';
+    }
+    
+    // Update scanner mode display
+    const scannerModeDisplay = document.getElementById('scanner-mode-display');
+    if (scannerModeDisplay) {
+        scannerModeDisplay.textContent = `Mode: ${scannerState.mode}`;
+    }
+    
+    // Hide/show Arduino-only elements based on scanner mode
+    const arduinoOnlyElements = document.querySelectorAll('.arduino-only');
+    arduinoOnlyElements.forEach(el => {
+        el.style.display = is120Mode ? 'none' : '';
+    });
+    
+    // Update auto-alignment toggle
+    const autoAlignmentToggle = document.getElementById('auto-alignment-toggle');
+    if (autoAlignmentToggle) {
+        autoAlignmentToggle.checked = scannerState.autoAlignmentEnabled;
+    }
+    
+    // Connection status (only show Arduino status in 35mm mode)
+    const arduinoStatus = document.getElementById('arduino-status');
+    if (arduinoStatus) {
+        arduinoStatus.className = status.arduino_connected ? 'status-badge connected' : 'status-badge disconnected';
+        arduinoStatus.style.display = is120Mode ? 'none' : '';
+    }
     document.getElementById('camera-status').className = 
         status.camera_connected ? 'status-badge connected' : 'status-badge disconnected';
     
@@ -55,18 +109,26 @@ function updateUI(status) {
     if (alignModeEl && status.alignment_mode) {
         alignModeEl.textContent = `Mode: ${status.alignment_mode}`;
     }
+    
+    // Auto-align controls (hidden in 120 mode via arduino-only class)
     const autoAlignBtn = document.getElementById('auto-align-btn');
     const autoAlignCheckbox = document.getElementById('auto-align-before-capture');
     const autoAlignCheckboxWrap = document.getElementById('auto-align-checkbox-wrapper');
-    const isStreamMode = status.alignment_mode === 'stream';
-    if (autoAlignBtn) autoAlignBtn.style.display = isStreamMode ? 'inline-block' : 'none';
+    const isStreamMode = status.alignment_mode === 'stream' && !is120Mode;
+    const alignEnabled = scannerState.autoAlignmentEnabled && !is120Mode;
+    
+    if (autoAlignBtn) autoAlignBtn.style.display = isStreamMode && alignEnabled ? 'inline-block' : 'none';
     if (autoAlignCheckboxWrap) autoAlignCheckboxWrap.style.display = isStreamMode ? 'inline-block' : 'none';
-    if (autoAlignCheckbox) autoAlignCheckbox.disabled = !isStreamMode;
+    if (autoAlignCheckbox) autoAlignCheckbox.disabled = !isStreamMode || !alignEnabled;
     
     // Auto-align status
     const alignText = document.getElementById('auto-align-status');
     if (alignText) {
-        if (status.alignment_confidence > 0 && status.last_gap_px != null) {
+        if (is120Mode) {
+            alignText.textContent = 'Manual film feed mode';
+        } else if (!scannerState.autoAlignmentEnabled) {
+            alignText.textContent = 'Auto-alignment disabled';
+        } else if (status.alignment_confidence > 0 && status.last_gap_px != null) {
             const conf = (status.alignment_confidence * 100).toFixed(0);
             const pxPerStep = (status.px_per_step && !isNaN(status.px_per_step)) ? status.px_per_step.toFixed(2) : 'n/a';
             alignText.textContent = `Gap px: ${status.last_gap_px} | Confidence: ${conf}% | px/step: ${pxPerStep}`;
@@ -75,24 +137,31 @@ function updateUI(status) {
         }
     }
     
-    // Show/hide calibration and strip panels based on alignment mode
+    // Show/hide calibration and strip panels based on alignment mode (only in 35mm mode)
     // In "stream" (auto-align) mode, hide both - no calibration or strip management needed
-    if (isStreamMode) {
+    const calibrationPanel = document.getElementById('calibration-panel');
+    const stripPanel = document.getElementById('strip-panel');
+    
+    if (is120Mode) {
+        // 120 mode: Hide all calibration/strip panels
+        if (calibrationPanel) calibrationPanel.style.display = 'none';
+        if (stripPanel) stripPanel.style.display = 'none';
+    } else if (isStreamMode) {
         // Auto-align mode: hide calibration and strip management entirely
-        document.getElementById('calibration-panel').style.display = 'none';
-        document.getElementById('strip-panel').style.display = 'none';
+        if (calibrationPanel) calibrationPanel.style.display = 'none';
+        if (stripPanel) stripPanel.style.display = 'none';
     } else {
         // Calibration mode: show appropriate panel
         const needsCalibration = status.strip_count === 0 && status.roll_name;
         if (needsCalibration) {
-            document.getElementById('calibration-panel').style.display = 'block';
-            document.getElementById('strip-panel').style.display = 'none';
+            if (calibrationPanel) calibrationPanel.style.display = 'block';
+            if (stripPanel) stripPanel.style.display = 'none';
         } else if (status.strip_count > 0) {
-            document.getElementById('calibration-panel').style.display = 'none';
-            document.getElementById('strip-panel').style.display = 'block';
+            if (calibrationPanel) calibrationPanel.style.display = 'none';
+            if (stripPanel) stripPanel.style.display = 'block';
         } else {
-            document.getElementById('calibration-panel').style.display = 'none';
-            document.getElementById('strip-panel').style.display = 'none';
+            if (calibrationPanel) calibrationPanel.style.display = 'none';
+            if (stripPanel) stripPanel.style.display = 'none';
         }
     }
 }
@@ -434,6 +503,33 @@ async function setAlignmentMode(mode) {
         if (mode === 'stream' && previewState.videoActive) {
             startVideoStream();
         }
+    }
+}
+
+async function setScannerMode(mode) {
+    const result = await apiCall('set_scanner_mode', { mode });
+    if (!result.success) {
+        alert('Failed to set scanner mode: ' + (result.message || 'Unknown error'));
+    } else {
+        scannerState.mode = result.scanner_mode;
+        // Request full status update to refresh UI
+        socket.emit('request_status');
+    }
+}
+
+async function toggleAutoAlignment() {
+    const checkbox = document.getElementById('auto-alignment-toggle');
+    const enabled = checkbox ? checkbox.checked : !scannerState.autoAlignmentEnabled;
+    
+    const result = await apiCall('set_auto_alignment', { enabled });
+    if (!result.success) {
+        alert('Failed to toggle auto-alignment: ' + (result.message || 'Unknown error'));
+        // Revert checkbox on failure
+        if (checkbox) checkbox.checked = scannerState.autoAlignmentEnabled;
+    } else {
+        scannerState.autoAlignmentEnabled = result.auto_alignment_enabled;
+        // Request full status update to refresh UI
+        socket.emit('request_status');
     }
 }
 
