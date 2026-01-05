@@ -1235,20 +1235,24 @@ class FilmScanner:
                     
                     self.log(f"   Best gap at {gap_fraction:.1%} (x={gap_center:.0f}, width={gap_width}, score={best_gap['score']:.3f})")
                     
-                    # ALWAYS move FORWARD - prevents going back to previous frame
-                    distance_to_right = w - best_gap["end"]
-                    steps = max(15, min(60, int((distance_to_right + gap_width) / 3)))
-                    self.log(f"   Gap at {gap_fraction:.0%} -> FORWARD {steps} steps")
+                    # FULL FRAME: ALWAYS move FORWARD to push gap out left
+                    # Bigger steps when gap is far from left edge
+                    gap_start_x = best_gap["start"]
+                    if gap_start_x < w * 0.08:
+                        steps = 25   # Almost out
+                    elif gap_start_x < w * 0.20:
+                        steps = 60   # Near left
+                    elif gap_start_x < w * 0.40:
+                        steps = 100  # Getting there
+                    else:
+                        steps = 150  # Far from left - big push
                     
-                    # Execute move (always forward)
+                    self.log(f"   Gap at {gap_fraction:.0%} -> FORWARD {steps}")
                     moved = self.send(f"H{steps}", update_position=False)
                     if not moved:
                         return False, "Motor failed", {"mode": "error", "total_steps": total_steps, "confidence": 0}
-                    
                     total_steps += steps
-                    
-                    # Wait for motor to complete
-                    time.sleep(0.3 + steps * 0.003)
+                    time.sleep(0.08 + steps * 0.002)  # Faster timing
                     
                 except Exception as e:
                     self.log(f"   Error: {e}")
@@ -1628,14 +1632,16 @@ class FilmScanner:
                     self.log(f"   [{iteration+1}] Gap at {gap_fraction:.1%} (width={best_gap['width']})")
                     
                     if self.frame_mode == "full":
-                        # FULL FRAME: push gap out left edge with SMALL steps
+                        # FULL FRAME: push gap out left edge
                         gap_x_fraction = best_gap["start"] / w
                         if gap_x_fraction < 0.05:
-                            steps = 8   # Almost out - tiny push
+                            steps = 20   # Almost out
                         elif gap_x_fraction < 0.15:
-                            steps = 15  # Near left edge - small push
+                            steps = 50   # Near left
+                        elif gap_x_fraction < 0.30:
+                            steps = 80   # Getting there
                         else:
-                            steps = min(35, max(20, int(best_gap["start"] / 5)))
+                            steps = 120  # Far from left
                         self.log(f"   Moving FORWARD {steps} steps")
                         self.send(f"H{steps}", update_position=False)
                         total_steps_moved += steps
