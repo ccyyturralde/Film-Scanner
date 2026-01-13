@@ -296,6 +296,66 @@ class ConfigManager:
             print("\n❌ Failed to save configuration")
             return None
     
+    def is_interactive(self):
+        """Check if running in an interactive terminal"""
+        return sys.stdin.isatty()
+    
+    def is_raspberry_pi(self):
+        """Check if running on a Raspberry Pi"""
+        try:
+            with open('/proc/cpuinfo', 'r') as f:
+                cpuinfo = f.read()
+                return 'Raspberry Pi' in cpuinfo or 'BCM' in cpuinfo
+        except:
+            return False
+    
+    def auto_setup(self):
+        """Non-interactive automatic setup (for Raspberry Pi)"""
+        print("\n🔧 Auto-configuring Film Scanner...")
+        
+        if self.is_raspberry_pi():
+            # Running on Pi - create local config
+            local_ip = self.get_local_ip()
+            config = {
+                'setup_complete': True,
+                'setup_date': datetime.now().isoformat(),
+                'mode': 'local',
+                'pi_ip': local_ip,
+                'hostname': socket.gethostname(),
+                'port': 5000,
+                'camera_type': 'gphoto2'
+            }
+            
+            if self.save_config(config):
+                print(f"✓ Auto-configured for Raspberry Pi")
+                print(f"  IP: {local_ip}")
+                print(f"  Hostname: {socket.gethostname()}")
+                return config
+            else:
+                print("❌ Failed to save auto-configuration")
+                return None
+        else:
+            # Not on Pi and non-interactive - use localhost for testing
+            print("⚠️  Non-interactive mode on non-Pi system")
+            print("    Using localhost configuration")
+            config = {
+                'setup_complete': True,
+                'setup_date': datetime.now().isoformat(),
+                'mode': 'local',
+                'pi_ip': '127.0.0.1',
+                'hostname': 'localhost',
+                'port': 5000,
+                'camera_type': 'gphoto2'
+            }
+            
+            if self.save_config(config):
+                print("✓ Created default localhost configuration")
+                print("  Run with interactive terminal for full setup")
+                return config
+            else:
+                print("❌ Failed to save configuration")
+                return None
+    
     def get_config(self):
         """Get configuration, running setup if needed"""
         if self.config_exists():
@@ -303,8 +363,13 @@ class ConfigManager:
             if config:
                 return config
         
-        # No config exists or failed to load - run setup
-        return self.interactive_setup()
+        # No config exists - check if we can run interactive setup
+        if self.is_interactive():
+            # Interactive terminal available - run full setup
+            return self.interactive_setup()
+        else:
+            # Non-interactive (systemd, subprocess, etc.) - auto-setup
+            return self.auto_setup()
     
     def print_config(self):
         """Print current configuration"""
