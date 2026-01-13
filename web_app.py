@@ -1260,13 +1260,14 @@ class FilmScanner:
                     traceback.print_exc()
                     continue
             
-            # === FINAL EDGE FINE-TUNE (BOTH SIDES) ===
+            # === FINAL EDGE FINE-TUNE (BOTH SIDES) - ENHANCED ===
             # After main alignment, check BOTH left and right edges
-            # and push out any remaining gaps
+            # and push out any remaining gaps with adaptive thresholds
             # IMPORTANT: Check edges of the FILM area, not the total image (which has black borders)
             self.log(f"   Final edge fine-tune (both sides)...")
             
-            for fine_attempt in range(5):  # More attempts since checking both sides
+            # Use multi-pass approach with progressively stricter detection
+            for fine_attempt in range(8):  # Increased attempts for better coverage
                 time.sleep(0.25)
                 fine_frame, _ = self.get_alignment_frame(timeout=0.8)
                 if not fine_frame:
@@ -1293,79 +1294,206 @@ class FilmScanner:
                     film_region = gray[film_y0:film_y1, film_x0:film_x1]
                     film_h, film_w = film_region.shape
                     
-                    # Check LEFT edge of FILM (first 15%)
-                    left_edge_end = int(film_w * 0.15)
-                    left_region = film_region[:, 0:left_edge_end]
+                    # Apply light median blur to reduce noise
+                    film_region = cv2.medianBlur(film_region, 3)
+                    
+                    # === ADAPTIVE THRESHOLDS ===
+                    # Start strict, relax if no gaps found (prevents over-correction)
+                    if fine_attempt < 3:
+                        # First passes: strict detection (catch obvious gaps)
+                        brightness_thresh = 0.55
+                        std_thresh = 0.10
+                        min_gap_px = 5
+                    elif fine_attempt < 6:
+                        # Middle passes: moderate detection (catch smaller gaps)
+                        brightness_thresh = 0.50
+                        std_thresh = 0.12
+                        min_gap_px = 3
+                    else:
+                        # Final passes: sensitive detection (catch tiny gaps)
+                        brightness_thresh = 0.45
+                        std_thresh = 0.15
+                        min_gap_px = 2
+                    
+                    # Compute overall brightness stats for adaptive thresholding
+                    film_brightness = film_region.mean() / 255.0
+                    film_std = film_region.std() / 255.0
+                    
+                    # If film is generally bright, increase thresholds
+                    if film_brightness > 0.6:
+                        brightness_thresh = max(brightness_thresh, film_brightness * 0.85)
+                    
+                    # === LEFT EDGE CHECK (first 12%) ===
+                    left_edge_width = max(int(film_w * 0.12), 60)  # At least 60px
+                    left_region = film_region[:, 0:left_edge_width]
                     left_col_mean = left_region.mean(axis=0) / 255.0
                     left_col_std = left_region.std(axis=0) / 255.0
-                    left_gap_mask = (left_col_mean > 0.55) & (left_col_std < 0.10)
-                    left_gap_width = left_gap_mask.sum()
                     
-                    # Check RIGHT edge of FILM (last 15%)
-                    right_edge_start = int(film_w * 0.85)
+                    # Compute column uniformity (key for gap detection)
+                    left_col_uniformity = 1.0 - np.clip(left_col_std / 0.3, 0, 1)
+                    
+                    # Gap detection: bright + uniform OR very uniform + brighter than average
+                    left_gap_mask = (
+                        ((left_col_mean > brightness_thresh) & (left_col_std < std_thresh)) |
+                        ((left_col_uniformity > 0.80) & (left_col_mean > film_brightness * 1.1))
+                    )
+                    
+                    # Find contiguous gap regions
+                    left_gap_regions = []
+                    in_gap = False
+                    gap_start = 0
+                    for i in range(len(left_gap_mask)):
+                        if left_gap_mask[i] and not in_gap:
+                            gap_start = i
+                            in_gap = True
+                        elif not left_gap_mask[i] and in_gap:
+                            if i - gap_start >= min_gap_px:
+                                left_gap_regions.append((gap_start, i))
+                            in_gap = False
+                    if in_gap and len(left_gap_mask) - gap_start >= min_gap_px:
+                        left_gap_regions.append((gap_start, len(left_gap_mask)))
+                    
+                    left_gap_width = sum(end - start for start, end in left_gap_regions)
+                    
+                    # === RIGHT EDGE CHECK (last 12%) ===
+                    right_edge_start = max(int(film_w * 0.88), film_w - 60)
                     right_region = film_region[:, right_edge_start:]
                     right_col_mean = right_region.mean(axis=0) / 255.0
                     right_col_std = right_region.std(axis=0) / 255.0
-                    right_gap_mask = (right_col_mean > 0.55) & (right_col_std < 0.10)
-                    right_gap_width = right_gap_mask.sum()
                     
-                    self.log(f"   [Fine {fine_attempt+1}] Left gap: {left_gap_width}px, Right gap: {right_gap_width}px")
+                    right_col_uniformity = 1.0 - np.clip(right_col_std / 0.3, 0, 1)
                     
+                    right_gap_mask = (
+                        ((right_col_mean > brightness_thresh) & (right_col_std < std_thresh)) |
+                        ((right_col_uniformity > 0.80) & (right_col_mean > film_brightness * 1.1))
+                    )
+                    
+                    # Find contiguous gap regions
+                    right_gap_regions = []
+                    in_gap = False
+                    gap_start = 0
+                    for i in range(len(right_gap_mask)):
+                        if right_gap_mask[i] and not in_gap:
+                            gap_start = i
+                            in_gap = True
+                        elif not right_gap_mask[i] and in_gap:
+                            if i - gap_start >= min_gap_px:
+                                right_gap_regions.append((gap_start, i))
+                            in_gap = False
+                    if in_gap and len(right_gap_mask) - gap_start >= min_gap_px:
+                        right_gap_regions.append((gap_start, len(right_gap_mask)))
+                    
+                    right_gap_width = sum(end - start for start, end in right_gap_regions)
+                    
+                    self.log(f"   [Fine {fine_attempt+1}] Left: {left_gap_width}px ({len(left_gap_regions)} regions), Right: {right_gap_width}px ({len(right_gap_regions)} regions)")
+                    
+                    # === SUCCESS CHECK ===
                     # Both edges clear = ALIGNED!
-                    if left_gap_width < 5 and right_gap_width < 5:
+                    # Use adaptive threshold based on pass number
+                    clear_threshold = 2 if fine_attempt >= 6 else 3
+                    if left_gap_width <= clear_threshold and right_gap_width <= clear_threshold:
+                        # Calculate final confidence based on edge cleanliness
+                        edge_cleanliness = 1.0 - (left_gap_width + right_gap_width) / (left_edge_width * 0.05)
+                        final_confidence = max(0.95, min(1.0, edge_cleanliness))
+                        
                         self.status_msg = "✓ Aligned"
                         self.log(f"   ✓ Both edges clear! Total: {total_steps} steps")
-                        self.alignment_confidence = 1.0
+                        self.alignment_confidence = final_confidence
                         return True, "Aligned", {
                             "mode": "aligned",
                             "total_steps": total_steps,
                             "attempts": max_attempts,
                             "fine_tune_attempts": fine_attempt + 1,
-                            "confidence": 1.0,
+                            "confidence": final_confidence,
+                            "left_gap_width": left_gap_width,
+                            "right_gap_width": right_gap_width,
                         }
                     
-                    # Gap on LEFT edge - push it out by moving BACKWARD
-                    if left_gap_width >= 5:
-                        gap_cols = np.where(left_gap_mask)[0]
-                        if len(gap_cols) > 0:
-                            rightmost_gap_col = gap_cols.max()
-                            gap_extent = rightmost_gap_col + 1  # How far gap extends into frame
+                    # === CORRECTION MOVES ===
+                    # Prioritize larger gap first
+                    if left_gap_width > right_gap_width and left_gap_width > clear_threshold:
+                        # Gap on LEFT edge - push it out by moving BACKWARD
+                        if left_gap_regions:
+                            # Find rightmost gap pixel
+                            rightmost_gap = max(end for start, end in left_gap_regions)
                             
-                            fine_steps = max(15, min(80, int(gap_extent * 1.5)))
-                            self.log(f"   Left edge gap -> BACKWARD {fine_steps}")
+                            # Calculate steps based on gap extent and iteration
+                            # More aggressive in early passes, more precise in later passes
+                            if fine_attempt < 3:
+                                step_multiplier = 2.0
+                            elif fine_attempt < 6:
+                                step_multiplier = 1.5
+                            else:
+                                step_multiplier = 1.2
+                            
+                            fine_steps = int(rightmost_gap * step_multiplier)
+                            fine_steps = max(10, min(100, fine_steps))
+                            
+                            self.log(f"   Left edge gap (rightmost: {rightmost_gap}px) -> BACKWARD {fine_steps}")
                             
                             self.send(f"h{fine_steps}", update_position=False)
                             total_steps -= fine_steps
-                            time.sleep(0.2 + fine_steps * 0.003)
-                            continue  # Re-check after move
+                            time.sleep(0.15 + fine_steps * 0.002)
+                            continue
                     
-                    # Gap on RIGHT edge - push it out by moving FORWARD
-                    if right_gap_width >= 5:
-                        gap_cols = np.where(right_gap_mask)[0]
-                        if len(gap_cols) > 0:
-                            leftmost_gap_col = gap_cols.min()
-                            gap_extent = len(right_col_mean) - leftmost_gap_col
+                    elif right_gap_width > clear_threshold:
+                        # Gap on RIGHT edge - push it out by moving FORWARD
+                        if right_gap_regions:
+                            # Find leftmost gap pixel (relative to right_region start)
+                            leftmost_gap = min(start for start, end in right_gap_regions)
+                            gap_extent = len(right_col_mean) - leftmost_gap
                             
-                            fine_steps = max(15, min(80, int(gap_extent * 1.5)))
-                            self.log(f"   Right edge gap -> FORWARD {fine_steps}")
+                            # Calculate steps
+                            if fine_attempt < 3:
+                                step_multiplier = 2.0
+                            elif fine_attempt < 6:
+                                step_multiplier = 1.5
+                            else:
+                                step_multiplier = 1.2
+                            
+                            fine_steps = int(gap_extent * step_multiplier)
+                            fine_steps = max(10, min(100, fine_steps))
+                            
+                            self.log(f"   Right edge gap (leftmost: {leftmost_gap}px, extent: {gap_extent}px) -> FORWARD {fine_steps}")
                             
                             self.send(f"H{fine_steps}", update_position=False)
                             total_steps += fine_steps
-                            time.sleep(0.2 + fine_steps * 0.003)
-                            continue  # Re-check after move
+                            time.sleep(0.15 + fine_steps * 0.002)
+                            continue
                         
                 except Exception as e:
                     self.log(f"   Fine-tune error: {e}")
+                    import traceback
+                    traceback.print_exc()
                     continue
             
-            # If we get here, fine-tuning didn't fully clear both edges
-            self.status_msg = "⚠ May need adjustment"
-            self.log(f"   Alignment complete, {total_steps} total steps (edges may have residual)")
+            # If we get here, calculate confidence based on remaining gaps
+            # Better scoring than flat 0.8
+            final_left = left_gap_width if 'left_gap_width' in locals() else 0
+            final_right = right_gap_width if 'right_gap_width' in locals() else 0
+            total_gap = final_left + final_right
+            
+            if total_gap <= 8:
+                # Very close - 90-95% confidence
+                confidence = 0.90 + (1.0 - total_gap / 16) * 0.05
+            elif total_gap <= 15:
+                # Good - 85-90% confidence
+                confidence = 0.85 + (1.0 - (total_gap - 8) / 14) * 0.05
+            else:
+                # Needs work - 75-85% confidence
+                confidence = max(0.75, 0.85 - (total_gap - 15) / 100)
+            
+            self.alignment_confidence = confidence
+            self.status_msg = "⚠ May need adjustment" if confidence < 0.90 else "✓ Mostly aligned"
+            self.log(f"   Alignment complete: {total_steps} total steps, {confidence:.0%} confidence (left:{final_left}px, right:{final_right}px)")
             return True, "Aligned (check edges)", {
                 "mode": "moved",
                 "total_steps": total_steps,
                 "attempts": max_attempts,
-                "confidence": 0.8,
+                "fine_tune_attempts": 8,
+                "confidence": confidence,
+                "left_gap_width": final_left,
+                "right_gap_width": final_right,
             }
 
         # === HALF FRAME MODE - CENTER THE GAP ===

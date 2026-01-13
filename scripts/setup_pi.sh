@@ -209,6 +209,74 @@ print_step "Installing Python packages..."
 # Set ownership
 chown -R "$APP_USER:$APP_USER" "$APP_DIR"
 
+print_header "Verifying Installation"
+
+# Test Python imports
+print_step "Testing Python dependencies..."
+"$APP_DIR/.venv/bin/python" -c "
+import sys
+errors = []
+try:
+    import flask
+    print('✓ Flask')
+except ImportError as e:
+    errors.append(f'✗ Flask: {e}')
+try:
+    import flask_socketio
+    print('✓ Flask-SocketIO')
+except ImportError as e:
+    errors.append(f'✗ Flask-SocketIO: {e}')
+try:
+    import serial
+    print('✓ pyserial')
+except ImportError as e:
+    errors.append(f'✗ pyserial: {e}')
+try:
+    import numpy
+    print('✓ NumPy')
+except ImportError as e:
+    errors.append(f'✗ NumPy: {e}')
+try:
+    import cv2
+    print('✓ OpenCV')
+except ImportError as e:
+    errors.append(f'✗ OpenCV: {e}')
+try:
+    import PIL
+    print('✓ Pillow')
+except ImportError as e:
+    errors.append(f'✗ Pillow: {e}')
+try:
+    import pygame
+    print('✓ pygame')
+except ImportError as e:
+    errors.append(f'✗ pygame: {e}')
+try:
+    import evdev
+    print('✓ evdev')
+except ImportError as e:
+    errors.append(f'✗ evdev: {e}')
+try:
+    import psutil
+    print('✓ psutil')
+except ImportError as e:
+    errors.append(f'✗ psutil: {e}')
+
+if errors:
+    print('\n--- IMPORT ERRORS ---')
+    for error in errors:
+        print(error)
+    sys.exit(1)
+else:
+    print('\n✓ All dependencies verified!')
+" || {
+    print_error "Dependency verification failed"
+    echo "This might be resolved by:"
+    echo "  1. Rebooting the system"
+    echo "  2. Re-running: cd $APP_DIR && .venv/bin/pip install -r requirements.txt"
+    exit 1
+}
+
 # Add user to required groups for hardware access
 print_step "Adding $APP_USER to hardware access groups..."
 usermod -a -G video "$APP_USER" 2>/dev/null || true    # Framebuffer access

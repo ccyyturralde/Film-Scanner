@@ -265,6 +265,10 @@ def find_gap_candidates_brightness(
     - Column uniformity is above min_uniformity (very consistent top-to-bottom)
     - Mean brightness is significantly above the minimum (brighter than film content)
     - Vertical continuity is above min_continuity (full height)
+    
+    Method 3 (adaptive - for difficult lighting):
+    - Uses percentile-based thresholding to find the brightest columns
+    - Combines with uniformity to reduce false positives
     """
     col_mean = stats["col_mean"]
     col_std = stats["col_std"]
@@ -272,6 +276,7 @@ def find_gap_candidates_brightness(
     # Get the maximum and minimum mean brightness as reference
     max_mean = float(col_mean.max()) if col_mean.max() > 0 else 1.0
     min_mean = float(col_mean.min())
+    mean_range = max_mean - min_mean
     
     # Method 1: Gap columns are bright (high mean) AND uniform (low std)
     bright_mask = col_mean > (mean_threshold * max_mean)
@@ -288,12 +293,28 @@ def find_gap_candidates_brightness(
         high_uniformity = column_uniformity > min_uniformity
         gap_mask_method2 = brighter_than_mid & high_uniformity
     
-    # Combine both methods - a column is a gap if it passes EITHER method
-    gap_mask = gap_mask_method1 | gap_mask_method2
+    # Method 3: Adaptive percentile-based detection (for difficult cases)
+    gap_mask_method3 = np.zeros_like(col_mean, dtype=bool)
+    if mean_range > 0.15:  # Only use if there's sufficient brightness variation
+        # Find columns in the top 15% of brightness
+        brightness_p85 = np.percentile(col_mean, 85)
+        very_bright = col_mean >= brightness_p85
+        
+        # And are also more uniform than average
+        if column_uniformity is not None:
+            uniformity_median = np.median(column_uniformity)
+            above_median_uniformity = column_uniformity > uniformity_median
+            gap_mask_method3 = very_bright & above_median_uniformity
     
-    # Apply vertical continuity filter if provided (applies to both methods)
+    # Combine all three methods - a column is a gap if it passes ANY method
+    gap_mask = gap_mask_method1 | gap_mask_method2 | gap_mask_method3
+    
+    # Apply vertical continuity filter if provided (applies to all methods)
     if vertical_continuity is not None:
-        continuity_mask = vertical_continuity > min_continuity
+        # Use adaptive continuity threshold
+        continuity_median = np.median(vertical_continuity)
+        adaptive_min_continuity = max(min_continuity * 0.85, continuity_median * 1.1)
+        continuity_mask = vertical_continuity > min(adaptive_min_continuity, 0.95)
         gap_mask = gap_mask & continuity_mask
     
     return gap_mask
@@ -584,17 +605,27 @@ def detect_frame_gap(
     
     # Filter out gaps at the extreme edges of the lit region
     # Real inter-frame gaps should be in the interior, not at the mask boundary
-    edge_margin = int(0.05 * cropped_w)  # 5% margin from edges
+    # Use a smaller margin to catch gaps closer to edges
+    edge_margin = int(0.03 * cropped_w)  # 3% margin from edges (reduced from 5%)
     interior_regions = []
+    edge_regions = []
+    
     for r in regions:
         # Check if gap center is within interior (not at edges)
         gap_center_local = (r.start_x + r.end_x) // 2
         if edge_margin <= gap_center_local <= (cropped_w - edge_margin):
             interior_regions.append(r)
+        else:
+            edge_regions.append(r)
     
-    # Prefer interior gaps, but fall back to all gaps if none found in interior
+    # Prefer interior gaps, but include edge gaps if they're strong enough
     if interior_regions:
         regions = interior_regions
+    elif edge_regions:
+        # Use edge regions but only if they have high scores
+        regions = [r for r in edge_regions if r.mean_brightness > 0.7 and r.edge_score > 0.6]
+        if not regions:
+            regions = edge_regions  # Fall back to all edge regions
     
     # Build debug info (all native Python types)
     debug_info = {
@@ -656,21 +687,42 @@ def detect_frame_gap(
     
     # Calculate confidence based on multiple factors
     # 1. Gap brightness relative to surroundings
-    brightness_score = min(1.0, best_gap.mean_brightness / 0.8)
+    brightness_score = min(1.0, best_gap.mean_brightness / 0.75)  # Slightly more forgiving
     
     # 2. Edge score (if available)
     edge_score = best_gap.edge_score if best_gap.edge_score > 0 else 0.5
     
-    # 3. Gap width reasonableness (prefer 30-100px gaps)
-    if 30 <= best_gap.width <= 100:
+    # 3. Gap width reasonableness (prefer 20-120px gaps, wider range)
+    if 25 <= best_gap.width <= 120:
         width_score = 1.0
     elif 15 <= best_gap.width <= 150:
-        width_score = 0.7
+        width_score = 0.85  # Better score for reasonable widths
+    elif 10 <= best_gap.width <= 200:
+        width_score = 0.70
     else:
         width_score = 0.4
     
-    # Combined confidence
-    confidence = (brightness_score * 0.4 + edge_score * 0.3 + width_score * 0.3)
+    # 4. Vertical continuity bonus (from debug_info if available)
+    continuity_score = debug_info.get("vertical_continuity_max", 0.5)
+    
+    # 5. Column uniformity bonus (gaps should be very uniform)
+    uniformity_score = debug_info.get("column_uniformity_max", 0.5)
+    
+    # Combined confidence with enhanced scoring
+    confidence = (
+        brightness_score * 0.30 +
+        edge_score * 0.25 +
+        width_score * 0.20 +
+        continuity_score * 0.15 +
+        uniformity_score * 0.10
+    )
+    
+    # Bonus for having only one clear gap (more confident)
+    if len(regions) == 1:
+        confidence = min(1.0, confidence * 1.10)
+    elif len(regions) == 2:
+        confidence = min(1.0, confidence * 1.05)
+    
     confidence = min(1.0, max(0.0, confidence))
     
     debug_info["best_gap"] = best_gap.to_dict()

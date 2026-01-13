@@ -37,6 +37,104 @@ body {
     padding: 1rem;
 }
 
+/* Desktop Layout Grid */
+@media (min-width: 1024px) {
+    .container {
+        padding: 1.5rem 2rem;
+        max-width: 1920px;
+    }
+    
+    header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        text-align: left;
+        padding: 2rem 0;
+        flex-wrap: wrap;
+        gap: 1rem;
+    }
+    
+    header h1 {
+        font-size: 2rem;
+        margin-bottom: 0;
+    }
+    
+    .main-grid {
+        display: grid;
+        grid-template-columns: 1.5fr 1fr;
+        gap: 1.5rem;
+        align-items: start;
+    }
+    
+    .left-column {
+        display: flex;
+        flex-direction: column;
+        gap: 1.5rem;
+    }
+    
+    .right-column {
+        display: flex;
+        flex-direction: column;
+        gap: 1.5rem;
+        position: sticky;
+        top: 1.5rem;
+    }
+    
+    .full-width {
+        grid-column: 1 / -1;
+    }
+    
+    /* Enhanced status grid for desktop */
+    .status-grid {
+        grid-template-columns: repeat(3, 1fr);
+    }
+    
+    /* Larger preview on desktop */
+    #preview-container {
+        max-height: 70vh;
+    }
+    
+    #preview-image {
+        max-height: 65vh;
+        object-fit: contain;
+        width: 100%;
+    }
+    
+    #preview-video-stream {
+        max-height: 65vh;
+        object-fit: contain;
+        width: 100%;
+    }
+    
+    /* Better button sizing on desktop */
+    .btn-capture {
+        font-size: 1.75rem;
+        padding: 1.5rem 2rem;
+    }
+    
+    /* Motor controls stay compact but visible */
+    .controls-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+    
+    /* Improve panel appearance on desktop */
+    .panel h2 {
+        font-size: 1.5rem;
+    }
+}
+
+/* Tablet Layout */
+@media (min-width: 641px) and (max-width: 1023px) {
+    .container {
+        max-width: 900px;
+        margin: 0 auto;
+    }
+    
+    .status-grid {
+        grid-template-columns: repeat(3, 1fr);
+    }
+}
+
 /* Header */
 header {
     text-align: center;
@@ -392,6 +490,22 @@ header h1 {
 .setting-unit {
     font-size: 0.875rem;
     color: var(--text-secondary);
+}
+
+.setting-group.inline {
+    display: inline-flex;
+    margin-right: 1rem;
+    margin-bottom: 0.5rem;
+}
+
+.camera-settings {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
 }
 
 .btn-small {
