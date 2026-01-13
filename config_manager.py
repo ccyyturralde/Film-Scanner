@@ -158,10 +158,23 @@ class ConfigManager:
             config['mode'] = 'local'
             config['pi_ip'] = local_ip
             config['hostname'] = socket.gethostname()
+            config['port'] = 5000  # Default port for Pi
+            config['camera_type'] = 'gphoto2'
             
             print(f"\n✓ Configuration saved!")
             print(f"  Pi IP: {local_ip}")
             print(f"  Hostname: {socket.gethostname()}")
+            print(f"  Port: 5000")
+            
+            # Save and return immediately for Pi - no need for additional prompts
+            if self.save_config(config):
+                print("\n" + "="*60)
+                print("✓ SETUP COMPLETE!")
+                print("="*60)
+                return config
+            else:
+                print("\n❌ Failed to save configuration")
+                return None
             
         else:
             print("💻 Running on external device - Remote Mode\n")
@@ -298,7 +311,23 @@ class ConfigManager:
     
     def is_interactive(self):
         """Check if running in an interactive terminal"""
-        return sys.stdin.isatty()
+        # Check for non-interactive indicators
+        
+        # 1. systemd service or automation environment
+        if os.environ.get('SYSTEMD_EXEC_PID'):
+            return False
+        
+        # 2. TERM not set or set to 'dumb' (non-interactive)
+        term = os.environ.get('TERM', '')
+        if not term or term == 'dumb':
+            return False
+        
+        # 3. Check if stdin and stdout are both TTYs
+        # This catches subprocess, pipe redirection, etc.
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            return False
+        
+        return True
     
     def is_raspberry_pi(self):
         """Check if running on a Raspberry Pi"""

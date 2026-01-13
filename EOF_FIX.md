@@ -12,13 +12,24 @@ When starting the Film Scanner app non-interactively (via systemd service, subpr
 ## Solution
 Modified `config_manager.py` to:
 
-1. **Detect interactive mode**: Added `is_interactive()` method that checks if stdin is a TTY
+1. **Detect interactive mode**: Added `is_interactive()` method that checks:
+   - If running under systemd (`SYSTEMD_EXEC_PID` env var)
+   - If `TERM` is not set or is 'dumb'
+   - If stdin and stdout are both TTYs
+   - This catches systemd services, subprocesses, pipe redirection, etc.
+
 2. **Auto-setup for non-interactive**: Added `auto_setup()` method that:
    - Detects if running on Raspberry Pi
    - Creates sensible default configuration without user input
-   - On Pi: Uses local IP and hostname
+   - On Pi: Uses local IP, hostname, and port 5000
    - Not on Pi: Uses localhost (127.0.0.1) for testing
-3. **Smart config loading**: Updated `get_config()` to:
+
+3. **Fixed interactive setup for Pi**: Updated `interactive_setup()` to:
+   - Immediately save config and return when on Raspberry Pi
+   - No port prompt for Pi (uses default 5000)
+   - Prevents any `input()` calls when on Pi
+
+4. **Smart config loading**: Updated `get_config()` to:
    - Run interactive setup when TTY is available
    - Run auto-setup when no TTY (non-interactive)
 
