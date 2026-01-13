@@ -41,7 +41,7 @@ body {
 @media (min-width: 1024px) {
     .container {
         padding: 1.5rem 2rem;
-        max-width: 1920px;
+        max-width: 1600px;
     }
     
     header {
@@ -78,6 +78,13 @@ body {
         gap: 1.5rem;
         position: sticky;
         top: 1.5rem;
+    }
+    
+    /* Settings and Logs side by side on desktop */
+    .desktop-two-column {
+        display: grid;
+        grid-template-columns: 1.2fr 1fr;
+        gap: 1.5rem;
     }
     
     .full-width {
@@ -121,6 +128,20 @@ body {
     .panel h2 {
         font-size: 1.5rem;
     }
+    
+    /* Better spacing for settings sections on desktop */
+    .settings-section {
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+    }
+}
+
+/* Default: Stack everything on mobile */
+.desktop-two-column {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
 }
 
 /* Tablet Layout */
