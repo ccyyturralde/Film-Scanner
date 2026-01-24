@@ -68,13 +68,28 @@ except ImportError:
 USE_WIFI_ARDUINO = True
 
 # Arduino WiFi connection settings
+# Option 1: Use static IP (recommended, set in wifi_config.h)
 ARDUINO_WIFI_IP = "192.168.1.100"  # Change to your Arduino's IP
 ARDUINO_WIFI_PORT = 8888            # Must match TCP_PORT in wifi_config.h
+
+# Option 2: Use mDNS hostname (requires avahi-daemon on Pi)
+# ARDUINO_WIFI_IP = "arduino-r4.local"  # Arduino's mDNS hostname
+# To enable mDNS, set a hostname in wifi_config.h
+
 ARDUINO_WIFI_TIMEOUT = 5.0          # Connection timeout in seconds
 ARDUINO_WIFI_RETRY_DELAY = 2.0      # Delay between reconnection attempts
 
 # Set to True to enable verbose WiFi debugging
 WIFI_DEBUG = True
+
+# ============================================================================
+# IMPORTANT: How to find Arduino's IP address
+# ============================================================================
+# On first boot, Arduino displays its IP address on the LED matrix (scrolls across).
+# You can also:
+# 1. Check your router's DHCP leases page
+# 2. Use network scanner: sudo nmap -sn 192.168.1.0/24 | grep -B 2 "arduino"
+# 3. Connect Arduino via USB and read Serial monitor: screen /dev/ttyACM0 115200
 
 
 def encode_preview_bytes(preview_bytes: bytes, invert: bool = False) -> str:
