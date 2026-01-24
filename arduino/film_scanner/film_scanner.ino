@@ -1,46 +1,58 @@
 /*
- * 35mm Film Scanner - Motor Control Firmware
+ * 35mm Film Scanner - Motor Control Firmware (WiFi Version)
  * 
- * Compatible with:
- * - Arduino Uno R3 (ATmega328P)
- * - Arduino Uno R4 Minima (Renesas RA4M1)
- * - Arduino Uno R4 WiFi (Renesas RA4M1 + ESP32-S3)
+ * REQUIRES: Arduino Uno R4 WiFi (Renesas RA4M1 + ESP32-S3)
+ * 
+ * This version uses WiFi TCP communication instead of USB Serial.
+ * The Arduino can be powered from the motor's 12V supply via VIN pin.
  * 
  * Hardware:
  * - Motor: NEMA 17 stepper (e.g., BJ42D22-23V01 / Creality 42-40)
- * - Driver: A4988 Stepper Driver
+ * - Driver: A4988 or TMC2209 Stepper Driver
  * 
- * Wiring (same for R3 and R4):
+ * Wiring:
  * D2 -> STEP
  * D3 -> DIR  
  * D4 -> ENABLE
  * GND -> Driver GND (CRITICAL: common ground with 12V supply!)
  * 
  * Power:
- * 12V -> Driver VMOT
- * 12V GND -> Driver GND + Arduino GND
+ * 12V -> Driver VMOT + Arduino VIN (shared power)
+ * 12V GND -> Driver GND + Arduino GND (common ground)
  * 5V -> Driver VDD
  * 
- * LED Matrix Status (R4 WiFi only):
+ * WiFi Configuration:
+ * Edit wifi_config.h with your network settings before uploading.
+ * 
+ * LED Matrix Status (R4 WiFi):
  * - Happy face: All systems OK
+ * - "W": Connecting to WiFi
  * - "17": Motor not detected / motor error  
  * - "!": General error
- * - "X": Communication/connection error
+ * - "X": WiFi connection error
  * - "?": Unknown command received
  * - Spinning animation: Motor in motion
  * - "L": Motion locked
+ * - IP address scroll: WiFi connected (on startup)
  * 
- * Upload Commands:
- * R3:        arduino-cli upload -p PORT --fqbn arduino:avr:uno
- * R4 Minima: arduino-cli upload -p PORT --fqbn arduino:renesas_uno:unor4minima
- * R4 WiFi:   arduino-cli upload -p PORT --fqbn arduino:renesas_uno:unor4wifi
+ * Upload Command:
+ * arduino-cli upload -p PORT --fqbn arduino:renesas_uno:unor4wifi
  */
 
-// LED Matrix support for Arduino Uno R4 WiFi
+// WiFi Configuration
+#include "wifi_config.h"
+
+// LED Matrix and WiFi support for Arduino Uno R4 WiFi
 #if defined(ARDUINO_UNOR4_WIFI)
   #define HAS_LED_MATRIX
+  #define HAS_WIFI
   #include "Arduino_LED_Matrix.h"
+  #include <WiFiS3.h>
   ArduinoLEDMatrix matrix;
+  WiFiServer server(TCP_PORT);
+  WiFiClient client;
+#else
+  #error "This firmware requires Arduino Uno R4 WiFi. Use the USB Serial version for R3/R4 Minima."
 #endif
 
 // Pin definitions
@@ -59,11 +71,12 @@ enum LEDStatus {
   LED_OK,           // Happy face - all good
   LED_MOTOR_ERROR,  // "17" - motor not detected/error
   LED_ERROR,        // "!" - general error
-  LED_COMM_ERROR,   // "X" - communication error
+  LED_COMM_ERROR,   // "X" - communication/WiFi error
   LED_UNKNOWN_CMD,  // "?" - unknown command
   LED_LOCKED,       // "L" - motion locked
   LED_MOVING,       // Spinning animation frame
-  LED_IDLE          // Dim/standby pattern
+  LED_IDLE,         // Dim/standby pattern
+  LED_WIFI_CONNECTING  // "W" - connecting to WiFi
 };
 
 // Happy face :) - All systems OK
@@ -151,6 +164,14 @@ const uint32_t PATTERN_IDLE[] = {
   0x00000000
 };
 
+// "W" - WiFi connecting
+const uint32_t PATTERN_WIFI[] = {
+  0x00001001,
+  0x90289028,
+  0xA850A850,
+  0x54405440
+};
+
 // Current status and animation state
 LEDStatus currentLEDStatus = LED_IDLE;
 int spinFrame = 0;
@@ -184,6 +205,9 @@ void updateLEDStatus(LEDStatus status) {
       break;
     case LED_IDLE:
       showLEDPattern(PATTERN_IDLE);
+      break;
+    case LED_WIFI_CONNECTING:
+      showLEDPattern(PATTERN_WIFI);
       break;
     case LED_MOVING:
       // Handled by animation update
@@ -222,7 +246,7 @@ void flashError(LEDStatus errorType, int flashCount = 3) {
 
 #endif // HAS_LED_MATRIX
 
-// Motor parameters (configurable via serial commands)
+// Motor parameters (configurable via commands)
 int steps_per_frame = 1200;
 int fine_step = 8;
 int coarse_step = 192;
@@ -233,6 +257,112 @@ int backlash_steps = 20;
 int last_direction = 0;
 bool motion_locked = false;
 long position = 0;
+
+// WiFi state
+bool wifi_connected = false;
+unsigned long last_client_activity = 0;
+
+// ============================================================================
+// WiFi Helper Functions
+// ============================================================================
+
+#ifdef HAS_WIFI
+
+void scrollIPAddress(IPAddress ip) {
+  // Scroll the IP address on LED matrix
+  String ipStr = String(ip[0]) + "." + String(ip[1]) + "." + String(ip[2]) + "." + String(ip[3]);
+  matrix.beginText(0, 1, 0xFFFFFF);
+  matrix.textFont(Font_4x6);
+  matrix.beginDraw();
+  matrix.stroke(0xFFFFFFFF);
+  matrix.textScrollSpeed(50);
+  matrix.text(ipStr.c_str(), 1, 1);
+  matrix.endDraw();
+}
+
+bool connectWiFi() {
+  if (WIFI_DEBUG) {
+    Serial.println("\n=== WiFi Setup ===");
+    Serial.print("Connecting to: ");
+    Serial.println(WIFI_SSID);
+  }
+  
+  #ifdef HAS_LED_MATRIX
+  updateLEDStatus(LED_WIFI_CONNECTING);
+  #endif
+  
+  // Connect to WiFi
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < WIFI_MAX_RETRIES) {
+    delay(WIFI_RETRY_DELAY);
+    if (WIFI_DEBUG) {
+      Serial.print(".");
+    }
+    attempts++;
+  }
+  
+  if (WiFi.status() != WL_CONNECTED) {
+    if (WIFI_DEBUG) {
+      Serial.println("\n❌ WiFi connection failed!");
+    }
+    #ifdef HAS_LED_MATRIX
+    updateLEDStatus(LED_COMM_ERROR);
+    #endif
+    return false;
+  }
+  
+  // Configure static IP if requested
+  if (USE_STATIC_IP) {
+    IPAddress ip, gateway, subnet, dns;
+    ip.fromString(STATIC_IP);
+    gateway.fromString(GATEWAY);
+    subnet.fromString(SUBNET);
+    dns.fromString(DNS_SERVER);
+    WiFi.config(ip, dns, gateway, subnet);
+  }
+  
+  wifi_connected = true;
+  
+  if (WIFI_DEBUG) {
+    Serial.println("\n✓ WiFi connected!");
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+    Serial.print("TCP Port: ");
+    Serial.println(TCP_PORT);
+  }
+  
+  #ifdef HAS_LED_MATRIX
+  scrollIPAddress(WiFi.localIP());
+  delay(3000);  // Show IP for 3 seconds
+  updateLEDStatus(LED_OK);
+  #endif
+  
+  return true;
+}
+
+// Send response to both Serial (debug) and WiFi client
+void sendResponse(const String& msg) {
+  if (WIFI_DEBUG) {
+    Serial.println(msg);
+  }
+  if (client && client.connected()) {
+    client.println(msg);
+    last_client_activity = millis();
+  }
+}
+
+void sendResponseNoNewline(const String& msg) {
+  if (WIFI_DEBUG) {
+    Serial.print(msg);
+  }
+  if (client && client.connected()) {
+    client.print(msg);
+  }
+}
+
+#endif // HAS_WIFI
 
 void setup() {
   // Configure pins
@@ -245,22 +375,43 @@ void setup() {
   digitalWrite(DIR_PIN, LOW);
   digitalWrite(STEP_PIN, LOW);
   
-  // Initialize LED matrix (R4 WiFi only)
+  // Initialize LED matrix
   #ifdef HAS_LED_MATRIX
   matrix.begin();
   updateLEDStatus(LED_IDLE);
   #endif
   
-  // Initialize serial
-  Serial.begin(115200);
-  while (!Serial) {
-    ; // Wait for serial port
+  // Initialize USB Serial for debugging (optional)
+  #ifdef HAS_WIFI
+  if (WIFI_DEBUG) {
+    Serial.begin(115200);
+    delay(2000);  // Give serial time to initialize
+    Serial.println("\n=== Film Scanner Motor Control (WiFi) ===");
+    Serial.println("Version: WiFi TCP Server");
+  }
+  #endif
+  
+  // Connect to WiFi
+  #ifdef HAS_WIFI
+  if (!connectWiFi()) {
+    // WiFi failed - halt and show error
+    while (true) {
+      #ifdef HAS_LED_MATRIX
+      flashError(LED_COMM_ERROR, 1);
+      #endif
+      delay(1000);
+    }
   }
   
-  // Ready signal - show happy face on successful init
-  Serial.println("READY NEMA17");
-  Serial.println("Film Scanner Motor Control");
+  // Start TCP server
+  server.begin();
+  if (WIFI_DEBUG) {
+    Serial.println("✓ TCP server started");
+    Serial.println("Waiting for client connection...");
+  }
+  #endif
   
+  // Ready
   #ifdef HAS_LED_MATRIX
   updateLEDStatus(LED_OK);
   #endif
@@ -268,7 +419,7 @@ void setup() {
 
 void move_steps(int steps, int direction) {
   if (motion_locked) {
-    Serial.println("LOCKED");
+    sendResponse("LOCKED");
     #ifdef HAS_LED_MATRIX
     flashError(LED_LOCKED, 2);
     #endif
@@ -314,8 +465,8 @@ void move_steps(int steps, int direction) {
   updateLEDStatus(LED_OK);
   #endif
   
-  Serial.print("POS:");
-  Serial.println(position);
+  sendResponseNoNewline("POS:");
+  sendResponse(String(position));
 }
 
 void parse_command(String cmd) {
@@ -349,36 +500,31 @@ void parse_command(String cmd) {
     case 'S':
       if (value > 0 && value < 5000) {
         steps_per_frame = value;
-        Serial.print("SPF:");
-        Serial.println(steps_per_frame);
+        sendResponse("SPF:" + String(steps_per_frame));
       }
       break;
     case 'm':
       if (value > 0 && value < 200) {
         fine_step = value;
-        Serial.print("FINE:");
-        Serial.println(fine_step);
+        sendResponse("FINE:" + String(fine_step));
       }
       break;
     case 'l':
       if (value > 0 && value < 500) {
         coarse_step = value;
-        Serial.print("COARSE:");
-        Serial.println(coarse_step);
+        sendResponse("COARSE:" + String(coarse_step));
       }
       break;
     case 'v':
       if (value >= 200 && value <= 5000) {
         step_delay_us = value;
-        Serial.print("DELAY:");
-        Serial.println(step_delay_us);
+        sendResponse("DELAY:" + String(step_delay_us));
       }
       break;
     case 'd':
       if (value >= 0 && value < 200) {
         backlash_steps = value;
-        Serial.print("BACKLASH:");
-        Serial.println(backlash_steps);
+        sendResponse("BACKLASH:" + String(backlash_steps));
       }
       break;
     
@@ -386,7 +532,7 @@ void parse_command(String cmd) {
     case 'X':
       motion_locked = true;
       digitalWrite(ENABLE_PIN, HIGH);
-      Serial.println("LOCKED");
+      sendResponse("LOCKED");
       #ifdef HAS_LED_MATRIX
       updateLEDStatus(LED_LOCKED);
       #endif
@@ -394,7 +540,7 @@ void parse_command(String cmd) {
     case 'U':
       motion_locked = false;
       digitalWrite(ENABLE_PIN, LOW);
-      Serial.println("UNLOCKED");
+      sendResponse("UNLOCKED");
       #ifdef HAS_LED_MATRIX
       updateLEDStatus(LED_OK);
       #endif
@@ -403,14 +549,14 @@ void parse_command(String cmd) {
     // Motor power
     case 'M':
       digitalWrite(ENABLE_PIN, HIGH);
-      Serial.println("MOTOR OFF");
+      sendResponse("MOTOR OFF");
       #ifdef HAS_LED_MATRIX
       updateLEDStatus(LED_MOTOR_ERROR);  // Show "17" when motor disabled
       #endif
       break;
     case 'E':
       digitalWrite(ENABLE_PIN, LOW);
-      Serial.println("MOTOR ON");
+      sendResponse("MOTOR ON");
       #ifdef HAS_LED_MATRIX
       updateLEDStatus(LED_OK);
       #endif
@@ -418,38 +564,27 @@ void parse_command(String cmd) {
     
     // Position
     case 'P':
-      Serial.print("POS:");
-      Serial.println(position);
+      sendResponse("POS:" + String(position));
       break;
     case 'Z':
       position = 0;
-      Serial.println("ZEROED");
+      sendResponse("ZEROED");
       break;
     
     // Status
     case '?':
-      Serial.println("=== STATUS ===");
-      Serial.print("Position: ");
-      Serial.println(position);
-      Serial.print("Steps/frame: ");
-      Serial.println(steps_per_frame);
-      Serial.print("Fine: ");
-      Serial.print(fine_step);
-      Serial.print(" | Coarse: ");
-      Serial.println(coarse_step);
-      Serial.print("Delay: ");
-      Serial.print(step_delay_us);
-      Serial.print("us | Backlash: ");
-      Serial.println(backlash_steps);
-      Serial.print("Locked: ");
-      Serial.print(motion_locked ? "YES" : "NO");
-      Serial.print(" | Motor: ");
-      Serial.println(digitalRead(ENABLE_PIN) == LOW ? "ON" : "OFF");
+      sendResponse("=== STATUS ===");
+      sendResponse("Position: " + String(position));
+      sendResponse("Steps/frame: " + String(steps_per_frame));
+      sendResponse("Fine: " + String(fine_step) + " | Coarse: " + String(coarse_step));
+      sendResponse("Delay: " + String(step_delay_us) + "us | Backlash: " + String(backlash_steps));
+      sendResponse("Locked: " + String(motion_locked ? "YES" : "NO") + 
+                   " | Motor: " + String(digitalRead(ENABLE_PIN) == LOW ? "ON" : "OFF"));
+      #ifdef HAS_WIFI
+      sendResponse("WiFi: " + WiFi.localIP().toString() + ":" + String(TCP_PORT));
+      #endif
       #ifdef HAS_LED_MATRIX
-      Serial.print("LED Matrix: R4 WiFi | Status: ");
-      Serial.println(currentLEDStatus);
-      #else
-      Serial.println("LED Matrix: N/A (not R4 WiFi)");
+      sendResponse("LED Status: " + String(currentLEDStatus));
       #endif
       break;
     
@@ -463,14 +598,12 @@ void parse_command(String cmd) {
       else if (value == 3) updateLEDStatus(LED_IDLE);
       else if (value == 4) updateLEDStatus(LED_COMM_ERROR);
       else if (value == 5) updateLEDStatus(LED_LOCKED);
-      Serial.print("LED:");
-      Serial.println(value);
+      sendResponse("LED:" + String(value));
       break;
     #endif
     
     default:
-      Serial.print("UNKNOWN:");
-      Serial.println(command);
+      sendResponse("UNKNOWN:" + String(command));
       #ifdef HAS_LED_MATRIX
       flashError(LED_UNKNOWN_CMD, 2);
       #endif
@@ -479,11 +612,44 @@ void parse_command(String cmd) {
 }
 
 void loop() {
-  // Handle serial commands
-  if (Serial.available() > 0) {
-    String cmd = Serial.readStringUntil('\n');
-    parse_command(cmd);
+  #ifdef HAS_WIFI
+  // Check for new client connections
+  if (!client || !client.connected()) {
+    client = server.available();
+    if (client) {
+      if (WIFI_DEBUG) {
+        Serial.println("\n✓ Client connected from: " + client.remoteIP().toString());
+      }
+      sendResponse("READY NEMA17");
+      sendResponse("Film Scanner Motor Control (WiFi)");
+      last_client_activity = millis();
+    }
   }
+  
+  // Handle client commands
+  if (client && client.connected()) {
+    // Check for timeout
+    if (CLIENT_TIMEOUT > 0 && (millis() - last_client_activity > CLIENT_TIMEOUT)) {
+      if (WIFI_DEBUG) {
+        Serial.println("⚠ Client timeout, disconnecting");
+      }
+      client.stop();
+    }
+    
+    // Read and process commands
+    if (client.available() > 0) {
+      String cmd = client.readStringUntil('\n');
+      cmd.trim();
+      if (cmd.length() > 0) {
+        last_client_activity = millis();
+        if (WIFI_DEBUG) {
+          Serial.println("← " + cmd);
+        }
+        parse_command(cmd);
+      }
+    }
+  }
+  #endif
   
   // Update LED animation if in moving state
   #ifdef HAS_LED_MATRIX
