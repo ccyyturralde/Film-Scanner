@@ -62,114 +62,129 @@ const int ENABLE_PIN = 4;
 
 // ============================================================================
 // LED Matrix Patterns (R4 WiFi only) - 12 columns x 8 rows
-// Each pattern is 4 x 32-bit values representing the 96 LEDs (12x8)
+// Using renderBitmap for clearer pattern definition
 // ============================================================================
 #ifdef HAS_LED_MATRIX
 
 // Status codes for LED display
 enum LEDStatus {
   LED_OK,           // Happy face - all good
-  LED_MOTOR_ERROR,  // "17" - motor not detected/error
+  LED_MOTOR_ERROR,  // "!" error
   LED_ERROR,        // "!" - general error
   LED_COMM_ERROR,   // "X" - communication/WiFi error
   LED_UNKNOWN_CMD,  // "?" - unknown command
-  LED_LOCKED,       // "L" - motion locked
+  LED_LOCKED,       // Square - motion locked
   LED_MOVING,       // Spinning animation frame
   LED_IDLE,         // Dim/standby pattern
-  LED_WIFI_CONNECTING  // "W" - connecting to WiFi
+  LED_WIFI_CONNECTING  // Blinking - connecting to WiFi
 };
 
-// Happy face :) - All systems OK
-const uint32_t PATTERN_OK[] = {
-  0x00000000,
-  0x32043204,
-  0x4040783C,
-  0x00000000
+// LED patterns as byte arrays [8 rows][12 columns] - much easier to visualize!
+// Note: NOT const because renderBitmap doesn't accept const pointers
+
+// Happy face :)
+byte PATTERN_OK[8][12] = {
+  { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+  { 0, 0, 1, 1, 0, 0, 0, 0, 1, 1, 0, 0 },
+  { 0, 0, 1, 1, 0, 0, 0, 0, 1, 1, 0, 0 },
+  { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+  { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+  { 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0 },
+  { 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0 },
+  { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 };
 
-// "17" - Motor error/not detected
-const uint32_t PATTERN_MOTOR_ERROR[] = {
-  0x20820820,
-  0x88820FA8,
-  0xF88208A8,
-  0x820820A8
+// X pattern - error
+byte PATTERN_ERROR[8][12] = {
+  { 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 },
+  { 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0 },
+  { 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0 },
+  { 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0 },
+  { 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0 },
+  { 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0 },
+  { 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0 },
+  { 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0 }
 };
 
-// "!" - General error (exclamation mark)
-const uint32_t PATTERN_ERROR[] = {
-  0x00000060,
-  0x06006006,
-  0x00600600,
-  0x60000000
+// Single dot - idle
+byte PATTERN_IDLE[8][12] = {
+  { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+  { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+  { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+  { 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0 },
+  { 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0 },
+  { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+  { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+  { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 };
 
-// "X" - Communication/connection error
-const uint32_t PATTERN_COMM_ERROR[] = {
-  0x00000801,
-  0x20201040,
-  0x80400802,
-  0x01000000
+// Square - locked
+byte PATTERN_LOCKED[8][12] = {
+  { 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0 },
+  { 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0 },
+  { 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0 },
+  { 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0 },
+  { 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0 },
+  { 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0 },
+  { 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0 },
+  { 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0 }
 };
 
-// "?" - Unknown command
-const uint32_t PATTERN_UNKNOWN[] = {
-  0x00007008,
-  0x80408010,
-  0x20000020,
-  0x00000000
+// All on - WiFi connecting indicator
+byte PATTERN_WIFI_ON[8][12] = {
+  { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 },
+  { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 },
+  { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 },
+  { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 },
+  { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 },
+  { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 },
+  { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 },
+  { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }
 };
 
-// "L" - Motion locked
-const uint32_t PATTERN_LOCKED[] = {
-  0x00080008,
-  0x00800080,
-  0x0F800080,
-  0x00000000
+// Spin animation frames
+byte PATTERN_SPIN_0[8][12] = {
+  { 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0 },
+  { 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0 },
+  { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+  { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+  { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+  { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+  { 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0 },
+  { 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0 }
 };
 
-// Spinning/moving animation frames
-const uint32_t PATTERN_SPIN_0[] = {
-  0x00001C01,
-  0xC01C01C0,
-  0x1C01C01C,
-  0x00000000
+byte PATTERN_SPIN_1[8][12] = {
+  { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+  { 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0 },
+  { 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0 },
+  { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+  { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+  { 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0 },
+  { 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0 },
+  { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 };
 
-const uint32_t PATTERN_SPIN_1[] = {
-  0x00000003,
-  0x80380380,
-  0x38038000,
-  0x00000000
+byte PATTERN_SPIN_2[8][12] = {
+  { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+  { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+  { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+  { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1 },
+  { 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+  { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+  { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+  { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 };
 
-const uint32_t PATTERN_SPIN_2[] = {
-  0x00000000,
-  0x00700700,
-  0x70070070,
-  0x07000000
-};
-
-const uint32_t PATTERN_SPIN_3[] = {
-  0x00000000,
-  0x00E00E00,
-  0xE00E00E0,
-  0x0E000000
-};
-
-// Idle/standby - single dot
-const uint32_t PATTERN_IDLE[] = {
-  0x00000000,
-  0x00000600,
-  0x00000000,
-  0x00000000
-};
-
-// "W" - WiFi connecting
-const uint32_t PATTERN_WIFI[] = {
-  0x00001001,
-  0x90289028,
-  0xA850A850,
-  0x54405440
+byte PATTERN_SPIN_3[8][12] = {
+  { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+  { 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0 },
+  { 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0 },
+  { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+  { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+  { 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0 },
+  { 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0 },
+  { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 };
 
 // Current status and animation state
@@ -178,36 +193,30 @@ int spinFrame = 0;
 unsigned long lastSpinUpdate = 0;
 const int SPIN_INTERVAL = 100; // ms between animation frames
 
-void showLEDPattern(const uint32_t* pattern) {
-  matrix.loadFrame(pattern);
+void showPattern(byte pattern[8][12]) {
+  matrix.renderBitmap(pattern, 8, 12);
 }
 
 void updateLEDStatus(LEDStatus status) {
   currentLEDStatus = status;
   switch (status) {
     case LED_OK:
-      showLEDPattern(PATTERN_OK);
+      showPattern(PATTERN_OK);
       break;
     case LED_MOTOR_ERROR:
-      showLEDPattern(PATTERN_MOTOR_ERROR);
-      break;
     case LED_ERROR:
-      showLEDPattern(PATTERN_ERROR);
-      break;
     case LED_COMM_ERROR:
-      showLEDPattern(PATTERN_COMM_ERROR);
-      break;
     case LED_UNKNOWN_CMD:
-      showLEDPattern(PATTERN_UNKNOWN);
+      showPattern(PATTERN_ERROR);
       break;
     case LED_LOCKED:
-      showLEDPattern(PATTERN_LOCKED);
+      showPattern(PATTERN_LOCKED);
       break;
     case LED_IDLE:
-      showLEDPattern(PATTERN_IDLE);
+      showPattern(PATTERN_IDLE);
       break;
     case LED_WIFI_CONNECTING:
-      showLEDPattern(PATTERN_WIFI);
+      showPattern(PATTERN_WIFI_ON);
       break;
     case LED_MOVING:
       // Handled by animation update
@@ -224,21 +233,21 @@ void updateSpinAnimation() {
     spinFrame = (spinFrame + 1) % 4;
     
     switch (spinFrame) {
-      case 0: showLEDPattern(PATTERN_SPIN_0); break;
-      case 1: showLEDPattern(PATTERN_SPIN_1); break;
-      case 2: showLEDPattern(PATTERN_SPIN_2); break;
-      case 3: showLEDPattern(PATTERN_SPIN_3); break;
+      case 0: showPattern(PATTERN_SPIN_0); break;
+      case 1: showPattern(PATTERN_SPIN_1); break;
+      case 2: showPattern(PATTERN_SPIN_2); break;
+      case 3: showPattern(PATTERN_SPIN_3); break;
     }
   }
 }
 
-// Flash an error pattern briefly then return to previous state
+// Flash pattern on/off
 void flashError(LEDStatus errorType, int flashCount = 3) {
   LEDStatus previousStatus = currentLEDStatus;
   for (int i = 0; i < flashCount; i++) {
     updateLEDStatus(errorType);
     delay(200);
-    showLEDPattern(PATTERN_IDLE);
+    showPattern(PATTERN_IDLE);
     delay(100);
   }
   updateLEDStatus(previousStatus);
@@ -269,13 +278,11 @@ unsigned long last_client_activity = 0;
 #ifdef HAS_WIFI
 
 bool connectWiFi() {
-  if (WIFI_DEBUG) {
-    Serial.println("\n=== WiFi Setup ===");
-    Serial.print("Hostname: ");
-    Serial.println(DEVICE_HOSTNAME);
-    Serial.print("Connecting to: ");
-    Serial.println(WIFI_SSID);
-  }
+  Serial.println("\n=== WiFi Setup ===");
+  Serial.print("Hostname: ");
+  Serial.println(DEVICE_HOSTNAME);
+  Serial.print("SSID: ");
+  Serial.println(WIFI_SSID);
   
   #ifdef HAS_LED_MATRIX
   updateLEDStatus(LED_WIFI_CONNECTING);
@@ -285,30 +292,27 @@ bool connectWiFi() {
   WiFi.setHostname(DEVICE_HOSTNAME);
   
   // Connect to WiFi
+  Serial.print("Connecting");
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   
   int attempts = 0;
   while (WiFi.status() != WL_CONNECTED && attempts < WIFI_MAX_RETRIES) {
     delay(WIFI_RETRY_DELAY);
-    if (WIFI_DEBUG) {
-      Serial.print(".");
-    }
+    Serial.print(".");
     // Blink the LED to show we're trying to connect
     #ifdef HAS_LED_MATRIX
     if (attempts % 2 == 0) {
-      showLEDPattern(PATTERN_WIFI);
+      showPattern(PATTERN_WIFI_ON);
     } else {
-      showLEDPattern(PATTERN_IDLE);
+      showPattern(PATTERN_IDLE);
     }
     #endif
     attempts++;
   }
   
   if (WiFi.status() != WL_CONNECTED) {
-    if (WIFI_DEBUG) {
-      Serial.println("\n❌ WiFi connection failed!");
-      Serial.println("Check SSID and password in wifi_config.h");
-    }
+    Serial.println("\nWiFi FAILED!");
+    Serial.println("Check SSID and password in wifi_config.h");
     #ifdef HAS_LED_MATRIX
     updateLEDStatus(LED_COMM_ERROR);
     #endif
@@ -325,20 +329,47 @@ bool connectWiFi() {
     WiFi.config(ip, dns, gateway, subnet);
   }
   
+  // Wait for DHCP to assign a valid IP (up to 10 seconds)
+  Serial.print("Waiting for IP");
+  int ip_attempts = 0;
+  while (WiFi.localIP() == IPAddress(0, 0, 0, 0) && ip_attempts < 20) {
+    delay(500);
+    Serial.print(".");
+    ip_attempts++;
+  }
+  Serial.println();
+  
+  if (WiFi.localIP() == IPAddress(0, 0, 0, 0)) {
+    Serial.println("DHCP FAILED - no IP assigned");
+    #ifdef HAS_LED_MATRIX
+    updateLEDStatus(LED_COMM_ERROR);
+    #endif
+    return false;
+  }
+  
+  // Give the network stack time to fully initialize
+  Serial.print("Stabilizing network");
+  for (int i = 0; i < 5; i++) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println(" done");
+  
   wifi_connected = true;
   
-  if (WIFI_DEBUG) {
-    Serial.println("\n✓ WiFi connected!");
-    Serial.print("Hostname: ");
-    Serial.println(DEVICE_HOSTNAME);
-    Serial.print("IP Address: ");
-    Serial.println(WiFi.localIP());
-    Serial.print("TCP Port: ");
-    Serial.println(TCP_PORT);
-    Serial.println("\nFind this device in your router's device list as:");
-    Serial.print("  → ");
-    Serial.println(DEVICE_HOSTNAME);
-  }
+  // Always print connection info
+  Serial.println("");
+  Serial.println("==================================");
+  Serial.println("       WiFi CONNECTED!");
+  Serial.println("==================================");
+  Serial.print("Hostname: ");
+  Serial.println(DEVICE_HOSTNAME);
+  Serial.print("IP: ");
+  Serial.println(WiFi.localIP());
+  Serial.print("Port: ");
+  Serial.println(TCP_PORT);
+  Serial.println("==================================");
+  Serial.println("");
   
   // Show success pattern (happy face)
   #ifdef HAS_LED_MATRIX
@@ -348,11 +379,9 @@ bool connectWiFi() {
   return true;
 }
 
-// Send response to both Serial (debug) and WiFi client
+// Send response to both Serial (always) and WiFi client
 void sendResponse(const String& msg) {
-  if (WIFI_DEBUG) {
-    Serial.println(msg);
-  }
+  Serial.println(msg);
   if (client && client.connected()) {
     client.println(msg);
     last_client_activity = millis();
@@ -360,9 +389,7 @@ void sendResponse(const String& msg) {
 }
 
 void sendResponseNoNewline(const String& msg) {
-  if (WIFI_DEBUG) {
-    Serial.print(msg);
-  }
+  Serial.print(msg);
   if (client && client.connected()) {
     client.print(msg);
   }
@@ -371,6 +398,22 @@ void sendResponseNoNewline(const String& msg) {
 #endif // HAS_WIFI
 
 void setup() {
+  // Always initialize Serial first for debugging
+  Serial.begin(115200);
+  
+  // Wait for Serial to be ready (important for R4 WiFi USB Serial)
+  // But don't wait forever in case no USB is connected
+  unsigned long serialStart = millis();
+  while (!Serial && millis() - serialStart < 3000) {
+    delay(10);
+  }
+  
+  Serial.println("");
+  Serial.println("====================================");
+  Serial.println("  Film Scanner - Arduino R4 WiFi");
+  Serial.println("====================================");
+  Serial.println("Initializing...");
+  
   // Configure pins
   pinMode(STEP_PIN, OUTPUT);
   pinMode(DIR_PIN, OUTPUT);
@@ -380,27 +423,20 @@ void setup() {
   digitalWrite(ENABLE_PIN, LOW);  // Motor enabled (active LOW)
   digitalWrite(DIR_PIN, LOW);
   digitalWrite(STEP_PIN, LOW);
+  Serial.println("- Motor pins configured");
   
   // Initialize LED matrix
   #ifdef HAS_LED_MATRIX
   matrix.begin();
   updateLEDStatus(LED_IDLE);
-  #endif
-  
-  // Initialize USB Serial for debugging (optional)
-  #ifdef HAS_WIFI
-  if (WIFI_DEBUG) {
-    Serial.begin(115200);
-    delay(2000);  // Give serial time to initialize
-    Serial.println("\n=== Film Scanner Motor Control (WiFi) ===");
-    Serial.println("Version: WiFi TCP Server");
-  }
+  Serial.println("- LED matrix initialized");
   #endif
   
   // Connect to WiFi
   #ifdef HAS_WIFI
   if (!connectWiFi()) {
     // WiFi failed - halt and show error
+    Serial.println("HALTED: WiFi connection failed");
     while (true) {
       #ifdef HAS_LED_MATRIX
       flashError(LED_COMM_ERROR, 1);
@@ -409,18 +445,35 @@ void setup() {
     }
   }
   
-  // Start TCP server
+  // Start TCP server - try multiple times if needed
+  Serial.print("Starting TCP server on port ");
+  Serial.print(TCP_PORT);
+  Serial.print("...");
+  
   server.begin();
-  if (WIFI_DEBUG) {
-    Serial.println("✓ TCP server started");
-    Serial.println("Waiting for client connection...");
+  delay(500);
+  
+  // Verify server is ready by checking if we can get our own IP
+  if (WiFi.localIP() != IPAddress(0, 0, 0, 0)) {
+    Serial.println(" OK");
+    Serial.print("Server listening at ");
+    Serial.print(WiFi.localIP());
+    Serial.print(":");
+    Serial.println(TCP_PORT);
+  } else {
+    Serial.println(" WARNING: IP is 0.0.0.0");
   }
+  
+  Serial.println("Waiting for connections...");
   #endif
   
   // Ready
   #ifdef HAS_LED_MATRIX
   updateLEDStatus(LED_OK);
   #endif
+  
+  Serial.println("");
+  Serial.println("READY");
 }
 
 void move_steps(int steps, int direction) {
@@ -587,10 +640,74 @@ void parse_command(String cmd) {
       sendResponse("Locked: " + String(motion_locked ? "YES" : "NO") + 
                    " | Motor: " + String(digitalRead(ENABLE_PIN) == LOW ? "ON" : "OFF"));
       #ifdef HAS_WIFI
-      sendResponse("WiFi: " + WiFi.localIP().toString() + ":" + String(TCP_PORT));
+      {
+        uint8_t mac[6];
+        WiFi.macAddress(mac);
+        char macStr[18];
+        sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        sendResponse("WiFi IP: " + WiFi.localIP().toString());
+        sendResponse("WiFi Gateway: " + WiFi.gatewayIP().toString());
+        sendResponse("WiFi Subnet: " + WiFi.subnetMask().toString());
+        sendResponse("WiFi Status: " + String(WiFi.status()) + " (3=connected)");
+        sendResponse("WiFi RSSI: " + String(WiFi.RSSI()) + " dBm");
+        sendResponse("WiFi MAC: " + String(macStr));
+        sendResponse("TCP Port: " + String(TCP_PORT));
+      }
       #endif
       #ifdef HAS_LED_MATRIX
       sendResponse("LED Status: " + String(currentLEDStatus));
+      #endif
+      break;
+    
+    // WiFi reconnect command
+    case 'W':
+      #ifdef HAS_WIFI
+      sendResponse("Reconnecting WiFi...");
+      WiFi.disconnect();
+      delay(1000);
+      if (connectWiFi()) {
+        server.begin();
+        sendResponse("WiFi reconnected: " + WiFi.localIP().toString());
+      } else {
+        sendResponse("WiFi reconnect FAILED");
+      }
+      #endif
+      break;
+    
+    // Test outbound connectivity
+    case 'T':
+      #ifdef HAS_WIFI
+      {
+        sendResponse("Testing outbound connection to gateway...");
+        WiFiClient testClient;
+        // Try to connect to gateway on port 80 (most routers have web interface)
+        if (testClient.connect(WiFi.gatewayIP(), 80)) {
+          sendResponse("SUCCESS: Connected to gateway!");
+          testClient.stop();
+        } else {
+          sendResponse("FAILED: Cannot connect to gateway");
+        }
+        
+        // Also try Google DNS to test internet
+        sendResponse("Testing internet (8.8.8.8:53)...");
+        IPAddress googleDNS(8, 8, 8, 8);
+        if (testClient.connect(googleDNS, 53)) {
+          sendResponse("SUCCESS: Internet reachable!");
+          testClient.stop();
+        } else {
+          sendResponse("FAILED: Cannot reach internet");
+        }
+        
+        // Try to connect to our own server (loopback test)
+        sendResponse("Testing self-connection (loopback)...");
+        if (testClient.connect(WiFi.localIP(), TCP_PORT)) {
+          sendResponse("SUCCESS: Server is accepting connections!");
+          testClient.stop();
+        } else {
+          sendResponse("FAILED: Cannot connect to own server");
+          sendResponse("This indicates the server is not listening properly");
+        }
+      }
       #endif
       break;
     
@@ -623,22 +740,18 @@ void loop() {
   if (!client || !client.connected()) {
     client = server.available();
     if (client) {
-      if (WIFI_DEBUG) {
-        Serial.println("\n✓ Client connected from: " + client.remoteIP().toString());
-      }
+      Serial.println("\nClient connected: " + client.remoteIP().toString());
       sendResponse("READY NEMA17");
       sendResponse("Film Scanner Motor Control (WiFi)");
       last_client_activity = millis();
     }
   }
   
-  // Handle client commands
+  // Handle WiFi client commands
   if (client && client.connected()) {
     // Check for timeout
     if (CLIENT_TIMEOUT > 0 && (millis() - last_client_activity > CLIENT_TIMEOUT)) {
-      if (WIFI_DEBUG) {
-        Serial.println("⚠ Client timeout, disconnecting");
-      }
+      Serial.println("Client timeout, disconnecting");
       client.stop();
     }
     
@@ -648,14 +761,22 @@ void loop() {
       cmd.trim();
       if (cmd.length() > 0) {
         last_client_activity = millis();
-        if (WIFI_DEBUG) {
-          Serial.println("← " + cmd);
-        }
+        Serial.println("WiFi CMD: " + cmd);
         parse_command(cmd);
       }
     }
   }
   #endif
+  
+  // Also handle USB Serial commands (for debugging/development)
+  if (Serial.available() > 0) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+    if (cmd.length() > 0) {
+      Serial.println("USB CMD: " + cmd);
+      parse_command(cmd);
+    }
+  }
   
   // Update LED animation if in moving state
   #ifdef HAS_LED_MATRIX
