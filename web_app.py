@@ -51,6 +51,14 @@ from frame_detector import (
     detect_vertical_edges,
     _to_python_type,
 )
+from sprocket_detector import (
+    detect_sprockets,
+    calibrate_from_sprockets,
+    detect_frame_edge_sprocket,
+    SprocketDetectionResult,
+    SPROCKET_PITCH_MM,
+    SPROCKETS_PER_FRAME,
+)
 import cv2
 import numpy as np
 try:
@@ -484,8 +492,14 @@ class FilmScanner:
         # Mode control
         self.mode = 'manual'
         self.auto_advance = True
-        self.alignment_mode = "stream"  # stream (auto) or calibration (distance-only)
+        self.alignment_mode = "stream"  # stream, sprocket, or calibration
         self.frame_mode = "full"  # full or half
+        
+        # Sprocket-based alignment (new hardware with visible sprocket holes)
+        self.sprocket_detection_enabled = True  # Enable sprocket hole detection
+        self.sprocket_pitch_px = None  # Measured pixels per sprocket pitch
+        self.px_per_mm = None  # Pixels per millimeter (from sprocket calibration)
+        self.last_sprocket_result = None  # Last sprocket detection result
         
         # Scanner mode: "35mm" (Arduino motor control) or "120" (hand feed, no Arduino)
         self.scanner_mode = "35mm"
@@ -2004,6 +2018,250 @@ class FilmScanner:
         
         self.log(f"⚠ Advance incomplete after {max_iters} iterations")
         return False, "Max iterations", {"mode": "max_iterations", "total_steps": total_steps_moved}
+
+    # ========================================================================
+    # SPROCKET-BASED ALIGNMENT (New hardware with visible sprocket holes)
+    # ========================================================================
+    
+    def detect_sprocket_holes(self) -> Optional[dict]:
+        """
+        Detect sprocket holes in current frame.
+        
+        Returns detection result dict or None if detection failed.
+        """
+        frame_bytes, _ = self.get_alignment_frame(timeout=1.0)
+        if not frame_bytes:
+            self.log("✗ No frame for sprocket detection")
+            return None
+        
+        try:
+            result = detect_sprockets(
+                frame_bytes,
+                sprocket_region_fraction=0.18,  # Look at top/bottom 18% of image
+                min_sprocket_area=50,
+                max_sprocket_area=15000,
+                brightness_threshold=0.45,
+            )
+            
+            # Store result and update calibration
+            self.last_sprocket_result = result
+            
+            if result.sprocket_pitch_px:
+                self.sprocket_pitch_px = result.sprocket_pitch_px
+                self.px_per_mm = result.px_per_mm
+                
+            return result.to_dict()
+            
+        except Exception as e:
+            self.log(f"✗ Sprocket detection error: {e}")
+            return None
+    
+    def auto_align_sprocket(self, max_iterations=15, tolerance_px=15):
+        """
+        Align frame using sprocket hole detection.
+        
+        This is more reliable than gap detection because sprocket holes are:
+        - Precisely spaced (standard 35mm pitch: 4.75mm)
+        - High contrast (bright holes against dark film)
+        - Consistent regardless of image content
+        
+        Args:
+            max_iterations: Maximum alignment iterations
+            tolerance_px: Alignment tolerance in pixels
+            
+        Returns:
+            (success, message, debug_info)
+        """
+        import numpy as np
+        
+        self.log("▶ Sprocket-based alignment starting...")
+        total_steps = 0
+        
+        for iteration in range(max_iterations):
+            if iteration > 0:
+                time.sleep(0.25)
+            
+            # Get frame and detect sprockets
+            frame_bytes, _ = self.get_alignment_frame(timeout=0.8)
+            if not frame_bytes:
+                self.log(f"   [{iteration+1}] No frame")
+                continue
+            
+            try:
+                result = detect_sprockets(
+                    frame_bytes,
+                    sprocket_region_fraction=0.18,
+                    alignment_tolerance_px=tolerance_px,
+                )
+                
+                # Store result for UI
+                self.last_sprocket_result = result
+                
+                # Update calibration if we got good data
+                if result.sprocket_pitch_px:
+                    self.sprocket_pitch_px = result.sprocket_pitch_px
+                    self.px_per_mm = result.px_per_mm
+                
+                sprocket_count = len(result.sprocket_holes)
+                offset = result.offset_px
+                confidence = result.confidence
+                
+                self.log(f"   [{iteration+1}] Sprockets: {sprocket_count}, Offset: {offset}px, Confidence: {confidence:.0%}")
+                
+                # Check if we need sprockets to align
+                if sprocket_count < 2:
+                    self.log(f"   ⚠ Not enough sprocket holes detected ({sprocket_count})")
+                    # Move a bit to find sprockets
+                    self.send("H50", update_position=False)
+                    total_steps += 50
+                    continue
+                
+                # Check if aligned
+                if result.aligned:
+                    self.status_msg = "✓ Aligned (sprockets)"
+                    self.log(f"   ✓ Aligned! {total_steps} total steps")
+                    self.alignment_confidence = confidence
+                    return True, "Aligned", {
+                        "mode": "sprocket_aligned",
+                        "total_steps": total_steps,
+                        "iterations": iteration + 1,
+                        "sprocket_count": sprocket_count,
+                        "confidence": confidence,
+                        "sprocket_pitch_px": result.sprocket_pitch_px,
+                    }
+                
+                # Calculate steps to move
+                if not self.sprocket_pitch_px:
+                    # No calibration - use rough estimate
+                    # Assuming ~640px width and ~2 frames visible, each frame ~320px
+                    # 8 sprockets per frame, so ~40px per sprocket
+                    px_per_step = 3.0
+                else:
+                    # Use calibrated px_per_mm and motor calibration
+                    # This can be refined based on your motor setup
+                    px_per_step = self.px_per_step if hasattr(self, 'px_per_step') else 3.0
+                
+                steps_needed = int(abs(offset) / px_per_step)
+                steps_needed = max(8, min(steps_needed, 200))  # Clamp between 8-200
+                
+                # Determine direction
+                # Positive offset means move right (forward) to bring film left
+                if offset > 0:
+                    direction = "FORWARD"
+                    cmd = f"H{steps_needed}"
+                else:
+                    direction = "BACK"
+                    cmd = f"h{steps_needed}"
+                
+                self.log(f"   → Moving {direction} {steps_needed} steps (offset={offset}px)")
+                self.send(cmd, update_position=False)
+                
+                if direction == "FORWARD":
+                    total_steps += steps_needed
+                else:
+                    total_steps -= steps_needed
+                
+            except Exception as e:
+                self.log(f"   Error: {e}")
+                import traceback
+                traceback.print_exc()
+                continue
+        
+        # Max iterations reached
+        self.status_msg = "⚠ Sprocket alignment incomplete"
+        self.log(f"   Max iterations, {total_steps} total steps")
+        return True, "Moved", {
+            "mode": "sprocket_incomplete",
+            "total_steps": total_steps,
+            "iterations": max_iterations,
+        }
+    
+    def advance_and_align_sprocket(self, max_iters=20):
+        """
+        Advance to next frame using sprocket hole detection.
+        
+        This is the sprocket-based version of advance_and_align.
+        Uses sprocket spacing to precisely advance one frame (8 sprocket pitches).
+        
+        Returns:
+            (success, message, debug_info)
+        """
+        self.log("▶ Advancing to next frame (sprocket mode)...")
+        
+        # Get current sprocket positions
+        frame_bytes, _ = self.get_alignment_frame(timeout=1.0)
+        if not frame_bytes:
+            self.log("✗ No frame for sprocket advance")
+            return False, "No frame", {}
+        
+        try:
+            result = detect_sprockets(frame_bytes)
+            
+            if not result.sprocket_pitch_px:
+                self.log("⚠ No sprocket calibration, falling back to gap detection")
+                return self.advance_and_align(max_iters)
+            
+            # Calculate steps for one frame advance
+            # One frame = 8 sprocket pitches
+            frame_pitch_px = result.sprocket_pitch_px * SPROCKETS_PER_FRAME
+            
+            # Estimate steps needed (using px_per_step calibration)
+            px_per_step = self.px_per_step if hasattr(self, 'px_per_step') else 3.0
+            steps_per_frame = int(frame_pitch_px / px_per_step)
+            
+            self.log(f"   Frame pitch: {frame_pitch_px:.1f}px, Steps: {steps_per_frame}")
+            
+            # Move forward one frame
+            self.send(f"H{steps_per_frame}", update_position=False)
+            time.sleep(0.3 + steps_per_frame * 0.002)
+            
+            # Fine-tune alignment
+            success, msg, info = self.auto_align_sprocket(max_iterations=8, tolerance_px=20)
+            
+            info["advance_steps"] = steps_per_frame
+            return success, msg, info
+            
+        except Exception as e:
+            self.log(f"✗ Sprocket advance error: {e}")
+            return False, str(e), {}
+    
+    def calibrate_from_visible_sprockets(self):
+        """
+        Calibrate scanner using visible sprocket holes.
+        
+        Call this when you can see multiple sprocket holes to establish
+        the pixel-to-mm ratio and frame pitch.
+        
+        Returns calibration dict or None.
+        """
+        frame_bytes, _ = self.get_alignment_frame(timeout=2.0)
+        if not frame_bytes:
+            self.log("✗ No frame for sprocket calibration")
+            return None
+        
+        try:
+            calibration = calibrate_from_sprockets(frame_bytes)
+            
+            if calibration:
+                self.sprocket_pitch_px = calibration["sprocket_pitch_px"]
+                self.px_per_mm = calibration["px_per_mm"]
+                
+                # Update px_per_step estimate based on motor calibration
+                if self.frame_advance:
+                    frame_pitch_px = self.sprocket_pitch_px * SPROCKETS_PER_FRAME
+                    self.px_per_step = frame_pitch_px / self.frame_advance
+                    calibration["px_per_step"] = self.px_per_step
+                
+                self.log(f"✓ Sprocket calibration: {self.sprocket_pitch_px:.1f}px/sprocket, {self.px_per_mm:.2f}px/mm")
+                return calibration
+            else:
+                self.log("✗ Sprocket calibration failed - not enough sprockets detected")
+                return None
+                
+        except Exception as e:
+            self.log(f"✗ Calibration error: {e}")
+            return None
+
     def detect_alignment_roi(self, padding: float = 0.0, min_area_ratio: float = 0.05):
         """
         Detect alignment ROI from capture card frame.
@@ -2121,17 +2379,19 @@ class FilmScanner:
     def set_alignment_mode(self, mode: str):
         """
         Set alignment mode:
-        - "stream": live auto-detect using preview stream
+        - "stream": live auto-detect using preview stream (gap detection)
+        - "sprocket": use sprocket hole detection (new hardware with visible sprockets)
         - "calibration": distance-only using calibrated frame_advance
         """
         if not isinstance(mode, str):
             raise ValueError("mode must be a string")
         normalized = mode.strip().lower()
-        if normalized not in ("stream", "calibration"):
-            raise ValueError("mode must be 'stream' or 'calibration'")
+        if normalized not in ("stream", "sprocket", "calibration"):
+            raise ValueError("mode must be 'stream', 'sprocket', or 'calibration'")
         with self.lock:
             self.alignment_mode = normalized
         self.save_state()
+    
     def save_state(self):
         """Save scanning state"""
         if not self.state_file:
@@ -2264,6 +2524,10 @@ class FilmScanner:
                 'last_gap_px': self.last_gap_px,
                 'alignment_roi': self.alignment_roi,
                 'alignment_min_confidence': self.alignment_min_confidence,
+                # Sprocket detection info
+                'sprocket_detection_enabled': self.sprocket_detection_enabled,
+                'sprocket_pitch_px': self.sprocket_pitch_px,
+                'px_per_mm': self.px_per_mm,
             }
         
         return status
@@ -2473,11 +2737,14 @@ def capture():
     
     # Optional pre-capture fine-tune (only does minor adjustments if gap visible on edge)
     # Respects both the checkbox AND the global auto_alignment_enabled setting
-    if auto_align_before and scanner.alignment_mode == "stream" and scanner.auto_alignment_enabled:
+    if auto_align_before and scanner.alignment_mode in ("stream", "sprocket") and scanner.auto_alignment_enabled:
         try:
             # Only do edge fine-tune, not full realignment
             scanner.log("Pre-capture edge check...")
-            success, msg, info = scanner.auto_align()
+            if scanner.alignment_mode == "sprocket":
+                success, msg, info = scanner.auto_align_sprocket(max_iterations=5, tolerance_px=20)
+            else:
+                success, msg, info = scanner.auto_align()
             scanner.broadcast_status()
             if not success:
                 scanner.log(f"Pre-capture align note: {msg}")
@@ -2499,6 +2766,18 @@ def capture():
         if scanner.scanner_mode == "120":
             # 120 mode: No auto-advance, user manually feeds film
             scanner.status_msg = f"✓ Frame {scanner.frame_count} (hand feed next)"
+        elif scanner.alignment_mode == "sprocket" and scanner.auto_alignment_enabled:
+            # SPROCKET MODE: Use sprocket hole detection for precise frame advance
+            time.sleep(0.3)  # Brief pause before advancing
+            try:
+                adv_success, adv_msg, adv_info = scanner.advance_and_align_sprocket()
+                if adv_success:
+                    scanner.status_msg = f"✓ Frame {scanner.frame_count} → Ready for next"
+                else:
+                    scanner.status_msg = f"✓ Frame {scanner.frame_count} (advance: {adv_msg})"
+            except Exception as e:
+                scanner.log(f"Sprocket advance error: {e}")
+                scanner.status_msg = f"✓ Frame {scanner.frame_count} (advance error)"
         elif scanner.alignment_mode == "stream" and scanner.auto_alignment_enabled:
             # STREAM MODE with auto-alignment: Use advance_and_align (always moves FORWARD/right)
             time.sleep(0.3)  # Brief pause before advancing
@@ -2623,7 +2902,7 @@ def set_alignment_config_route():
 
 @app.route('/api/set_alignment_mode', methods=['POST'])
 def set_alignment_mode_route():
-    """Set alignment mode: stream (auto-detect) or calibration (distance-only)."""
+    """Set alignment mode: stream, sprocket, or calibration."""
     data = request.json or {}
     mode = data.get('mode')
     try:
@@ -2637,6 +2916,53 @@ def set_alignment_mode_route():
             })
     except ValueError as e:
         return jsonify({'success': False, 'message': str(e)})
+
+
+# ============================================================================
+# SPROCKET DETECTION API ENDPOINTS
+# ============================================================================
+
+@app.route('/api/detect_sprockets', methods=['POST'])
+def detect_sprockets_route():
+    """Detect sprocket holes in current frame for alignment."""
+    result = scanner.detect_sprocket_holes()
+    if result:
+        return jsonify({
+            'success': True,
+            'result': result,
+        })
+    else:
+        return jsonify({
+            'success': False,
+            'message': 'Sprocket detection failed',
+        })
+
+
+@app.route('/api/calibrate_sprockets', methods=['POST'])
+def calibrate_sprockets_route():
+    """Calibrate scanner using visible sprocket holes."""
+    calibration = scanner.calibrate_from_visible_sprockets()
+    if calibration:
+        return jsonify({
+            'success': True,
+            'calibration': calibration,
+        })
+    else:
+        return jsonify({
+            'success': False,
+            'message': 'Sprocket calibration failed - not enough sprockets visible',
+        })
+
+
+@app.route('/api/align_sprocket', methods=['POST'])
+def align_sprocket_route():
+    """Align frame using sprocket hole detection."""
+    success, message, info = scanner.auto_align_sprocket()
+    return jsonify({
+        'success': success,
+        'message': message,
+        'info': info,
+    })
 
 
 @app.route('/api/set_scanner_mode', methods=['POST'])
