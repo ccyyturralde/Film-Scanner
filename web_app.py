@@ -958,13 +958,29 @@ class FilmScanner:
             self.broadcast_status()
             return False
     
-    def check_camera(self, retry_with_usb_clear=True, max_retries=3):
+    def check_camera(self, retry_with_usb_clear=True, max_retries=3, force=False):
         """Check if camera is connected with detailed logging
-        
+
         Args:
             retry_with_usb_clear: If camera not found, clear USB and retry
             max_retries: Number of retry attempts (Canon cameras need multiple tries)
+            force: If True, bypass rate limiting and check immediately
+            
+        IMPORTANT: Running gphoto2 commands frequently can reset Canon camera
+        date/time settings. This method is rate-limited to prevent that issue.
         """
+        # Rate limiting: Don't check camera more than once every 60 seconds
+        # unless forced. Frequent gphoto2 calls can reset Canon date/time!
+        CAMERA_CHECK_INTERVAL = 60  # seconds
+        
+        current_time = time.time()
+        if not force and self.camera_connected:
+            # If camera was already connected and we checked recently, skip
+            if (current_time - self.last_camera_check) < CAMERA_CHECK_INTERVAL:
+                return self.camera_connected
+        
+        self.last_camera_check = current_time
+        
         try:
             # If another camera operation is in progress (preview/capture), don't interrupt it.
             # Use non-blocking acquire to check if lock is held
@@ -2664,7 +2680,8 @@ def zero_position():
 @app.route('/api/test_capture', methods=['POST'])
 def test_capture():
     """Test camera capture without saving to roll (for debugging)"""
-    if not scanner.check_camera():
+    # Force camera check for user-initiated capture
+    if not scanner.check_camera(force=True):
         return jsonify({
             'success': False, 
             'message': 'Camera not connected',
@@ -2732,7 +2749,8 @@ def capture():
     if not scanner.roll_name:
         return jsonify({'success': False, 'message': 'Create roll first'})
     
-    if not scanner.check_camera():
+    # Force camera check for user-initiated capture
+    if not scanner.check_camera(force=True):
         return jsonify({'success': False, 'message': 'Camera not connected'})
     
     # Optional pre-capture fine-tune (only does minor adjustments if gap visible on edge)
@@ -3427,7 +3445,8 @@ def preview_video_stream():
 @app.route('/api/autofocus', methods=['POST'])
 def autofocus_route():
     """Trigger autofocus (best-effort)."""
-    if not scanner.check_camera():
+    # Force camera check for user-initiated action
+    if not scanner.check_camera(force=True):
         return jsonify({'success': False, 'message': 'Camera not connected'})
     success = scanner.autofocus()
     if success:
@@ -3437,11 +3456,43 @@ def autofocus_route():
 
 @app.route('/api/camera_settings', methods=['POST'])
 def camera_settings_route():
-    """Return basic exposure settings (aperture/iso/shutter) if available."""
-    if not scanner.check_camera():
+    """Return basic exposure settings (aperture/iso/shutter) if available.
+    
+    NOTE: Uses rate-limited camera check to avoid Canon date/time reset issue.
+    """
+    # Use rate-limited check - settings request is less critical
+    if not scanner.check_camera(force=False):
         return jsonify({'success': False, 'message': 'Camera not connected'})
     settings = scanner.get_camera_settings()
     return jsonify({'success': True, 'settings': settings})
+
+
+@app.route('/api/refresh_camera', methods=['POST'])
+def refresh_camera_route():
+    """Force a camera connection check.
+    
+    Use this to reconnect to the camera after power cycling or USB reconnect.
+    This bypasses the rate limiting that prevents frequent checks.
+    
+    NOTE: Frequent gphoto2 commands can reset Canon camera date/time settings.
+    Only use this when you need to verify camera connection.
+    """
+    # Force an immediate camera check
+    connected = scanner.check_camera(force=True, retry_with_usb_clear=True)
+    scanner.broadcast_status()
+    
+    if connected:
+        return jsonify({
+            'success': True,
+            'message': f'Camera connected: {scanner.camera_model}',
+            'camera_model': scanner.camera_model,
+        })
+    else:
+        return jsonify({
+            'success': False,
+            'message': 'Camera not detected',
+            'error': scanner.camera_error,
+        })
 @app.route('/api/update_step_sizes', methods=['POST'])
 def update_step_sizes():
     """Update motor step sizes"""
@@ -3477,8 +3528,13 @@ def handle_connect():
     emit('status_update', scanner.get_status())
 @socketio.on('request_status')
 def handle_status_request():
-    """Handle status request"""
-    scanner.check_camera()
+    """Handle status request
+    
+    NOTE: Camera check is rate-limited to prevent Canon date/time reset issue.
+    Frequent gphoto2 commands can cause Canon cameras to reset their clock.
+    """
+    # Use rate-limited camera check (won't actually check if checked recently)
+    scanner.check_camera(force=False)
     emit('status_update', scanner.get_status())
 if __name__ == '__main__':
     # Handle command line arguments
