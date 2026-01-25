@@ -193,13 +193,15 @@ print_step "Installing Python packages..."
     Flask-SocketIO>=5.3.0 \
     python-socketio>=5.9.0 \
     simple-websocket>=0.10.0 \
-    eventlet>=0.33.0 \
     pyserial>=3.5 \
     Pillow>=10.0.0 \
     numpy>=1.24.0 \
     pygame>=2.5.0 \
     evdev>=1.6.0 \
     psutil>=5.9.0
+
+# Note: We DO NOT install eventlet/gevent because we use async_mode='threading'
+# to avoid RLock conflicts with the touchscreen UI subprocess
 
 # Try to install opencv-python-headless (may fail on some systems)
 "$APP_DIR/.venv/bin/pip" install opencv-python-headless>=4.8.0 || {
