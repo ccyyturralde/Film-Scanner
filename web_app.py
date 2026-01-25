@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-35mm Film Scanner - Web Application (WiFi Version)
+35mm Film Scanner - Web Application
 Mobile-friendly web interface for film scanning
 
 Supports:
-- Arduino Uno R4 WiFi via WiFi TCP connection (this branch)
-- Arduino Uno R3/R4 via USB Serial (main branch)
-
-This version uses WiFi TCP communication with Arduino R4 WiFi,
-eliminating the need for USB connection to Arduino.
+- Arduino Uno R3 via USB Serial
+- Arduino Uno R4 (Minima/WiFi) via USB Serial
 """
 # CRITICAL: Prevent eventlet/gevent from being used even if installed
 # This avoids RLock errors when running via subprocess (touchscreen UI)
@@ -67,37 +64,6 @@ try:
 except ImportError:
     PIL_AVAILABLE = False
     print("⚠ PIL/Pillow not available - image preview will be limited")
-
-# ============================================================================
-# WiFi Configuration for Arduino R4 WiFi
-# ============================================================================
-# Set USE_WIFI_ARDUINO to True to use WiFi connection instead of USB Serial
-# Make sure your Arduino R4 WiFi is configured with wifi_config.h and flashed
-USE_WIFI_ARDUINO = True
-
-# Arduino WiFi connection settings
-# Option 1: Use static IP (recommended, set in wifi_config.h)
-ARDUINO_WIFI_IP = "192.168.1.100"  # Change to your Arduino's IP
-ARDUINO_WIFI_PORT = 8888            # Must match TCP_PORT in wifi_config.h
-
-# Option 2: Use mDNS hostname (requires avahi-daemon on Pi)
-# ARDUINO_WIFI_IP = "arduino-r4.local"  # Arduino's mDNS hostname
-# To enable mDNS, set a hostname in wifi_config.h
-
-ARDUINO_WIFI_TIMEOUT = 5.0          # Connection timeout in seconds
-ARDUINO_WIFI_RETRY_DELAY = 2.0      # Delay between reconnection attempts
-
-# Set to True to enable verbose WiFi debugging
-WIFI_DEBUG = True
-
-# ============================================================================
-# IMPORTANT: How to find Arduino's IP address
-# ============================================================================
-# On first boot, Arduino displays its IP address on the LED matrix (scrolls across).
-# You can also:
-# 1. Check your router's DHCP leases page
-# 2. Use network scanner: sudo nmap -sn 192.168.1.0/24 | grep -B 2 "arduino"
-# 3. Connect Arduino via USB and read Serial monitor: screen /dev/ttyACM0 115200
 
 
 def encode_preview_bytes(preview_bytes: bytes, invert: bool = False) -> str:
@@ -707,12 +673,10 @@ app.config['SECRET_KEY'] = 'film-scanner-secret-key'
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 class FilmScanner:
     def __init__(self):
-        # Arduino connection (WiFi or Serial)
-        self.use_wifi = USE_WIFI_ARDUINO
-        self.arduino = None  # Will be socket or serial.Serial
-        self.arduino_socket = None  # WiFi socket if USE_WIFI_ARDUINO
-        self.arduino_port = None  # USB port if using serial
-        self.arduino_board = "R4 WiFi" if USE_WIFI_ARDUINO else "Unknown"
+        # Arduino connection (USB Serial)
+        self.arduino = None  # Serial connection
+        self.arduino_port = None  # USB port
+        self.arduino_board = "Unknown"
         
         # Scanner state
         self.roll_name = ""
@@ -763,6 +727,10 @@ class FilmScanner:
         self.scanner_mode = "35mm"
         # Auto-alignment toggle: when False, skip all auto alignment
         self.auto_alignment_enabled = True
+        
+        # Auto-capture mode: continuous scanning with automatic capture after alignment
+        self.auto_capture_enabled = False  # Toggle for automatic continuous capture
+        self.auto_capture_delay = 3.0  # Delay after capture before advancing (exposure time)
         
         # State persistence
         self.state_file = None
@@ -858,89 +826,6 @@ class FilmScanner:
 
             return None, False
     
-    def connect_arduino_wifi(self):
-        """Connect to Arduino R4 WiFi via TCP socket"""
-        # Close existing connection if any
-        if self.arduino_socket:
-            try:
-                self.arduino_socket.close()
-            except:
-                pass
-            self.arduino_socket = None
-            self.arduino = None
-        
-        print(f"\n🔌 Connecting to Arduino R4 WiFi at {ARDUINO_WIFI_IP}:{ARDUINO_WIFI_PORT}...")
-        
-        try:
-            # Create TCP socket
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(ARDUINO_WIFI_TIMEOUT)
-            
-            # Connect to Arduino
-            sock.connect((ARDUINO_WIFI_IP, ARDUINO_WIFI_PORT))
-            
-            # Wait for READY message
-            time.sleep(0.5)
-            ready_msg = sock.recv(1024).decode('ascii', errors='ignore')
-            
-            if 'READY' in ready_msg or 'Film Scanner' in ready_msg:
-                self.arduino_socket = sock
-                self.arduino = sock  # For compatibility with existing code
-                self.arduino_board = "R4 WiFi (TCP)"
-                self.arduino_port = f"{ARDUINO_WIFI_IP}:{ARDUINO_WIFI_PORT}"
-                
-                # Configure coarse step size
-                time.sleep(0.1)
-                self._wifi_send(f'l{self.coarse_step}\n')
-                time.sleep(0.1)
-                
-                print(f"✓ Connected to Arduino R4 WiFi at {ARDUINO_WIFI_IP}:{ARDUINO_WIFI_PORT}")
-                self.log(f"✓ Arduino R4 WiFi connected via TCP")
-                return True
-            else:
-                print(f"✗ Unexpected response from {ARDUINO_WIFI_IP}:{ARDUINO_WIFI_PORT}")
-                sock.close()
-                return False
-                
-        except socket.timeout:
-            print(f"✗ Connection timeout to {ARDUINO_WIFI_IP}:{ARDUINO_WIFI_PORT}")
-            print("   Make sure Arduino is powered and on the same network")
-            return False
-        except ConnectionRefusedError:
-            print(f"✗ Connection refused by {ARDUINO_WIFI_IP}:{ARDUINO_WIFI_PORT}")
-            print("   Make sure Arduino firmware is running")
-            return False
-        except Exception as e:
-            print(f"✗ WiFi connection error: {e}")
-            if self.arduino_socket:
-                try:
-                    self.arduino_socket.close()
-                except:
-                    pass
-                self.arduino_socket = None
-            return False
-    
-    def _wifi_send(self, data: str):
-        """Send data via WiFi socket"""
-        if self.arduino_socket:
-            try:
-                self.arduino_socket.sendall(data.encode())
-            except Exception as e:
-                if WIFI_DEBUG:
-                    print(f"WiFi send error: {e}")
-                raise
-    
-    def _wifi_recv(self, size: int = 1024) -> str:
-        """Receive data via WiFi socket"""
-        if self.arduino_socket:
-            try:
-                return self.arduino_socket.recv(size).decode('ascii', errors='ignore')
-            except Exception as e:
-                if WIFI_DEBUG:
-                    print(f"WiFi recv error: {e}")
-                return ""
-        return ""
-    
     def identify_arduino_board(self, port_info):
         """Identify Arduino board type from USB port info"""
         try:
@@ -966,13 +851,9 @@ class FilmScanner:
             return None
         except Exception:
             return None
+    
     def find_arduino(self):
-        """Find Arduino on available ports (USB Serial) or via WiFi"""
-        # WiFi mode: connect via TCP socket
-        if self.use_wifi:
-            return self.connect_arduino_wifi()
-        
-        # USB Serial mode: scan ports
+        """Find Arduino on available USB Serial ports"""
         # Close existing connection if any
         if self.arduino:
             try:
@@ -1083,33 +964,21 @@ class FilmScanner:
         return False
     
     def verify_connection(self):
-        """Verify Arduino connection is alive (WiFi or Serial)"""
+        """Verify Arduino connection is alive"""
         if not self.arduino:
             return False
         
         try:
-            if self.use_wifi:
-                # WiFi mode - send status query
-                self._wifi_send('?\n')
-                time.sleep(0.2)
-                response = self._wifi_recv(1024)
-                
-                # Check if we got a valid response
-                if response and ('Position' in response or 'READY' in response or 'Film' in response):
-                    return True
-                return False
-            else:
-                # Serial mode - original logic
-                self.arduino.timeout = 0.1
-                self.arduino.reset_input_buffer()
-                self.arduino.write(b'?\n')
-                time.sleep(0.2)
-                response = self.arduino.read(100).decode('ascii', errors='ignore')
-                
-                # Check if we got a valid response
-                if response and ('Position' in response or 'READY' in response or 'Film' in response):
-                    return True
-                return False
+            self.arduino.timeout = 0.1
+            self.arduino.reset_input_buffer()
+            self.arduino.write(b'?\n')
+            time.sleep(0.2)
+            response = self.arduino.read(100).decode('ascii', errors='ignore')
+            
+            # Check if we got a valid response
+            if response and ('Position' in response or 'READY' in response or 'Film' in response):
+                return True
+            return False
                 
         except Exception as e:
             print(f"✗ Connection verification failed: {e}")
@@ -1130,7 +999,7 @@ class FilmScanner:
         return True
     
     def send(self, cmd, retry=True, update_position=True):
-        """Send command to Arduino (WiFi or Serial) with error handling and retry"""
+        """Send command to Arduino with error handling and retry"""
         # Quick check - don't verify connection on every command (causes disconnects)
         if not self.arduino:
             print(f"✗ Cannot send command '{cmd}': No Arduino connection")
@@ -1138,77 +1007,48 @@ class FilmScanner:
             return False
         
         try:
-            if self.use_wifi:
-                # WiFi mode
-                self._wifi_send(f"{cmd}\n")
+            self.arduino.reset_input_buffer()
+            self.arduino.write(f"{cmd}\n".encode())
+            
+            # Minimal delay for command processing
+            time.sleep(0.05)
+            
+            # Only update position for movement commands if requested
+            if update_position and (cmd in ['f', 'F', 'b', 'B'] or cmd.startswith('H') or cmd.startswith('Z')):
+                # Reduced wait time for better responsiveness
+                time.sleep(0.15)  # Shorter wait for motor to start moving
                 
-                # Minimal delay for command processing
-                time.sleep(0.05)
+                # Query position without blocking
+                self.arduino.write(b'?\n')
+                time.sleep(0.1)
+                response = self.arduino.read(200).decode('ascii', errors='ignore')
                 
-                # Only update position for movement commands if requested
-                if update_position and (cmd in ['f', 'F', 'b', 'B'] or cmd.startswith('H') or cmd.startswith('Z')):
-                    time.sleep(0.15)
-                    
-                    # Query position
-                    self._wifi_send('?\n')
-                    time.sleep(0.1)
-                    response = self._wifi_recv(1024)
-                    
-                    for line in response.split('\n'):
-                        if 'Position' in line:
-                            try:
-                                pos_str = line.split(':')[1].strip().split()[0]
-                                self.position = int(pos_str)
-                            except:
-                                pass
-            else:
-                # Serial mode - original logic
-                self.arduino.reset_input_buffer()
-                self.arduino.write(f"{cmd}\n".encode())
-                
-                # Minimal delay for command processing
-                time.sleep(0.05)
-                
-                # Only update position for movement commands if requested
-                if update_position and (cmd in ['f', 'F', 'b', 'B'] or cmd.startswith('H') or cmd.startswith('Z')):
-                    # Reduced wait time for better responsiveness
-                    time.sleep(0.15)  # Shorter wait for motor to start moving
-                    
-                    # Query position without blocking
-                    self.arduino.write(b'?\n')
-                    time.sleep(0.1)
-                    response = self.arduino.read(200).decode('ascii', errors='ignore')
-                    
-                    for line in response.split('\n'):
-                        if 'Position' in line:
-                            try:
-                                pos_str = line.split(':')[1].strip().split()[0]
-                                self.position = int(pos_str)
-                            except Exception as e:
-                                # Silently ignore parsing errors for responsiveness
-                                pass
+                for line in response.split('\n'):
+                    if 'Position' in line:
+                        try:
+                            pos_str = line.split(':')[1].strip().split()[0]
+                            self.position = int(pos_str)
+                        except Exception as e:
+                            # Silently ignore parsing errors for responsiveness
+                            pass
             
             return True
             
-        except (serial.SerialException, socket.error, OSError) as e:
-            error_type = "WiFi" if self.use_wifi else "Serial"
-            print(f"✗ {error_type} error sending '{cmd}': {e}")
+        except (serial.SerialException, OSError) as e:
+            print(f"✗ Serial error sending '{cmd}': {e}")
             
             # Mark connection as bad
             try:
-                if self.use_wifi and self.arduino_socket:
-                    self.arduino_socket.close()
-                elif self.arduino:
+                if self.arduino:
                     self.arduino.close()
             except:
                 pass
             self.arduino = None
-            self.arduino_socket = None
             
             # Try to reconnect and retry command once
             if retry:
                 print("🔄 Retrying command after reconnection...")
-                time.sleep(ARDUINO_WIFI_RETRY_DELAY if self.use_wifi else 0.5)
+                time.sleep(0.5)
                 if self.find_arduino():
                     print("✓ Reconnected, retrying command...")
                     return self.send(cmd, retry=False, update_position=update_position)
@@ -2690,6 +2530,8 @@ class FilmScanner:
             'alignment_mode': self.alignment_mode,
             'scanner_mode': self.scanner_mode,
             'auto_alignment_enabled': self.auto_alignment_enabled,
+            'auto_capture_enabled': self.auto_capture_enabled,
+            'auto_capture_delay': self.auto_capture_delay,
             'updated': datetime.now().isoformat()
         }
         
@@ -2715,6 +2557,8 @@ class FilmScanner:
                 self.alignment_mode = state.get('alignment_mode', self.alignment_mode)
                 self.scanner_mode = state.get('scanner_mode', self.scanner_mode)
                 self.auto_alignment_enabled = state.get('auto_alignment_enabled', self.auto_alignment_enabled)
+                self.auto_capture_enabled = state.get('auto_capture_enabled', self.auto_capture_enabled)
+                self.auto_capture_delay = state.get('auto_capture_delay', self.auto_capture_delay)
                 return True
         return False
     
@@ -2790,6 +2634,8 @@ class FilmScanner:
                 'frame_mode': self.frame_mode,
                 'scanner_mode': self.scanner_mode,
                 'auto_alignment_enabled': self.auto_alignment_enabled,
+                'auto_capture_enabled': self.auto_capture_enabled,
+                'auto_capture_delay': self.auto_capture_delay,
                 'camera_connected': self.camera_connected,
                 'camera_model': self.camera_model,
                 'camera_error': self.camera_error,
@@ -3007,6 +2853,7 @@ def capture():
     - Captures the current frame
     - Automatically advances and aligns to next frame using advance_and_align
     - ONLY moves FORWARD (right), with backward only for fine overshoot correction
+    - If auto_capture_enabled, continues to capture next frame automatically
     
     In CALIBRATION mode:
     - Uses fixed frame_advance distance
@@ -3046,6 +2893,13 @@ def capture():
     if success:
         scanner.status_msg = f"✓ Frame {scanner.frame_count}"
         scanner.broadcast_status()
+        
+        # Wait for exposure to complete if auto-capture is enabled
+        if scanner.auto_capture_enabled:
+            scanner.log(f"⏱️ Waiting {scanner.auto_capture_delay}s for exposure...")
+            scanner.status_msg = f"⏱️ Frame {scanner.frame_count} - Waiting for exposure..."
+            scanner.broadcast_status()
+            time.sleep(scanner.auto_capture_delay)
         
         # Auto-advance AFTER capture (only in 35mm mode with Arduino)
         # In 120 mode (hand feed), skip all motor operations
@@ -3093,7 +2947,11 @@ def capture():
         scanner.status_msg = "❌ Capture failed!"
     
     scanner.broadcast_status()
-    return jsonify({'success': success})
+    return jsonify({
+        'success': success,
+        'auto_capture_enabled': scanner.auto_capture_enabled,
+        'frame_count': scanner.frame_count
+    })
 
 
 @app.route('/api/auto_align', methods=['POST'])
@@ -3310,6 +3168,92 @@ def set_auto_alignment_route():
         'success': True,
         'auto_alignment_enabled': scanner.auto_alignment_enabled,
     })
+
+
+@app.route('/api/set_auto_capture', methods=['POST'])
+def set_auto_capture_route():
+    """
+    Toggle auto-capture on or off.
+    
+    When enabled, the scanner will automatically capture the next frame after
+    advancing and aligning. This creates a continuous scanning workflow:
+    1. Capture frame
+    2. Wait for exposure (auto_capture_delay seconds)
+    3. Auto-advance to next frame
+    4. Auto-capture next frame
+    5. Repeat
+    
+    Useful for scanning entire rolls without manual intervention.
+    """
+    data = request.json or {}
+    enabled = data.get('enabled')
+    
+    if enabled is None:
+        # Toggle if not specified
+        with scanner.lock:
+            scanner.auto_capture_enabled = not scanner.auto_capture_enabled
+    else:
+        with scanner.lock:
+            scanner.auto_capture_enabled = bool(enabled)
+    
+    state = "enabled" if scanner.auto_capture_enabled else "disabled"
+    scanner.status_msg = f"Auto-capture: {state}"
+    scanner.save_state()
+    scanner.broadcast_status()
+    
+    return jsonify({
+        'success': True,
+        'auto_capture_enabled': scanner.auto_capture_enabled,
+    })
+
+
+@app.route('/api/set_auto_capture_delay', methods=['POST'])
+def set_auto_capture_delay_route():
+    """
+    Set the delay between capture and advance (exposure time).
+    
+    This delay allows the camera exposure to complete before advancing
+    to the next frame. Adjust based on your camera's exposure time:
+    - Fast exposures (1/60s - 1/125s): 1-2 seconds
+    - Medium exposures (1/30s - 1/15s): 2-3 seconds  
+    - Slow exposures (1/8s - 1s): 3-5 seconds
+    - Very slow exposures (>1s): Match your exposure time + 1-2 seconds buffer
+    
+    Range: 1.0 - 30.0 seconds
+    """
+    data = request.json or {}
+    delay = data.get('delay')
+    
+    if delay is None:
+        return jsonify({
+            'success': False,
+            'message': 'delay parameter required'
+        })
+    
+    try:
+        delay = float(delay)
+        if delay < 1.0 or delay > 30.0:
+            return jsonify({
+                'success': False,
+                'message': 'delay must be between 1.0 and 30.0 seconds'
+            })
+        
+        with scanner.lock:
+            scanner.auto_capture_delay = delay
+        
+        scanner.status_msg = f"Auto-capture delay: {delay}s"
+        scanner.save_state()
+        scanner.broadcast_status()
+        
+        return jsonify({
+            'success': True,
+            'auto_capture_delay': scanner.auto_capture_delay,
+        })
+    except (ValueError, TypeError):
+        return jsonify({
+            'success': False,
+            'message': 'Invalid delay value'
+        })
 
 
 @app.route('/api/set_frame_mode', methods=['POST'])

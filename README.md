@@ -18,8 +18,8 @@ Professional-grade 35mm film scanner using Raspberry Pi, Arduino, and DSLR camer
 | Component | Details |
 |-----------|---------|
 | Raspberry Pi | Pi 4 (2GB+ RAM recommended) |
-| Arduino | Uno R3, R4 Minima, or R4 WiFi |
-| Motor | NEMA 17 stepper (e.g., Creality 42-40) |
+| Arduino | Uno R3, R4 Minima, or R4 WiFi (via USB) |
+| Motor | NEMA 17 stepper (standard or pancake) |
 | Driver | A4988 stepper driver |
 | Camera | Canon DSLR with USB/PTP support |
 | Power | 12V 2A for motor driver |

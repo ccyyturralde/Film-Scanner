@@ -28,7 +28,10 @@ let settingsState = {
 
 let scannerState = {
     mode: '35mm',  // '35mm' or '120'
-    autoAlignmentEnabled: true
+    autoAlignmentEnabled: true,
+    autoCaptureEnabled: false,
+    autoCaptureDelay: 3.0,
+    isAutoCapturing: false  // Track if auto-capture loop is active
 };
 
 
@@ -51,6 +54,12 @@ function updateUI(status) {
     }
     if (status.auto_alignment_enabled !== undefined) {
         scannerState.autoAlignmentEnabled = status.auto_alignment_enabled;
+    }
+    if (status.auto_capture_enabled !== undefined) {
+        scannerState.autoCaptureEnabled = status.auto_capture_enabled;
+    }
+    if (status.auto_capture_delay !== undefined) {
+        scannerState.autoCaptureDelay = status.auto_capture_delay;
     }
     
     // Handle scanner mode (35mm vs 120)
@@ -89,6 +98,26 @@ function updateUI(status) {
     const autoAlignmentToggle = document.getElementById('auto-alignment-toggle');
     if (autoAlignmentToggle) {
         autoAlignmentToggle.checked = scannerState.autoAlignmentEnabled;
+    }
+    
+    // Update auto-capture toggle (both locations)
+    const autoCaptureToggle = document.getElementById('auto-capture-toggle');
+    const autoCaptureSettingsToggle = document.getElementById('auto-capture-settings-toggle');
+    if (autoCaptureToggle) {
+        autoCaptureToggle.checked = scannerState.autoCaptureEnabled;
+    }
+    if (autoCaptureSettingsToggle) {
+        autoCaptureSettingsToggle.checked = scannerState.autoCaptureEnabled;
+    }
+    
+    // Update auto-capture delay display and input
+    const autoCaptureDelayDisplay = document.getElementById('auto-capture-delay-value');
+    const autoCaptureDelayInput = document.getElementById('auto-capture-delay-input');
+    if (autoCaptureDelayDisplay) {
+        autoCaptureDelayDisplay.textContent = scannerState.autoCaptureDelay.toFixed(1) + 's';
+    }
+    if (autoCaptureDelayInput) {
+        autoCaptureDelayInput.value = scannerState.autoCaptureDelay;
     }
     
     // Connection status (only show Arduino status in 35mm mode)
@@ -382,19 +411,93 @@ async function refreshCameraSettings() {
 async function capture() {
     const btn = event.target;
     setButtonProcessing(btn, true);
-    
+
     const autoAlignCheckbox = document.getElementById('auto-align-before-capture');
     const result = await apiCall('capture', { auto_align: autoAlignCheckbox ? autoAlignCheckbox.checked : false });
-    
+
     setButtonProcessing(btn, false);
-    
+
     if (!result.success) {
         alert(result.message || 'Capture failed');
+        return;
     }
-    
+
     // Auto-refresh preview after capture if enabled
     if (previewState.autoRefresh) {
         setTimeout(() => capturePreview(), 500);
+    }
+    
+    // If auto-capture is enabled, continue capturing automatically
+    if (result.auto_capture_enabled && scannerState.autoCaptureEnabled) {
+        // Mark as auto-capturing
+        scannerState.isAutoCapturing = true;
+        
+        // Update UI to show we're in auto-capture mode
+        updateAutoCaptureUI();
+        
+        // Continue with next capture after a brief delay to allow status updates
+        setTimeout(() => {
+            if (scannerState.isAutoCapturing) {
+                console.log('Auto-capture: triggering next frame');
+                capture();
+            }
+        }, 1000);
+    } else {
+        // Auto-capture finished or disabled
+        scannerState.isAutoCapturing = false;
+        updateAutoCaptureUI();
+    }
+}
+
+function stopAutoCapture() {
+    scannerState.isAutoCapturing = false;
+    updateAutoCaptureUI();
+    console.log('Auto-capture stopped by user');
+}
+
+function updateAutoCaptureUI() {
+    const captureBtn = document.querySelector('button[onclick="capture()"]');
+    const stopBtn = document.getElementById('stop-auto-capture-btn');
+    
+    if (scannerState.isAutoCapturing) {
+        if (captureBtn) {
+            captureBtn.disabled = true;
+            captureBtn.textContent = '⏸️ Auto-Capturing...';
+        }
+        if (stopBtn) stopBtn.style.display = 'inline-block';
+    } else {
+        if (captureBtn) {
+            captureBtn.disabled = false;
+            captureBtn.textContent = '📸 Capture';
+        }
+        if (stopBtn) stopBtn.style.display = 'none';
+    }
+}
+
+async function toggleAutoCapture() {
+    const result = await apiCall('set_auto_capture', {});
+    if (result.success) {
+        scannerState.autoCaptureEnabled = result.auto_capture_enabled;
+        console.log('Auto-capture:', scannerState.autoCaptureEnabled ? 'enabled' : 'disabled');
+    }
+}
+
+async function setAutoCaptureDelay() {
+    const input = document.getElementById('auto-capture-delay-input');
+    if (!input) return;
+    
+    const delay = parseFloat(input.value);
+    if (isNaN(delay) || delay < 1.0 || delay > 30.0) {
+        alert('Delay must be between 1.0 and 30.0 seconds');
+        return;
+    }
+    
+    const result = await apiCall('set_auto_capture_delay', { delay: delay });
+    if (result.success) {
+        scannerState.autoCaptureDelay = result.auto_capture_delay;
+        console.log('Auto-capture delay set to:', scannerState.autoCaptureDelay);
+    } else {
+        alert(result.message || 'Failed to set delay');
     }
 }
 

@@ -102,6 +102,15 @@
                             Fine-tune before capture
                         </label>
                     </div>
+                    <div class="control-options arduino-only" style="margin-top:8px;">
+                        <label style="display:flex;align-items:center;gap:8px;margin-right:16px;">
+                            <input type="checkbox" id="auto-capture-toggle" onchange="toggleAutoCapture()">
+                            Auto-Capture (Continuous)
+                        </label>
+                        <button class="btn btn-danger" id="stop-auto-capture-btn" onclick="stopAutoCapture()" style="display:none;">
+                            ⏹️ Stop Auto-Capture
+                        </button>
+                    </div>
                     <div class="camera-settings">
                         <div class="setting-group inline">
                             <strong>Aperture:</strong> <span id="cam-aperture">n/a</span>
@@ -233,8 +242,33 @@
                     <div class="preview-buttons">
                         <button class="btn btn-secondary" onclick="setAlignmentMode('stream')">Stream Auto-Align</button>
                         <button class="btn btn-secondary" onclick="setAlignmentMode('calibration')">Calibration Only</button>
+                        <button class="btn btn-secondary" onclick="setAlignmentMode('sprocket')">Sprocket-Based</button>
                     </div>
                     <div class="help-text" id="alignment-mode-display">Mode: stream</div>
+                </div>
+
+                <div class="settings-section arduino-only">
+                    <h3>Auto-Capture Settings</h3>
+                    <div class="setting-group">
+                        <label>
+                            <input type="checkbox" id="auto-capture-settings-toggle" onchange="toggleAutoCapture()">
+                            Enable Continuous Auto-Capture
+                        </label>
+                        <p style="font-size:0.9em;color:#666;margin-top:4px;">
+                            Automatically captures next frame after alignment completes
+                        </p>
+                    </div>
+                    <div class="setting-group">
+                        <label for="auto-capture-delay-input">Exposure Delay (seconds):</label>
+                        <input type="number" id="auto-capture-delay-input" min="1.0" max="30.0" step="0.5" value="3.0" style="width:80px;">
+                        <button class="btn btn-secondary" onclick="setAutoCaptureDelay()">Set Delay</button>
+                        <p style="font-size:0.9em;color:#666;margin-top:4px;">
+                            Current: <span id="auto-capture-delay-value">3.0s</span>
+                        </p>
+                        <p style="font-size:0.85em;color:#888;margin-top:4px;">
+                            Wait time after capture before advancing. Adjust based on your exposure time.
+                        </p>
+                    </div>
                 </div>
 
                 <div class="settings-section">
