@@ -19,6 +19,14 @@ const char* WIFI_SSID = "YOUR_WIFI_SSID";
 const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
 
 // ============================================================================
+// Device Hostname
+// ============================================================================
+
+// This name will appear in your router's device list
+// Makes it easy to find the Arduino's IP address
+const char* DEVICE_HOSTNAME = "FilmScanner-R4";
+
+// ============================================================================
 // Network Configuration
 // ============================================================================
 
@@ -28,7 +36,8 @@ const uint16_t TCP_PORT = 8888;
 
 // Static IP Configuration (optional)
 // Set USE_STATIC_IP to true if you want a fixed IP address
-// This makes it easier to find the Arduino on your network
+// Most users should leave this false and use DHCP (auto-assign)
+// Then find the IP in your router's device list under DEVICE_HOSTNAME
 const bool USE_STATIC_IP = false;
 
 // If USE_STATIC_IP is true, configure these:
@@ -49,7 +58,8 @@ const int WIFI_RETRY_DELAY = 500;
 
 // Client timeout (milliseconds)
 // If no data received for this long, disconnect client
-const unsigned long CLIENT_TIMEOUT = 5000;
+// Set to 0 to disable timeout
+const unsigned long CLIENT_TIMEOUT = 30000;  // 30 seconds
 
 // ============================================================================
 // Debug Settings

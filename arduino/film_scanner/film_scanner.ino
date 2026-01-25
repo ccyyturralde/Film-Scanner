@@ -268,21 +268,11 @@ unsigned long last_client_activity = 0;
 
 #ifdef HAS_WIFI
 
-void scrollIPAddress(IPAddress ip) {
-  // Scroll the IP address on LED matrix
-  String ipStr = String(ip[0]) + "." + String(ip[1]) + "." + String(ip[2]) + "." + String(ip[3]);
-  matrix.beginText(0, 1, 0xFFFFFF);
-  matrix.textFont(Font_4x6);
-  matrix.beginDraw();
-  matrix.stroke(0xFFFFFFFF);
-  matrix.textScrollSpeed(50);
-  matrix.text(ipStr.c_str(), 1, 1);
-  matrix.endDraw();
-}
-
 bool connectWiFi() {
   if (WIFI_DEBUG) {
     Serial.println("\n=== WiFi Setup ===");
+    Serial.print("Hostname: ");
+    Serial.println(DEVICE_HOSTNAME);
     Serial.print("Connecting to: ");
     Serial.println(WIFI_SSID);
   }
@@ -290,6 +280,9 @@ bool connectWiFi() {
   #ifdef HAS_LED_MATRIX
   updateLEDStatus(LED_WIFI_CONNECTING);
   #endif
+  
+  // Set hostname BEFORE connecting - this shows up in router's device list
+  WiFi.setHostname(DEVICE_HOSTNAME);
   
   // Connect to WiFi
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
@@ -300,12 +293,21 @@ bool connectWiFi() {
     if (WIFI_DEBUG) {
       Serial.print(".");
     }
+    // Blink the LED to show we're trying to connect
+    #ifdef HAS_LED_MATRIX
+    if (attempts % 2 == 0) {
+      showLEDPattern(PATTERN_WIFI);
+    } else {
+      showLEDPattern(PATTERN_IDLE);
+    }
+    #endif
     attempts++;
   }
   
   if (WiFi.status() != WL_CONNECTED) {
     if (WIFI_DEBUG) {
       Serial.println("\n❌ WiFi connection failed!");
+      Serial.println("Check SSID and password in wifi_config.h");
     }
     #ifdef HAS_LED_MATRIX
     updateLEDStatus(LED_COMM_ERROR);
@@ -313,7 +315,7 @@ bool connectWiFi() {
     return false;
   }
   
-  // Configure static IP if requested
+  // Configure static IP if requested (otherwise uses DHCP)
   if (USE_STATIC_IP) {
     IPAddress ip, gateway, subnet, dns;
     ip.fromString(STATIC_IP);
@@ -327,15 +329,19 @@ bool connectWiFi() {
   
   if (WIFI_DEBUG) {
     Serial.println("\n✓ WiFi connected!");
+    Serial.print("Hostname: ");
+    Serial.println(DEVICE_HOSTNAME);
     Serial.print("IP Address: ");
     Serial.println(WiFi.localIP());
     Serial.print("TCP Port: ");
     Serial.println(TCP_PORT);
+    Serial.println("\nFind this device in your router's device list as:");
+    Serial.print("  → ");
+    Serial.println(DEVICE_HOSTNAME);
   }
   
+  // Show success pattern (happy face)
   #ifdef HAS_LED_MATRIX
-  scrollIPAddress(WiFi.localIP());
-  delay(3000);  // Show IP for 3 seconds
   updateLEDStatus(LED_OK);
   #endif
   
