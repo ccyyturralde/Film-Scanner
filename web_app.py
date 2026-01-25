@@ -292,25 +292,58 @@ class CaptureCardStream:
     Live preview stream from capture card using OpenCV VideoCapture.
     Reads from /dev/video* device and exposes the latest frame for preview/alignment.
 
-    Notes:
-    - Uses OpenCV VideoCapture to read from capture card
+    Features:
+    - Resolution control: Set capture and output resolution
+    - White balance adjustment: Apply color correction to preview stream
     - Continuously reads frames in background thread
     - Stores only the latest frame (not a buffer)
     - No gphoto2 or viewfinder commands - pure capture card input
     """
+    
+    # Resolution presets (width, height)
+    RESOLUTION_PRESETS = {
+        "4k": (3840, 2160),
+        "1080p": (1920, 1080),
+        "720p": (1280, 720),
+        "480p": (640, 480),
+        "360p": (480, 360),
+    }
 
-    def __init__(self, scanner, device: Optional[str] = None, target_width: int = 640, max_age: float = 1.5):
+    def __init__(self, scanner, device: Optional[str] = None, output_width: int = 1280, max_age: float = 1.5):
         self.scanner = scanner
         self.device = device or find_capture_card_device()
-        self.target_width = target_width
+        
+        # Resolution settings
+        self.output_width = output_width  # Width to resize output to (for web stream)
+        self.capture_width = 1920   # Request this resolution from capture card
+        self.capture_height = 1080  # Request this resolution from capture card
+        self.jpeg_quality = 80      # JPEG quality (0-100)
+        
+        # White balance settings (RGB gains, 1.0 = neutral)
+        self.wb_enabled = False
+        self.wb_r_gain = 1.0
+        self.wb_g_gain = 1.0
+        self.wb_b_gain = 1.0
+        self.wb_sample_region = None  # (x, y, w, h) in normalized coords (0-1)
+        
+        # Frame storage
         self.max_age = max_age
         self.latest_frame: Optional[bytes] = None
+        self.latest_frame_raw: Optional[np.ndarray] = None  # For white balance sampling
         self.last_frame_ts: float = 0.0
+        
+        # Thread control
         self.thread: Optional[threading.Thread] = None
         self.stop_event = threading.Event()
+        self.restart_event = threading.Event()  # Signal to restart with new settings
         self.cap: Optional[cv2.VideoCapture] = None
         self.lock = threading.Lock()
         self.last_error: Optional[str] = None
+        
+        # Stats
+        self.actual_width = 0
+        self.actual_height = 0
+        self.fps = 0.0
 
     def is_running(self) -> bool:
         return self.thread is not None and self.thread.is_alive()
@@ -326,6 +359,7 @@ class CaptureCardStream:
             if self.is_running():
                 return True
             self.stop_event.clear()
+            self.restart_event.clear()
             self.thread = threading.Thread(target=self._run_stream, daemon=True)
             self.thread.start()
         return True
@@ -365,15 +399,214 @@ class CaptureCardStream:
                 return frame
             time.sleep(0.05)
         return None
+    
+    def get_raw_frame(self) -> Optional[np.ndarray]:
+        """Return latest raw frame (numpy array) for processing."""
+        with self.lock:
+            return self.latest_frame_raw.copy() if self.latest_frame_raw is not None else None
+    
+    # ========================================================================
+    # Resolution Control
+    # ========================================================================
+    
+    def set_resolution(self, preset: str = None, capture_width: int = None, 
+                       capture_height: int = None, output_width: int = None):
+        """
+        Set stream resolution.
+        
+        Args:
+            preset: Resolution preset name ("4k", "1080p", "720p", "480p", "360p")
+            capture_width: Capture width in pixels (overrides preset)
+            capture_height: Capture height in pixels (overrides preset)
+            output_width: Output width for web stream (resizes after capture)
+            
+        Changes take effect after stream restart.
+        """
+        if preset and preset.lower() in self.RESOLUTION_PRESETS:
+            w, h = self.RESOLUTION_PRESETS[preset.lower()]
+            self.capture_width = w
+            self.capture_height = h
+            self.scanner.log(f"Stream resolution preset: {preset} ({w}x{h})")
+        
+        if capture_width:
+            self.capture_width = capture_width
+        if capture_height:
+            self.capture_height = capture_height
+        if output_width:
+            self.output_width = output_width
+            
+        # Signal stream to restart with new settings
+        if self.is_running():
+            self.restart_stream()
+    
+    def set_resolution_preset(self, preset: str):
+        """Set resolution using a preset name."""
+        self.set_resolution(preset=preset)
+    
+    def get_resolution_info(self) -> dict:
+        """Get current resolution settings and actual values."""
+        return {
+            "capture_width": self.capture_width,
+            "capture_height": self.capture_height,
+            "output_width": self.output_width,
+            "actual_width": self.actual_width,
+            "actual_height": self.actual_height,
+            "fps": self.fps,
+            "jpeg_quality": self.jpeg_quality,
+            "presets": list(self.RESOLUTION_PRESETS.keys()),
+        }
+    
+    def set_jpeg_quality(self, quality: int):
+        """Set JPEG encoding quality (0-100). Lower = smaller files, more lag-friendly."""
+        self.jpeg_quality = max(10, min(100, quality))
+    
+    def restart_stream(self):
+        """Restart stream to apply new settings."""
+        was_running = self.is_running()
+        if was_running:
+            self.stop()
+            time.sleep(0.2)
+            self.start()
+    
+    # ========================================================================
+    # White Balance Control
+    # ========================================================================
+    
+    def set_white_balance_from_region(self, x: float, y: float, w: float = 0.1, h: float = 0.1):
+        """
+        Set white balance by sampling a region of the current frame.
+        
+        The sampled region should be something neutral (gray card, white paper).
+        The RGB values are averaged and used to calculate correction gains.
+        
+        Args:
+            x: X position of sample region (0-1, fraction of width)
+            y: Y position of sample region (0-1, fraction of height)
+            w: Width of sample region (0-1, fraction of width)
+            h: Height of sample region (0-1, fraction of height)
+            
+        This affects the web preview stream only, NOT the camera settings.
+        """
+        self.wb_sample_region = (x, y, w, h)
+        
+        # Get current raw frame
+        raw_frame = self.get_raw_frame()
+        if raw_frame is None:
+            self.scanner.log("✗ No frame available for white balance sampling")
+            return False
+        
+        frame_h, frame_w = raw_frame.shape[:2]
+        
+        # Calculate pixel coordinates
+        px_x = int(x * frame_w)
+        px_y = int(y * frame_h)
+        px_w = max(10, int(w * frame_w))
+        px_h = max(10, int(h * frame_h))
+        
+        # Clamp to frame bounds
+        px_x = max(0, min(px_x, frame_w - px_w))
+        px_y = max(0, min(px_y, frame_h - px_h))
+        
+        # Extract sample region
+        sample = raw_frame[px_y:px_y+px_h, px_x:px_x+px_w]
+        
+        # Calculate average RGB (OpenCV uses BGR)
+        avg_b = np.mean(sample[:, :, 0])
+        avg_g = np.mean(sample[:, :, 1])
+        avg_r = np.mean(sample[:, :, 2])
+        
+        # Avoid division by zero
+        if avg_b < 1: avg_b = 1
+        if avg_g < 1: avg_g = 1
+        if avg_r < 1: avg_r = 1
+        
+        # Calculate gains to make the sampled region neutral gray
+        # Target: make R, G, B equal (neutral gray)
+        avg_gray = (avg_r + avg_g + avg_b) / 3
+        
+        self.wb_r_gain = avg_gray / avg_r
+        self.wb_g_gain = avg_gray / avg_g
+        self.wb_b_gain = avg_gray / avg_b
+        
+        # Normalize gains so max is 1.0 (avoid boosting channels too much)
+        max_gain = max(self.wb_r_gain, self.wb_g_gain, self.wb_b_gain)
+        if max_gain > 1.5:
+            self.wb_r_gain /= max_gain
+            self.wb_g_gain /= max_gain
+            self.wb_b_gain /= max_gain
+        
+        self.wb_enabled = True
+        
+        self.scanner.log(f"✓ White balance set from region ({x:.2f}, {y:.2f})")
+        self.scanner.log(f"   RGB gains: R={self.wb_r_gain:.3f}, G={self.wb_g_gain:.3f}, B={self.wb_b_gain:.3f}")
+        
+        return True
+    
+    def set_white_balance_gains(self, r_gain: float = 1.0, g_gain: float = 1.0, b_gain: float = 1.0):
+        """
+        Manually set white balance RGB gains.
+        
+        Args:
+            r_gain: Red channel gain (1.0 = neutral)
+            g_gain: Green channel gain (1.0 = neutral)
+            b_gain: Blue channel gain (1.0 = neutral)
+        """
+        self.wb_r_gain = max(0.1, min(3.0, r_gain))
+        self.wb_g_gain = max(0.1, min(3.0, g_gain))
+        self.wb_b_gain = max(0.1, min(3.0, b_gain))
+        self.wb_enabled = True
+        self.scanner.log(f"White balance gains: R={self.wb_r_gain:.3f}, G={self.wb_g_gain:.3f}, B={self.wb_b_gain:.3f}")
+    
+    def reset_white_balance(self):
+        """Reset white balance to neutral (no correction)."""
+        self.wb_r_gain = 1.0
+        self.wb_g_gain = 1.0
+        self.wb_b_gain = 1.0
+        self.wb_enabled = False
+        self.wb_sample_region = None
+        self.scanner.log("White balance reset to neutral")
+    
+    def get_white_balance_info(self) -> dict:
+        """Get current white balance settings."""
+        return {
+            "enabled": self.wb_enabled,
+            "r_gain": self.wb_r_gain,
+            "g_gain": self.wb_g_gain,
+            "b_gain": self.wb_b_gain,
+            "sample_region": self.wb_sample_region,
+        }
+    
+    def _apply_white_balance(self, frame: np.ndarray) -> np.ndarray:
+        """Apply white balance correction to a frame (BGR format)."""
+        if not self.wb_enabled:
+            return frame
+        
+        # Convert to float for processing
+        frame_float = frame.astype(np.float32)
+        
+        # Apply gains (OpenCV uses BGR)
+        frame_float[:, :, 0] *= self.wb_b_gain  # Blue
+        frame_float[:, :, 1] *= self.wb_g_gain  # Green
+        frame_float[:, :, 2] *= self.wb_r_gain  # Red
+        
+        # Clip to valid range and convert back to uint8
+        frame_float = np.clip(frame_float, 0, 255)
+        return frame_float.astype(np.uint8)
 
     def _run_stream(self):
         """Background thread that continuously reads frames from capture card."""
+        frame_count = 0
+        fps_start_time = time.time()
+        
         try:
             if not self.device:
                 self.last_error = "No capture card device specified"
                 return
 
             self.scanner.log(f"▶ Starting capture card stream from {self.device}")
+            self.scanner.log(f"   Requested resolution: {self.capture_width}x{self.capture_height}")
+            self.scanner.log(f"   Output width: {self.output_width}px")
+            
             cap = cv2.VideoCapture(self.device)
             
             if not cap.isOpened():
@@ -381,9 +614,18 @@ class CaptureCardStream:
                 self.scanner.log(f"✗ Failed to open capture card {self.device}")
                 return
 
+            # Set capture resolution
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.capture_width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.capture_height)
+            
             # Set capture properties for lower latency
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             cap.set(cv2.CAP_PROP_FPS, 30)
+            
+            # Read actual resolution achieved
+            self.actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            self.actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            self.scanner.log(f"   Actual resolution: {self.actual_width}x{self.actual_height}")
             
             with self.lock:
                 self.cap = cap
@@ -393,21 +635,37 @@ class CaptureCardStream:
                 if not ret or frame is None:
                     time.sleep(0.01)
                     continue
+                
+                # Store raw frame for white balance sampling
+                with self.lock:
+                    self.latest_frame_raw = frame.copy()
+                
+                # Apply white balance correction
+                if self.wb_enabled:
+                    frame = self._apply_white_balance(frame)
 
-                # Resize if needed
-                if self.target_width and frame.shape[1] != self.target_width:
-                    height = int(frame.shape[0] * (self.target_width / frame.shape[1]))
-                    frame = cv2.resize(frame, (self.target_width, height))
+                # Resize for output if needed
+                if self.output_width and frame.shape[1] != self.output_width:
+                    height = int(frame.shape[0] * (self.output_width / frame.shape[1]))
+                    frame = cv2.resize(frame, (self.output_width, height), interpolation=cv2.INTER_AREA)
 
                 # Convert to JPEG
-                ret, jpeg_bytes = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                ret, jpeg_bytes = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality])
                 if ret:
                     with self.lock:
                         self.latest_frame = jpeg_bytes.tobytes()
                         self.last_frame_ts = time.time()
+                
+                # Calculate FPS
+                frame_count += 1
+                elapsed = time.time() - fps_start_time
+                if elapsed >= 2.0:
+                    self.fps = frame_count / elapsed
+                    frame_count = 0
+                    fps_start_time = time.time()
 
                 # Small delay to avoid 100% CPU usage
-                    time.sleep(0.01)
+                time.sleep(0.01)
 
         except Exception as e:
             self.last_error = str(e)
@@ -524,7 +782,12 @@ class FilmScanner:
         self.capture_card_device = None
 
         # Live preview stream from capture card (continuous latest frame)
-        self.preview_stream = CaptureCardStream(self)
+        # Default to 720p for better performance over network
+        # Can be changed via /api/stream/resolution
+        self.preview_stream = CaptureCardStream(self, output_width=1280)
+        self.preview_stream.capture_width = 1280   # Request 720p from capture card
+        self.preview_stream.capture_height = 720
+        self.preview_stream.jpeg_quality = 75      # Good balance of quality/speed
 
         # Load persisted alignment settings (best-effort)
         try:
@@ -2544,6 +2807,11 @@ class FilmScanner:
                 'sprocket_detection_enabled': self.sprocket_detection_enabled,
                 'sprocket_pitch_px': self.sprocket_pitch_px,
                 'px_per_mm': self.px_per_mm,
+                # Stream info
+                'stream_resolution': f"{self.preview_stream.capture_width}x{self.preview_stream.capture_height}",
+                'stream_output_width': self.preview_stream.output_width,
+                'stream_fps': round(self.preview_stream.fps, 1),
+                'stream_wb_enabled': self.preview_stream.wb_enabled,
             }
         
         return status
@@ -3521,6 +3789,184 @@ def update_step_sizes():
     except Exception as e:
         print(f"✗ Failed to update step sizes: {e}")
         return jsonify({'success': False, 'message': str(e)})
+
+
+# ============================================================================
+# STREAM RESOLUTION AND WHITE BALANCE CONTROL
+# ============================================================================
+
+@app.route('/api/stream/resolution', methods=['GET', 'POST'])
+def stream_resolution():
+    """
+    Get or set stream resolution.
+    
+    GET: Returns current resolution settings
+    POST: Set resolution using preset or custom values
+    
+    POST JSON:
+        {
+            "preset": "720p",  // One of: "4k", "1080p", "720p", "480p", "360p"
+            // OR custom values:
+            "capture_width": 1920,
+            "capture_height": 1080,
+            "output_width": 1280,
+            "jpeg_quality": 80  // Optional: 10-100
+        }
+    """
+    if request.method == 'GET':
+        return jsonify({
+            'success': True,
+            'resolution': scanner.preview_stream.get_resolution_info(),
+        })
+    
+    # POST: Set resolution
+    data = request.json or {}
+    
+    try:
+        preset = data.get('preset')
+        capture_width = data.get('capture_width')
+        capture_height = data.get('capture_height')
+        output_width = data.get('output_width')
+        jpeg_quality = data.get('jpeg_quality')
+        
+        if preset:
+            scanner.preview_stream.set_resolution_preset(preset)
+            scanner.log(f"Stream resolution set to {preset}")
+        elif capture_width or capture_height or output_width:
+            scanner.preview_stream.set_resolution(
+                capture_width=capture_width,
+                capture_height=capture_height,
+                output_width=output_width,
+            )
+            scanner.log(f"Stream resolution updated")
+        
+        if jpeg_quality:
+            scanner.preview_stream.set_jpeg_quality(jpeg_quality)
+        
+        return jsonify({
+            'success': True,
+            'message': 'Resolution updated',
+            'resolution': scanner.preview_stream.get_resolution_info(),
+        })
+        
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/stream/white_balance', methods=['GET', 'POST', 'DELETE'])
+def stream_white_balance():
+    """
+    Get, set, or reset white balance for the preview stream.
+    
+    NOTE: This affects the web preview ONLY, not the camera settings.
+    
+    GET: Returns current white balance settings
+    
+    POST: Set white balance
+        Option 1 - Sample from region (normalized coords 0-1):
+        {
+            "sample_region": {"x": 0.4, "y": 0.4, "w": 0.2, "h": 0.2}
+        }
+        
+        Option 2 - Manual RGB gains:
+        {
+            "r_gain": 1.0,
+            "g_gain": 1.0,
+            "b_gain": 1.0
+        }
+    
+    DELETE: Reset white balance to neutral
+    """
+    if request.method == 'GET':
+        return jsonify({
+            'success': True,
+            'white_balance': scanner.preview_stream.get_white_balance_info(),
+        })
+    
+    if request.method == 'DELETE':
+        scanner.preview_stream.reset_white_balance()
+        return jsonify({
+            'success': True,
+            'message': 'White balance reset to neutral',
+            'white_balance': scanner.preview_stream.get_white_balance_info(),
+        })
+    
+    # POST: Set white balance
+    data = request.json or {}
+    
+    try:
+        if 'sample_region' in data:
+            # Sample from a region
+            region = data['sample_region']
+            x = float(region.get('x', 0.4))
+            y = float(region.get('y', 0.4))
+            w = float(region.get('w', 0.1))
+            h = float(region.get('h', 0.1))
+            
+            success = scanner.preview_stream.set_white_balance_from_region(x, y, w, h)
+            if success:
+                return jsonify({
+                    'success': True,
+                    'message': 'White balance set from sampled region',
+                    'white_balance': scanner.preview_stream.get_white_balance_info(),
+                })
+            else:
+                return jsonify({
+                    'success': False,
+                    'message': 'Failed to sample white balance - no frame available',
+                })
+        
+        elif 'r_gain' in data or 'g_gain' in data or 'b_gain' in data:
+            # Manual RGB gains
+            r = float(data.get('r_gain', 1.0))
+            g = float(data.get('g_gain', 1.0))
+            b = float(data.get('b_gain', 1.0))
+            
+            scanner.preview_stream.set_white_balance_gains(r, g, b)
+            return jsonify({
+                'success': True,
+                'message': 'White balance gains set',
+                'white_balance': scanner.preview_stream.get_white_balance_info(),
+            })
+        
+        else:
+            return jsonify({
+                'success': False,
+                'message': 'Provide either sample_region or r_gain/g_gain/b_gain',
+            })
+            
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/stream/info', methods=['GET'])
+def stream_info():
+    """Get complete stream information including resolution, white balance, and status."""
+    return jsonify({
+        'success': True,
+        'stream_enabled': scanner.stream_enabled,
+        'stream_running': scanner.preview_stream.is_running(),
+        'resolution': scanner.preview_stream.get_resolution_info(),
+        'white_balance': scanner.preview_stream.get_white_balance_info(),
+        'device': scanner.preview_stream.device,
+        'last_error': scanner.preview_stream.last_error,
+    })
+
+
+@app.route('/api/stream/restart', methods=['POST'])
+def stream_restart():
+    """Restart the preview stream (to apply new settings)."""
+    try:
+        scanner.preview_stream.restart_stream()
+        return jsonify({
+            'success': True,
+            'message': 'Stream restarted',
+            'resolution': scanner.preview_stream.get_resolution_info(),
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+
 # WebSocket events
 @socketio.on('connect')
 def handle_connect():
