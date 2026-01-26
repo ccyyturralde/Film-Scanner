@@ -714,7 +714,7 @@ class FilmScanner:
         # Mode control
         self.mode = 'manual'
         self.auto_advance = True
-        self.alignment_mode = "stream"  # stream, sprocket, or calibration
+        self.alignment_mode = "stream"  # stream or sprocket
         self.frame_mode = "full"  # full or half
         
         # Sprocket-based alignment (new hardware with visible sprocket holes)
@@ -2500,13 +2500,12 @@ class FilmScanner:
         Set alignment mode:
         - "stream": live auto-detect using preview stream (gap detection)
         - "sprocket": use sprocket hole detection (new hardware with visible sprockets)
-        - "calibration": distance-only using calibrated frame_advance
         """
         if not isinstance(mode, str):
             raise ValueError("mode must be a string")
         normalized = mode.strip().lower()
-        if normalized not in ("stream", "sprocket", "calibration"):
-            raise ValueError("mode must be 'stream', 'sprocket', or 'calibration'")
+        if normalized not in ("stream", "sprocket"):
+            raise ValueError("mode must be 'stream' or 'sprocket'")
         with self.lock:
             self.alignment_mode = normalized
         self.save_state()
@@ -2722,10 +2721,11 @@ def move():
     direction = data.get('direction', 'forward')
     size = data.get('size', 'fine')
     
+    # Motor direction reversed for new pancake motor
     if direction == 'forward':
-        cmd = 'F' if size == 'coarse' else 'f'
-    else:
         cmd = 'B' if size == 'coarse' else 'b'
+    else:
+        cmd = 'F' if size == 'coarse' else 'f'
     
     # Send command without waiting for position update (for speed)
     success = scanner.send(cmd, update_position=False)
@@ -3046,7 +3046,7 @@ def set_alignment_config_route():
 
 @app.route('/api/set_alignment_mode', methods=['POST'])
 def set_alignment_mode_route():
-    """Set alignment mode: stream, sprocket, or calibration."""
+    """Set alignment mode: stream or sprocket."""
     data = request.json or {}
     mode = data.get('mode')
     try:

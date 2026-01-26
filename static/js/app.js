@@ -136,7 +136,8 @@ function updateUI(status) {
     document.getElementById('status-msg').textContent = status.status_msg;
     const alignModeEl = document.getElementById('alignment-mode-display');
     if (alignModeEl && status.alignment_mode) {
-        alignModeEl.textContent = `Mode: ${status.alignment_mode}`;
+        const modeLabel = status.alignment_mode === 'stream' ? 'Auto (Gap Detection)' : 'Auto (Sprocket Holes)';
+        alignModeEl.textContent = `Mode: ${modeLabel}`;
     }
     
     // Auto-align controls (hidden in 120 mode via arduino-only class)
@@ -601,7 +602,10 @@ async function setAlignmentMode(mode) {
         alert('Failed to set alignment mode: ' + (result.message || 'Unknown error'));
     } else {
         const alignModeEl = document.getElementById('alignment-mode-display');
-        if (alignModeEl) alignModeEl.textContent = `Mode: ${result.alignment_mode}`;
+        if (alignModeEl) {
+            const modeLabel = result.alignment_mode === 'stream' ? 'Auto (Gap Detection)' : 'Auto (Sprocket Holes)';
+            alignModeEl.textContent = `Mode: ${modeLabel}`;
+        }
         // If switching back to stream and video preview active, restart stream to ensure viewfinder is on
         if (mode === 'stream' && previewState.videoActive) {
             startVideoStream();
