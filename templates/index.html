@@ -270,6 +270,66 @@
                     </div>
                 </div>
 
+                <!-- ScanLight RGB Backlight Control -->
+                <div class="settings-section">
+                    <h3>💡 ScanLight Backlight</h3>
+                    <div class="scanlight-status" style="margin-bottom:12px;">
+                        <span id="scanlight-connection-status" class="status-badge disconnected">Disconnected</span>
+                    </div>
+                    
+                    <!-- RGB Sliders -->
+                    <div class="rgb-controls">
+                        <div class="rgb-slider-group">
+                            <label class="rgb-label" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                                <span class="rgb-channel-name" style="color: #f55;font-weight:bold;">R</span>
+                                <span class="rgb-value" id="scanlight-r-value" style="font-weight:bold;min-width:40px;text-align:right;">255</span>
+                            </label>
+                            <input type="range" id="scanlight-r-slider" min="0" max="255" value="255" 
+                                   class="rgb-slider" oninput="updateScanlightRGB()" style="width:100%;">
+                        </div>
+                        <div class="rgb-slider-group">
+                            <label class="rgb-label" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                                <span class="rgb-channel-name" style="color: #5f5;font-weight:bold;">G</span>
+                                <span class="rgb-value" id="scanlight-g-value" style="font-weight:bold;min-width:40px;text-align:right;">255</span>
+                            </label>
+                            <input type="range" id="scanlight-g-slider" min="0" max="255" value="255" 
+                                   class="rgb-slider" oninput="updateScanlightRGB()" style="width:100%;">
+                        </div>
+                        <div class="rgb-slider-group">
+                            <label class="rgb-label" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                                <span class="rgb-channel-name" style="color: #55f;font-weight:bold;">B</span>
+                                <span class="rgb-value" id="scanlight-b-value" style="font-weight:bold;min-width:40px;text-align:right;">255</span>
+                            </label>
+                            <input type="range" id="scanlight-b-slider" min="0" max="255" value="255" 
+                                   class="rgb-slider" oninput="updateScanlightRGB()" style="width:100%;">
+                        </div>
+                        
+                        <!-- RGB Preview Box -->
+                        <div class="rgb-preview" style="margin-top:12px;display:flex;align-items:center;gap:12px;">
+                            <div id="scanlight-color-preview" style="width:60px;height:60px;border:2px solid #444;border-radius:8px;background:rgb(255,255,255);"></div>
+                            <span id="scanlight-rgb-text" style="font-size:14px;font-weight:bold;">RGB(255, 255, 255)</span>
+                        </div>
+                    </div>
+                    
+                    <!-- Profile Management -->
+                    <div class="profile-controls" style="margin-top:16px;">
+                        <div class="setting-group">
+                            <label for="scanlight-profile-select">Load Profile:</label>
+                            <select id="scanlight-profile-select" class="profile-select" style="flex:1;">
+                                <option value="">-- Select Profile --</option>
+                                <option value="Color">Color</option>
+                                <option value="B&W">B&W</option>
+                            </select>
+                            <button class="btn btn-secondary" onclick="loadScanlightProfile()">Load</button>
+                        </div>
+                        <div class="setting-group" style="margin-top:8px;">
+                            <input type="text" id="scanlight-profile-name" placeholder="Profile name..." class="profile-name-input" style="flex:1;">
+                            <button class="btn btn-primary" onclick="saveScanlightProfile()">Save</button>
+                            <button class="btn btn-danger" onclick="deleteScanlightProfile()">Delete</button>
+                        </div>
+                    </div>
+                </div>
+
                 <div class="settings-section">
                     <h3>System</h3>
                     <div class="control-options">

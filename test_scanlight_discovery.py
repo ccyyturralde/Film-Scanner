@@ -170,16 +170,18 @@ def main():
     test_scanlight_sl2(selected['device'])
     
     print("\n" + "="*60)
-    print("Discovery complete!")
+    print("Testing complete!")
     print("="*60)
+    print("\nThe ScanLight SL2 protocol is already implemented in:")
+    print("  scanlight_controller.py")
     print("\nNext steps:")
-    print("1. Review the responses above to identify working commands")
-    print("2. Update scanlight_controller.py with the correct command format")
-    print("3. Test with: python3 scanlight_controller.py")
-    print("\nIf no commands worked:")
-    print("- Check the ScanLight GitHub repo for documentation")
-    print("- Look for .uf2 firmware filename (may indicate version)")
-    print("- Try connecting with a serial monitor to see startup messages")
+    print("1. Test the controller: python3 scanlight_controller.py")
+    print("2. If it works, we'll integrate it into the web app")
+    print("\nProtocol Summary:")
+    print("  - Binary packet format")
+    print("  - Set RGB: [254, 0, 3, R, G, B, 255]")
+    print("  - Reset: [254, 1, 0, 255]")
+    print("  - Baud rate: 115200")
 
 
 if __name__ == "__main__":

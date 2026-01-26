@@ -1005,3 +1005,223 @@ document.addEventListener('DOMContentLoaded', () => {
         stopMotorHold();
     });
 });
+
+// ============================================================================
+// ScanLight RGB Backlight Control
+// ============================================================================
+
+let scanlightState = {
+    connected: false,
+    rgb: { r: 255, g: 255, b: 255 },
+    profiles: {},
+    currentProfile: 'Color'
+};
+
+// Fetch ScanLight status on page load
+async function fetchScanlightStatus() {
+    try {
+        const response = await fetch('/api/scanlight/status');
+        const data = await response.json();
+        
+        if (data.success) {
+            scanlightState.connected = data.connected;
+            scanlightState.rgb = data.rgb || { r: 255, g: 255, b: 255 };
+            scanlightState.profiles = data.profiles || {};
+            scanlightState.currentProfile = data.current_profile || 'Color';
+            
+            updateScanlightUI();
+            updateScanlightProfileList();
+        }
+    } catch (error) {
+        console.error('Error fetching ScanLight status:', error);
+    }
+}
+
+// Update ScanLight RGB sliders and preview
+function updateScanlightUI() {
+    const { r, g, b } = scanlightState.rgb;
+    
+    // Update sliders
+    document.getElementById('scanlight-r-slider').value = r;
+    document.getElementById('scanlight-g-slider').value = g;
+    document.getElementById('scanlight-b-slider').value = b;
+    
+    // Update value displays
+    document.getElementById('scanlight-r-value').textContent = r;
+    document.getElementById('scanlight-g-value').textContent = g;
+    document.getElementById('scanlight-b-value').textContent = b;
+    
+    // Update preview box
+    document.getElementById('scanlight-color-preview').style.background = `rgb(${r}, ${g}, ${b})`;
+    document.getElementById('scanlight-rgb-text').textContent = `RGB(${r}, ${g}, ${b})`;
+    
+    // Update connection status
+    const statusEl = document.getElementById('scanlight-connection-status');
+    if (statusEl) {
+        statusEl.textContent = scanlightState.connected ? 'Connected' : 'Disconnected';
+        statusEl.className = scanlightState.connected ? 'status-badge connected' : 'status-badge disconnected';
+    }
+}
+
+// Update profile dropdown list
+function updateScanlightProfileList() {
+    const select = document.getElementById('scanlight-profile-select');
+    if (!select) return;
+    
+    // Clear existing options except first
+    select.innerHTML = '<option value="">-- Select Profile --</option>';
+    
+    // Add all profiles
+    Object.keys(scanlightState.profiles).forEach(name => {
+        const option = document.createElement('option');
+        option.value = name;
+        option.textContent = name;
+        if (name === scanlightState.currentProfile) {
+            option.selected = true;
+        }
+        select.appendChild(option);
+    });
+}
+
+// Update RGB values from sliders
+async function updateScanlightRGB() {
+    const r = parseInt(document.getElementById('scanlight-r-slider').value);
+    const g = parseInt(document.getElementById('scanlight-g-slider').value);
+    const b = parseInt(document.getElementById('scanlight-b-slider').value);
+    
+    // Update local state and UI immediately for responsiveness
+    scanlightState.rgb = { r, g, b };
+    updateScanlightUI();
+    
+    // Send to backend
+    try {
+        const response = await fetch('/api/scanlight/set_rgb', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ r, g, b })
+        });
+        
+        const data = await response.json();
+        if (data.success) {
+            scanlightState.connected = data.connected;
+            scanlightState.rgb = data.rgb;
+            updateScanlightUI();
+        } else {
+            console.error('ScanLight error:', data.message);
+        }
+    } catch (error) {
+        console.error('Error setting ScanLight RGB:', error);
+    }
+}
+
+// Save current RGB as a profile
+async function saveScanlightProfile() {
+    const nameInput = document.getElementById('scanlight-profile-name');
+    const name = nameInput.value.trim();
+    
+    if (!name) {
+        alert('Please enter a profile name');
+        return;
+    }
+    
+    try {
+        const response = await fetch('/api/scanlight/save_profile', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                name: name,
+                description: `Custom profile: RGB(${scanlightState.rgb.r}, ${scanlightState.rgb.g}, ${scanlightState.rgb.b})`
+            })
+        });
+        
+        const data = await response.json();
+        if (data.success) {
+            scanlightState.profiles = data.profiles;
+            scanlightState.currentProfile = name;
+            updateScanlightProfileList();
+            alert(`Profile "${name}" saved`);
+            nameInput.value = '';
+        } else {
+            alert('Failed to save profile: ' + (data.message || 'Unknown error'));
+        }
+    } catch (error) {
+        console.error('Error saving ScanLight profile:', error);
+        alert('Failed to save profile');
+    }
+}
+
+// Load a saved profile
+async function loadScanlightProfile() {
+    const select = document.getElementById('scanlight-profile-select');
+    const name = select.value;
+    
+    if (!name) {
+        alert('Please select a profile');
+        return;
+    }
+    
+    try {
+        const response = await fetch('/api/scanlight/load_profile', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name })
+        });
+        
+        const data = await response.json();
+        if (data.success) {
+            scanlightState.rgb = data.rgb;
+            scanlightState.currentProfile = data.current_profile;
+            updateScanlightUI();
+        } else {
+            alert('Failed to load profile: ' + (data.message || 'Unknown error'));
+        }
+    } catch (error) {
+        console.error('Error loading ScanLight profile:', error);
+        alert('Failed to load profile');
+    }
+}
+
+// Delete a saved profile
+async function deleteScanlightProfile() {
+    const select = document.getElementById('scanlight-profile-select');
+    const name = select.value;
+    
+    if (!name) {
+        alert('Please select a profile to delete');
+        return;
+    }
+    
+    if (name === 'Color' || name === 'B&W') {
+        alert('Cannot delete default profiles');
+        return;
+    }
+    
+    if (!confirm(`Delete profile "${name}"?`)) {
+        return;
+    }
+    
+    try {
+        const response = await fetch('/api/scanlight/delete_profile', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name })
+        });
+        
+        const data = await response.json();
+        if (data.success) {
+            scanlightState.profiles = data.profiles;
+            updateScanlightProfileList();
+            alert(`Profile "${name}" deleted`);
+        } else {
+            alert('Failed to delete profile: ' + (data.message || 'Unknown error'));
+        }
+    } catch (error) {
+        console.error('Error deleting ScanLight profile:', error);
+        alert('Failed to delete profile');
+    }
+}
+
+// Initialize ScanLight on page load
+window.addEventListener('load', () => {
+    fetchScanlightStatus();
+});

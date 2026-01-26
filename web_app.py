@@ -38,6 +38,7 @@ import glob
 import io
 from pathlib import Path
 from config_manager import ConfigManager
+from scanlight_controller import ScanLight
 from frame_detector import (
     detect_frame_gap,
     detect_bright_region_roi,
@@ -731,6 +732,16 @@ class FilmScanner:
         # Auto-capture mode: continuous scanning with automatic capture after alignment
         self.auto_capture_enabled = False  # Toggle for automatic continuous capture
         self.auto_capture_delay = 3.0  # Delay after capture before advancing (exposure time)
+        
+        # ScanLight RGB backlight control
+        self.scanlight = ScanLight()
+        self.scanlight_connected = False
+        self.scanlight_profiles = {
+            "Color": {"r": 255, "g": 255, "b": 255, "description": "Full spectrum white for color film"},
+            "B&W": {"r": 255, "g": 255, "b": 255, "description": "Balanced white for black & white film"}
+        }
+        self.scanlight_current_profile = "Color"
+        self.scanlight_rgb = {"r": 255, "g": 255, "b": 255}  # Current RGB values
         
         # State persistence
         self.state_file = None
@@ -2531,6 +2542,9 @@ class FilmScanner:
             'auto_alignment_enabled': self.auto_alignment_enabled,
             'auto_capture_enabled': self.auto_capture_enabled,
             'auto_capture_delay': self.auto_capture_delay,
+            'scanlight_profiles': self.scanlight_profiles,
+            'scanlight_current_profile': self.scanlight_current_profile,
+            'scanlight_rgb': self.scanlight_rgb,
             'updated': datetime.now().isoformat()
         }
         
@@ -2558,6 +2572,12 @@ class FilmScanner:
                 self.auto_alignment_enabled = state.get('auto_alignment_enabled', self.auto_alignment_enabled)
                 self.auto_capture_enabled = state.get('auto_capture_enabled', self.auto_capture_enabled)
                 self.auto_capture_delay = state.get('auto_capture_delay', self.auto_capture_delay)
+                
+                # Load ScanLight profiles and settings
+                self.scanlight_profiles = state.get('scanlight_profiles', self.scanlight_profiles)
+                self.scanlight_current_profile = state.get('scanlight_current_profile', self.scanlight_current_profile)
+                self.scanlight_rgb = state.get('scanlight_rgb', self.scanlight_rgb)
+                
                 return True
         return False
     
@@ -2614,6 +2634,103 @@ class FilmScanner:
                 self.status_msg = "❌ Backup failed - Check Arduino"
                 return False
         return False
+    
+    # ========================================================================
+    # ScanLight RGB Backlight Control
+    # ========================================================================
+    
+    def connect_scanlight(self):
+        """Auto-connect to ScanLight if present"""
+        if not self.scanlight_connected:
+            try:
+                # Auto-discover and connect
+                if self.scanlight.connect():
+                    self.scanlight_connected = True
+                    # Set to current RGB values
+                    self.scanlight.set_rgb(
+                        self.scanlight_rgb['r'],
+                        self.scanlight_rgb['g'],
+                        self.scanlight_rgb['b']
+                    )
+                    self.log(f"✓ ScanLight connected on {self.scanlight.port}")
+                    return True
+            except Exception as e:
+                self.log(f"⚠ ScanLight not detected: {e}")
+        return self.scanlight_connected
+    
+    def set_scanlight_rgb(self, r: int, g: int, b: int):
+        """Set ScanLight RGB values"""
+        try:
+            r = max(0, min(255, int(r)))
+            g = max(0, min(255, int(g)))
+            b = max(0, min(255, int(b)))
+            
+            self.scanlight_rgb = {"r": r, "g": g, "b": b}
+            
+            if self.scanlight_connected:
+                self.scanlight.set_rgb(r, g, b)
+                return True
+            else:
+                # Try to connect first
+                if self.connect_scanlight():
+                    self.scanlight.set_rgb(r, g, b)
+                    return True
+            return False
+        except Exception as e:
+            self.log(f"✗ ScanLight RGB error: {e}")
+            return False
+    
+    def save_scanlight_profile(self, name: str, description: str = ""):
+        """Save current RGB values as a named profile"""
+        try:
+            self.scanlight_profiles[name] = {
+                "r": self.scanlight_rgb['r'],
+                "g": self.scanlight_rgb['g'],
+                "b": self.scanlight_rgb['b'],
+                "description": description
+            }
+            # Persist to state file
+            if self.state_file:
+                self.save_state()
+            return True
+        except Exception as e:
+            self.log(f"✗ Failed to save profile: {e}")
+            return False
+    
+    def load_scanlight_profile(self, name: str):
+        """Load a saved RGB profile"""
+        try:
+            if name in self.scanlight_profiles:
+                profile = self.scanlight_profiles[name]
+                self.scanlight_current_profile = name
+                self.set_scanlight_rgb(profile['r'], profile['g'], profile['b'])
+                self.log(f"✓ Loaded profile: {name}")
+                return True
+            else:
+                self.log(f"⚠ Profile not found: {name}")
+                return False
+        except Exception as e:
+            self.log(f"✗ Failed to load profile: {e}")
+            return False
+    
+    def delete_scanlight_profile(self, name: str):
+        """Delete a saved profile"""
+        try:
+            # Prevent deletion of default profiles
+            if name in ["Color", "B&W"]:
+                return False
+            
+            if name in self.scanlight_profiles:
+                del self.scanlight_profiles[name]
+                # Persist to state file
+                if self.state_file:
+                    self.save_state()
+                self.log(f"✓ Deleted profile: {name}")
+                return True
+            return False
+        except Exception as e:
+            self.log(f"✗ Failed to delete profile: {e}")
+            return False
     
     def get_status(self):
         """Get current status as dictionary"""
@@ -3254,6 +3371,142 @@ def set_auto_capture_delay_route():
             'success': False,
             'message': 'Invalid delay value'
         })
+
+
+# ============================================================================
+# ScanLight RGB Backlight Control API
+# ============================================================================
+
+@app.route('/api/scanlight/status')
+def scanlight_status():
+    """Get ScanLight connection status and current RGB values"""
+    try:
+        # Try to connect if not already connected
+        if not scanner.scanlight_connected:
+            scanner.connect_scanlight()
+        
+        status = {
+            'connected': scanner.scanlight_connected,
+            'rgb': scanner.scanlight_rgb,
+            'profiles': scanner.scanlight_profiles,
+            'current_profile': scanner.scanlight_current_profile
+        }
+        
+        if scanner.scanlight_connected:
+            status['port'] = scanner.scanlight.port
+        
+        return jsonify({'success': True, **status})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e), 'connected': False})
+
+
+@app.route('/api/scanlight/set_rgb', methods=['POST'])
+def scanlight_set_rgb():
+    """Set ScanLight RGB values"""
+    try:
+        data = request.get_json()
+        r = int(data.get('r', 255))
+        g = int(data.get('g', 255))
+        b = int(data.get('b', 255))
+        
+        success = scanner.set_scanlight_rgb(r, g, b)
+        
+        # Save to state if state file exists
+        if scanner.state_file:
+            scanner.save_state()
+        
+        return jsonify({
+            'success': success,
+            'rgb': scanner.scanlight_rgb,
+            'connected': scanner.scanlight_connected
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/scanlight/profiles')
+def scanlight_get_profiles():
+    """Get all saved ScanLight profiles"""
+    try:
+        return jsonify({
+            'success': True,
+            'profiles': scanner.scanlight_profiles,
+            'current_profile': scanner.scanlight_current_profile
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/scanlight/save_profile', methods=['POST'])
+def scanlight_save_profile():
+    """Save current RGB values as a named profile"""
+    try:
+        data = request.get_json()
+        name = data.get('name', '').strip()
+        description = data.get('description', '').strip()
+        
+        if not name:
+            return jsonify({'success': False, 'message': 'Profile name required'})
+        
+        # Limit name length
+        if len(name) > 50:
+            return jsonify({'success': False, 'message': 'Profile name too long (max 50 chars)'})
+        
+        success = scanner.save_scanlight_profile(name, description)
+        
+        return jsonify({
+            'success': success,
+            'profiles': scanner.scanlight_profiles
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/scanlight/load_profile', methods=['POST'])
+def scanlight_load_profile():
+    """Load a saved RGB profile"""
+    try:
+        data = request.get_json()
+        name = data.get('name', '').strip()
+        
+        if not name:
+            return jsonify({'success': False, 'message': 'Profile name required'})
+        
+        success = scanner.load_scanlight_profile(name)
+        
+        return jsonify({
+            'success': success,
+            'rgb': scanner.scanlight_rgb,
+            'current_profile': scanner.scanlight_current_profile
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/scanlight/delete_profile', methods=['POST'])
+def scanlight_delete_profile():
+    """Delete a saved profile"""
+    try:
+        data = request.get_json()
+        name = data.get('name', '').strip()
+        
+        if not name:
+            return jsonify({'success': False, 'message': 'Profile name required'})
+        
+        success = scanner.delete_scanlight_profile(name)
+        
+        if not success and name in ["Color", "B&W"]:
+            return jsonify({
+                'success': False,
+                'message': 'Cannot delete default profiles'
+            })
+        
+        return jsonify({
+            'success': success,
+            'profiles': scanner.scanlight_profiles
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
 
 
 @app.route('/api/set_frame_mode', methods=['POST'])
