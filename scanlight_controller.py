@@ -326,10 +326,11 @@ if __name__ == "__main__":
     light.set_rgb(255, 255, 255)
     time.sleep(1)
     
-    print("\nTesting brightness...")
-    for b in [255, 128, 64, 128, 255]:
-        print(f"Brightness: {b}")
-        light.set_brightness(b)
+    print("\nTesting intensity (via RGB scaling)...")
+    for intensity in [1.0, 0.5, 0.25, 0.5, 1.0]:
+        r = int(255 * intensity)
+        print(f"Intensity: {int(intensity*100)}% (RGB: {r},{r},{r})")
+        light.set_rgb(r, r, r)
         time.sleep(0.5)
     
     print("\nTurning off...")
