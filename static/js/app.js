@@ -1083,7 +1083,20 @@ function updateScanlightProfileList() {
     });
 }
 
-// Update RGB values from sliders
+// Debounce helper for performance optimization
+function debounce(func, wait) {
+    let timeout;
+    return function executedFunction(...args) {
+        const later = () => {
+            clearTimeout(timeout);
+            func(...args);
+        };
+        clearTimeout(timeout);
+        timeout = setTimeout(later, wait);
+    };
+}
+
+// Update RGB values from sliders (optimized with debouncing)
 async function updateScanlightRGB() {
     const r = parseInt(document.getElementById('scanlight-r-slider').value);
     const g = parseInt(document.getElementById('scanlight-g-slider').value);
@@ -1093,7 +1106,12 @@ async function updateScanlightRGB() {
     scanlightState.rgb = { r, g, b };
     updateScanlightUI();
     
-    // Send to backend
+    // Debounced backend update (only send after user stops moving slider)
+    debouncedUpdateScanlightBackend(r, g, b);
+}
+
+// Debounced backend update (300ms delay)
+const debouncedUpdateScanlightBackend = debounce(async (r, g, b) => {
     try {
         const response = await fetch('/api/scanlight/set_rgb', {
             method: 'POST',
@@ -1105,14 +1123,13 @@ async function updateScanlightRGB() {
         if (data.success) {
             scanlightState.connected = data.connected;
             scanlightState.rgb = data.rgb;
-            updateScanlightUI();
         } else {
             console.error('ScanLight error:', data.message);
         }
     } catch (error) {
         console.error('Error setting ScanLight RGB:', error);
     }
-}
+}, 300);
 
 // Save current RGB as a profile
 async function saveScanlightProfile() {
@@ -1221,7 +1238,57 @@ async function deleteScanlightProfile() {
     }
 }
 
+// ============================================================================
+// Video Quality Control
+// ============================================================================
+
+async function setVideoQuality() {
+    const select = document.getElementById('video-quality-select');
+    const quality = select.value;
+    
+    try {
+        const response = await fetch('/api/stream/quality', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ quality })
+        });
+        
+        const data = await response.json();
+        if (data.success) {
+            console.log(`Video quality set to: ${quality}`);
+            // Restart video stream if it's active to apply new quality
+            if (previewState.videoActive) {
+                stopVideoStream();
+                setTimeout(() => startVideoStream(), 500);
+            }
+        } else {
+            console.error('Failed to set video quality:', data.message);
+            alert('Failed to set video quality: ' + (data.message || 'Unknown error'));
+        }
+    } catch (error) {
+        console.error('Error setting video quality:', error);
+    }
+}
+
+// Fetch and set initial video quality on load
+async function fetchVideoQuality() {
+    try {
+        const response = await fetch('/api/stream/quality');
+        const data = await response.json();
+        
+        if (data.success && data.current_quality) {
+            const select = document.getElementById('video-quality-select');
+            if (select) {
+                select.value = data.current_quality;
+            }
+        }
+    } catch (error) {
+        console.error('Error fetching video quality:', error);
+    }
+}
+
 // Initialize ScanLight on page load
 window.addEventListener('load', () => {
     fetchScanlightStatus();
+    fetchVideoQuality();
 });

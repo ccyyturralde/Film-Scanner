@@ -761,12 +761,45 @@ class FilmScanner:
         self.capture_card_device = None
 
         # Live preview stream from capture card (continuous latest frame)
-        # Default to 720p for better performance over network
-        # Can be changed via /api/stream/resolution
-        self.preview_stream = CaptureCardStream(self, output_width=1280)
-        self.preview_stream.capture_width = 1280   # Request 720p from capture card
-        self.preview_stream.capture_height = 720
-        self.preview_stream.jpeg_quality = 75      # Good balance of quality/speed
+        # Default to Medium quality for better performance over network
+        # Can be changed via /api/stream/resolution or /api/stream/quality
+        self.preview_stream = CaptureCardStream(self, output_width=960)
+        self.preview_stream.capture_width = 960    # Medium quality (960x540)
+        self.preview_stream.capture_height = 540
+        self.preview_stream.jpeg_quality = 70      # Medium quality for better performance
+        
+        # Video quality presets
+        self.video_quality_presets = {
+            "low": {
+                "output_width": 640,
+                "capture_width": 640,
+                "capture_height": 360,
+                "jpeg_quality": 60,
+                "description": "Low quality - Best for slow networks"
+            },
+            "medium": {
+                "output_width": 960,
+                "capture_width": 960,
+                "capture_height": 540,
+                "jpeg_quality": 70,
+                "description": "Medium quality - Balanced performance"
+            },
+            "high": {
+                "output_width": 1280,
+                "capture_width": 1280,
+                "capture_height": 720,
+                "jpeg_quality": 80,
+                "description": "High quality - Good networks"
+            },
+            "ultra": {
+                "output_width": 1920,
+                "capture_width": 1920,
+                "capture_height": 1080,
+                "jpeg_quality": 85,
+                "description": "Ultra quality - Fast networks only"
+            }
+        }
+        self.current_video_quality = "medium"  # Default to medium
 
         # Load persisted alignment settings (best-effort)
         try:
@@ -2778,9 +2811,29 @@ class FilmScanner:
         
         return status
     
-    def broadcast_status(self):
-        """Broadcast status to all connected clients"""
-        socketio.emit('status_update', self.get_status())
+    def broadcast_status(self, throttle=True):
+        """
+        Broadcast status to all connected clients.
+        
+        Args:
+            throttle: If True, rate-limit broadcasts to reduce network overhead (default: True)
+        """
+        try:
+            # Throttle broadcasts to max 2 per second to reduce network/CPU overhead
+            if throttle:
+                current_time = time.time()
+                if not hasattr(self, '_last_broadcast_time'):
+                    self._last_broadcast_time = 0
+                
+                # Only broadcast if 0.5 seconds have passed since last broadcast
+                if current_time - self._last_broadcast_time < 0.5:
+                    return
+                
+                self._last_broadcast_time = current_time
+            
+            socketio.emit('status_update', self.get_status())
+        except Exception:
+            pass
 # Global scanner instance
 scanner = FilmScanner()
 # Routes
@@ -3989,8 +4042,68 @@ def update_step_sizes():
 
 
 # ============================================================================
-# STREAM RESOLUTION AND WHITE BALANCE CONTROL
+# STREAM QUALITY AND RESOLUTION CONTROL
 # ============================================================================
+
+@app.route('/api/stream/quality', methods=['GET', 'POST'])
+def stream_quality():
+    """
+    Get or set video stream quality preset for optimal performance.
+    
+    GET: Returns available presets and current quality
+    
+    POST: Set quality preset
+        {
+            "quality": "low" | "medium" | "high" | "ultra"
+        }
+        
+    Quality Presets:
+    - low: 640x360, 60% quality - Best for slow/laggy networks
+    - medium: 960x540, 70% quality - Balanced (default)
+    - high: 1280x720, 80% quality - Good for fast networks
+    - ultra: 1920x1080, 85% quality - Fast networks only
+    """
+    if request.method == 'GET':
+        return jsonify({
+            'success': True,
+            'current_quality': scanner.current_video_quality,
+            'presets': scanner.video_quality_presets,
+            'current_settings': scanner.preview_stream.get_resolution_info()
+        })
+    
+    data = request.json or {}
+    quality = data.get('quality', '').lower()
+    
+    if quality not in scanner.video_quality_presets:
+        return jsonify({
+            'success': False,
+            'message': f'Invalid quality preset. Must be one of: {", ".join(scanner.video_quality_presets.keys())}'
+        })
+    
+    try:
+        preset = scanner.video_quality_presets[quality]
+        
+        # Apply preset to stream
+        scanner.preview_stream.set_resolution(
+            capture_width=preset['capture_width'],
+            capture_height=preset['capture_height'],
+            output_width=preset['output_width'],
+        )
+        scanner.preview_stream.set_jpeg_quality(preset['jpeg_quality'])
+        
+        scanner.current_video_quality = quality
+        scanner.log(f"📺 Video quality: {quality.upper()} ({preset['description']})")
+        
+        return jsonify({
+            'success': True,
+            'quality': quality,
+            'preset': preset,
+            'current_settings': scanner.preview_stream.get_resolution_info()
+        })
+        
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
 
 @app.route('/api/stream/resolution', methods=['GET', 'POST'])
 def stream_resolution():
