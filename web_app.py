@@ -383,7 +383,28 @@ class CaptureCardStream:
                 return frame
             time.sleep(0.05)
         return None
-    
+
+    def restart_if_stale(self, max_age_sec: float = 2.5) -> bool:
+        """
+        If the stream is running but no new frame for max_age_sec, stop and restart it.
+        Returns True if a restart was performed. Call from MJPEG generator when frames stop.
+        """
+        if not self.is_running():
+            return False
+        with self.lock:
+            ts = self.last_frame_ts
+        if time.time() - ts <= max_age_sec:
+            return False
+        try:
+            self.scanner.log("⚠ Video stream stuck (no new frame), restarting...")
+            self.stop()
+            time.sleep(0.3)
+            self.start()
+            return True
+        except Exception as e:
+            self.scanner.log(f"✗ Stream restart failed: {e}")
+            return False
+
     def get_raw_frame(self) -> Optional[np.ndarray]:
         """Return latest raw frame (numpy array) for processing."""
         with self.lock:
@@ -612,16 +633,34 @@ class CaptureCardStream:
             self.actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             self.actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             self.scanner.log(f"   Actual resolution: {self.actual_width}x{self.actual_height}")
-            
+
+            # Flush stale V4L2 buffers so first frames are fresh
+            for _ in range(5):
+                cap.grab()
             with self.lock:
                 self.cap = cap
+
+            consecutive_failures = 0
+            max_failures_before_exit = 200  # ~2s at 0.01 sleep
 
             while not self.stop_event.is_set():
                 ret, frame = cap.read()
                 if not ret or frame is None:
+                    consecutive_failures += 1
+                    if consecutive_failures >= max_failures_before_exit:
+                        self.last_error = "Capture card stopped returning frames"
+                        self.scanner.log("✗ Video stream stuck (no frames), thread exiting for restart")
+                        break
+                    # Flush buffer in case device is lagged
+                    if consecutive_failures % 30 == 1:
+                        try:
+                            cap.grab()
+                        except Exception:
+                            pass
                     time.sleep(0.01)
                     continue
-                
+                consecutive_failures = 0
+
                 # Store raw frame for white balance sampling
                 with self.lock:
                     self.latest_frame_raw = frame.copy()
@@ -1610,7 +1649,7 @@ class FilmScanner:
                         steps = 150  # Far from left - big push
                     
                     self.log(f"   Gap at {gap_fraction:.0%} -> FORWARD {steps}")
-                    moved = self.send(f"H{steps}", update_position=False)
+                    moved = self.send(f"h{steps}", update_position=False)
                     if not moved:
                         return False, "Motor failed", {"mode": "error", "total_steps": total_steps, "confidence": 0}
                     total_steps += steps
@@ -1793,7 +1832,7 @@ class FilmScanner:
                             
                             self.log(f"   Left edge gap (rightmost: {rightmost_gap}px) -> BACKWARD {fine_steps}")
                             
-                            self.send(f"h{fine_steps}", update_position=False)
+                            self.send(f"H{fine_steps}", update_position=False)
                             total_steps -= fine_steps
                             time.sleep(0.15 + fine_steps * 0.002)
                             continue
@@ -1818,7 +1857,7 @@ class FilmScanner:
                             
                             self.log(f"   Right edge gap (leftmost: {leftmost_gap}px, extent: {gap_extent}px) -> FORWARD {fine_steps}")
                             
-                            self.send(f"H{fine_steps}", update_position=False)
+                            self.send(f"h{fine_steps}", update_position=False)
                             total_steps += fine_steps
                             time.sleep(0.15 + fine_steps * 0.002)
                             continue
@@ -1946,7 +1985,7 @@ class FilmScanner:
                     # No gap found - search forward
                     if not gap_regions:
                         self.log(f"   No gap detected, searching forward...")
-                        self.send("H100", update_position=False)
+                        self.send("h100", update_position=False)
                         total_steps += 100
                         time.sleep(0.4)
                         continue
@@ -1983,16 +2022,16 @@ class FilmScanner:
                     offset_px = gap_center - frame_center  # Positive = gap is right of center
                     
                     if offset_px > 0:
-                        # Gap is RIGHT of center - move BACKWARD to shift gap left
+                        # Gap is RIGHT of center - move BACKWARD to shift gap left (H = back)
                         steps = max(20, min(150, int(abs(offset_px) / 2)))
                         direction = "BACKWARD"
-                        cmd = f"h{steps}"
+                        cmd = f"H{steps}"
                         self.log(f"   Gap right of center -> moving BACKWARD {steps} steps")
                     else:
-                        # Gap is LEFT of center - move FORWARD to shift gap right
+                        # Gap is LEFT of center - move FORWARD to shift gap right (h = forward)
                         steps = max(20, min(150, int(abs(offset_px) / 2)))
                         direction = "FORWARD"
-                        cmd = f"H{steps}"
+                        cmd = f"h{steps}"
                         self.log(f"   Gap left of center -> moving FORWARD {steps} steps")
                     
                     # Execute move
@@ -2133,7 +2172,7 @@ class FilmScanner:
                         else:
                             steps = 120  # Far from left
                         self.log(f"   Moving FORWARD {steps} steps")
-                        self.send(f"H{steps}", update_position=False)
+                        self.send(f"h{steps}", update_position=False)
                         total_steps_moved += steps
                     else:
                         # HALF FRAME: center the gap in the middle
@@ -2157,20 +2196,20 @@ class FilmScanner:
                                     "iterations": iteration + 1,
                                 }
                         
-                        # Move to center gap
+                        # Move to center gap (h = forward, H = backward; matches manual arrows)
                         # offset > 0 means gap is RIGHT of center (needs more forward)
                         # offset < 0 means gap is LEFT of center (we overshot)
                         if offset > 0:
                             # Gap RIGHT of center - move FORWARD to bring it to center
                             steps = max(10, min(40, int(abs(offset) / 4)))
                             self.log(f"   Gap right of center -> FORWARD {steps}")
-                            self.send(f"H{steps}", update_position=False)
+                            self.send(f"h{steps}", update_position=False)
                             total_steps_moved += steps
                         else:
                             # Gap LEFT of center - we overshot, small backward correction
                             steps = max(8, min(25, int(abs(offset) / 4)))
                             self.log(f"   Gap left of center (overshot) -> BACKWARD {steps}")
-                            self.send(f"h{steps}", update_position=False)
+                            self.send(f"H{steps}", update_position=False)
                             total_steps_moved -= steps
                 
                 elif saw_gap and not has_gap:
@@ -2186,12 +2225,12 @@ class FilmScanner:
                     else:
                         # HALF FRAME: gap disappeared but we need it centered - keep searching
                         self.log(f"   [{iteration+1}] Gap lost, searching forward...")
-                        self.send("H80", update_position=False)
+                        self.send("h80", update_position=False)
                         total_steps_moved += 80
                 else:
                     # No gap yet - keep moving forward
                     self.log(f"   [{iteration+1}] No gap yet, advancing...")
-                    self.send("H100", update_position=False)
+                    self.send("h100", update_position=False)
                     total_steps_moved += 100
                     
             except Exception as e:
@@ -2293,8 +2332,8 @@ class FilmScanner:
                 # Check if we need sprockets to align
                 if sprocket_count < 2:
                     self.log(f"   ⚠ Not enough sprocket holes detected ({sprocket_count})")
-                    # Move a bit to find sprockets
-                    self.send("H50", update_position=False)
+                    # Move a bit to find sprockets (h = forward, same as manual)
+                    self.send("h50", update_position=False)
                     total_steps += 50
                     continue
                 
@@ -2326,14 +2365,14 @@ class FilmScanner:
                 steps_needed = int(abs(offset) / px_per_step)
                 steps_needed = max(8, min(steps_needed, 200))  # Clamp between 8-200
                 
-                # Determine direction
+                # Determine direction (h = forward, H = back; matches manual arrows)
                 # Positive offset means move right (forward) to bring film left
                 if offset > 0:
                     direction = "FORWARD"
-                    cmd = f"H{steps_needed}"
+                    cmd = f"h{steps_needed}"
                 else:
                     direction = "BACK"
-                    cmd = f"h{steps_needed}"
+                    cmd = f"H{steps_needed}"
                 
                 self.log(f"   → Moving {direction} {steps_needed} steps (offset={offset}px)")
                 self.send(cmd, update_position=False)
@@ -2393,8 +2432,8 @@ class FilmScanner:
             
             self.log(f"   Frame pitch: {frame_pitch_px:.1f}px, Steps: {steps_per_frame}")
             
-            # Move forward one frame
-            self.send(f"H{steps_per_frame}", update_position=False)
+            # Move forward one frame (h = same direction as manual "forward")
+            self.send(f"h{steps_per_frame}", update_position=False)
             time.sleep(0.3 + steps_per_frame * 0.002)
             
             # Fine-tune alignment
@@ -2654,7 +2693,8 @@ class FilmScanner:
             mode_label = "full-frame"
         
         if advance:
-            success = self.send(f'H{advance}')
+            # Use 'h' for advance (same direction as manual "forward" / pancake motor)
+            success = self.send(f'h{advance}')
             if success:
                 self.status_msg = f"Advanced {advance} steps ({mode_label})"
                 return True
@@ -2677,8 +2717,8 @@ class FilmScanner:
             mode_label = "full-frame"
         
         if advance:
-            # Use 'h' command for backward movement (lowercase = reverse direction)
-            success = self.send(f'h{advance}')
+            # Use 'H' for backup (opposite of advance / manual "forward")
+            success = self.send(f'H{advance}')
             if success:
                 self.status_msg = f"Backed up {advance} steps ({mode_label})"
                 return True
@@ -3120,7 +3160,7 @@ def capture():
                 scanner.log(f"Advance error: {e}")
                 scanner.status_msg = f"✓ Frame {scanner.frame_count} (advance failed)"
         elif scanner.mode == 'calibrated' and scanner.auto_advance:
-            # CALIBRATION MODE: Use fixed frame_advance distance
+            # CALIBRATION MODE: Use fixed frame_advance distance (same direction as manual "forward")
             if scanner.frame_mode == "half":
                 advance = scanner.half_frame_advance or scanner.frame_advance
             else:
@@ -3128,7 +3168,7 @@ def capture():
             
             if advance:
                 time.sleep(0.3)
-                if scanner.send(f'H{advance}'):
+                if scanner.send(f'h{advance}'):
                     scanner.status_msg = f"✓ Frame {scanner.frame_count} → Ready for next"
                 else:
                     scanner.status_msg = f"✓ Frame {scanner.frame_count} (advance failed)"
@@ -3952,12 +3992,22 @@ def preview_video_stream():
     invert = request.args.get('invert', '0') in ('1', 'true', 'True', 'yes')
 
     def generate():
+        last_frame_time = time.time()
+        none_count = 0
         while True:
             try:
                 frame = scanner.preview_stream.get_frame(timeout=0.5)
                 if frame is None:
+                    none_count += 1
+                    # If no frame for ~2s, try restarting the capture stream
+                    if time.time() - last_frame_time > 2.0 and none_count > 10:
+                        if scanner.preview_stream.restart_if_stale(max_age_sec=2.0):
+                            last_frame_time = time.time()
+                            none_count = 0
                     time.sleep(0.05)
                     continue
+                none_count = 0
+                last_frame_time = time.time()
 
                 out = frame
                 if invert:
