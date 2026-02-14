@@ -109,6 +109,12 @@ function updateUI(status) {
     if (autoCaptureSettingsToggle) {
         autoCaptureSettingsToggle.checked = scannerState.autoCaptureEnabled;
     }
+
+    // Update motor direction (reverse auto-advance) toggle
+    const motorDirectionCheckbox = document.getElementById('motor-direction-reversed');
+    if (motorDirectionCheckbox && status.motor_advance_reversed !== undefined) {
+        motorDirectionCheckbox.checked = status.motor_advance_reversed;
+    }
     
     // Update auto-capture delay display and input
     const autoCaptureDelayDisplay = document.getElementById('auto-capture-delay-value');
@@ -676,6 +682,18 @@ async function toggleAutoAlignment() {
     } else {
         scannerState.autoAlignmentEnabled = result.auto_alignment_enabled;
         // Request full status update to refresh UI
+        socket.emit('request_status');
+    }
+}
+
+async function setMotorDirectionReversed() {
+    const checkbox = document.getElementById('motor-direction-reversed');
+    const reversed = checkbox ? checkbox.checked : false;
+    const result = await apiCall('motor_direction', { reversed });
+    if (!result.success) {
+        alert('Failed to set motor direction: ' + (result.message || 'Unknown error'));
+        if (checkbox) checkbox.checked = !reversed;
+    } else {
         socket.emit('request_status');
     }
 }

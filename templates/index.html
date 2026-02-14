@@ -115,6 +115,10 @@
                             <input type="checkbox" id="auto-align-before-capture">
                             Fine-tune before capture
                         </label>
+                        <label id="motor-direction-toggle-wrapper" style="display:flex;align-items:center;gap:8px;" title="If auto-advance after capture goes the wrong way, check this. Saved permanently.">
+                            <input type="checkbox" id="motor-direction-reversed" onchange="setMotorDirectionReversed()">
+                            Reverse motor (auto-advance direction)
+                        </label>
                     </div>
                     <div class="control-options arduino-only" style="margin-top:8px;">
                         <label style="display:flex;align-items:center;gap:8px;margin-right:16px;">
