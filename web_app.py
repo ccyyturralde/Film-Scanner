@@ -4138,6 +4138,18 @@ if __name__ == '__main__':
         print("   python3 web_app.py --reset")
         print("="*60 + "\n")
         
+        # Safety check: if another instance is already on this port (e.g. spawned
+        # by the touchscreen service), exit cleanly so systemd won't restart-loop.
+        import socket as _sock
+        _probe = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
+        try:
+            _probe.bind((host, port))
+            _probe.close()
+        except OSError:
+            print(f"\n⚠ Port {port} is already in use (another web_app.py instance may be running via touchscreen service).")
+            print("Exiting cleanly to avoid conflict.")
+            sys.exit(0)  # clean exit → Restart=on-failure won't restart
+        
         socketio.run(app, host=host, port=port, debug=False, allow_unsafe_werkzeug=True)
     except SystemExit:
         raise

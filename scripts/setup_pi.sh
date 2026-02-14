@@ -534,6 +534,7 @@ echo "  1) Yes - Set up TFT touchscreen (GPIO/SPI connected)"
 echo "  2) No  - Skip touchscreen setup (web interface only)"
 echo ""
 read -p "Enter choice [1/2]: " tft_choice
+TOUCHSCREEN_ENABLED=false
 
 if [[ "$tft_choice" == "1" ]]; then
     print_step "Setting up TFT touchscreen..."
@@ -597,14 +598,24 @@ EOF
     echo "Enable touchscreen UI to start on boot?"
     read -p "[y/N]: " enable_touch
     if [[ "$enable_touch" == "y" ]] || [[ "$enable_touch" == "Y" ]]; then
+        TOUCHSCREEN_ENABLED=true
         systemctl enable $SERVICE_TOUCH
-        print_step "Touchscreen UI will start on boot"
+        # The touchscreen UI manages web_app.py internally (start/stop/restart),
+        # so the standalone web service must be disabled to avoid port conflicts.
+        systemctl disable $SERVICE_WEB 2>/dev/null || true
+        print_step "Touchscreen UI will start on boot (manages web app internally)"
     fi
 fi
 
-print_header "Enabling Web App Service"
-systemctl enable $SERVICE_WEB
-systemctl start $SERVICE_WEB || true
+if [[ "$TOUCHSCREEN_ENABLED" == "true" ]]; then
+    print_header "Web App Service (managed by touchscreen)"
+    echo "  The touchscreen UI controls the web app lifecycle."
+    echo "  $SERVICE_WEB is disabled to avoid port 5000 conflicts."
+else
+    print_header "Enabling Web App Service"
+    systemctl enable $SERVICE_WEB
+    systemctl start $SERVICE_WEB || true
+fi
 
 print_header "Installation Complete!"
 echo ""

@@ -255,12 +255,28 @@ The web interface is accessible from any device on your network:
 ## Update to Latest Version
 
 ```bash
-cd ~/Film-Scanner  # or /opt/film-scanner if installed as service
+# /opt/film-scanner is a COPY (no .git). Use a clone in your home directory:
+cd ~/Film-Scanner   # or clone first: git clone https://github.com/ccyyturralde/Film-Scanner.git ~/Film-Scanner
 git pull
-sudo bash scripts/setup_pi.sh  # Re-run setup to update services
+sudo bash scripts/update_pi.sh   # syncs to /opt and restarts service
 ```
 
 ---
+
+### Updating the app on the Pi
+
+**Important:** `/opt/film-scanner` is an install copy (no git). Don't run `git pull` there.
+
+- **If you already have a clone** (e.g. `~/Film-Scanner`):
+  ```bash
+  cd ~/Film-Scanner && git pull && sudo bash scripts/update_pi.sh
+  ```
+- **If you don't have a clone yet:**
+  ```bash
+  cd ~ && git clone https://github.com/ccyyturralde/Film-Scanner.git
+  cd Film-Scanner && sudo bash scripts/setup_pi.sh
+  ```
+  For later updates, use the first set of commands from your home-directory clone.
 
 ### Web app won't load after reboot
 
