@@ -29,6 +29,7 @@ from typing import Optional, Tuple, Union
 from collections import deque
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 import base64
 import tempfile
 import shutil
@@ -642,16 +643,38 @@ class CaptureCardStream:
 
             consecutive_failures = 0
             max_failures_before_exit = 200  # ~2s at 0.01 sleep
+            read_timeout_sec = 2.5  # cap.read() can block on USB stall; timeout and restart
+            stream_start_time = time.time()
+            stream_refresh_interval = 90.0  # Voluntary restart every 90s to clear latent stalls
+            read_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cap_read")
 
             while not self.stop_event.is_set():
-                ret, frame = cap.read()
+                # Voluntary refresh: exit periodically so stream restarts clean
+                if time.time() - stream_start_time >= stream_refresh_interval:
+                    self.scanner.log("↻ Periodic video stream refresh")
+                    break
+                try:
+                    future = read_executor.submit(cap.read)
+                    ret, frame = future.result(timeout=read_timeout_sec)
+                except FuturesTimeoutError:
+                    self.last_error = "Capture card read timed out (USB stall?)"
+                    self.scanner.log("✗ Video stream read timeout, thread exiting for restart")
+                    break
+                except Exception as e:
+                    consecutive_failures += 1
+                    if consecutive_failures >= max_failures_before_exit:
+                        self.last_error = str(e)
+                        self.scanner.log(f"✗ Video stream error, thread exiting: {e}")
+                        break
+                    time.sleep(0.01)
+                    continue
+
                 if not ret or frame is None:
                     consecutive_failures += 1
                     if consecutive_failures >= max_failures_before_exit:
                         self.last_error = "Capture card stopped returning frames"
                         self.scanner.log("✗ Video stream stuck (no frames), thread exiting for restart")
                         break
-                    # Flush buffer in case device is lagged
                     if consecutive_failures % 30 == 1:
                         try:
                             cap.grab()
@@ -699,6 +722,10 @@ class CaptureCardStream:
             except Exception:
                 pass
         finally:
+            try:
+                read_executor.shutdown(wait=False)
+            except NameError:
+                pass
             with self.lock:
                 cap = self.cap
                 self.cap = None
@@ -2365,19 +2392,19 @@ class FilmScanner:
                 steps_needed = int(abs(offset) / px_per_step)
                 steps_needed = max(8, min(steps_needed, 200))  # Clamp between 8-200
                 
-                # Determine direction (h = forward, H = back; matches manual arrows)
-                # Positive offset means move right (forward) to bring film left
+                # Determine direction: detector says positive = move film right.
+                # Sprocket alignment uses opposite motor sense (swap h/H) so nudge goes correct way.
                 if offset > 0:
-                    direction = "FORWARD"
-                    cmd = f"h{steps_needed}"
-                else:
-                    direction = "BACK"
+                    direction = "RIGHT"
                     cmd = f"H{steps_needed}"
+                else:
+                    direction = "LEFT"
+                    cmd = f"h{steps_needed}"
                 
                 self.log(f"   → Moving {direction} {steps_needed} steps (offset={offset}px)")
                 self.send(cmd, update_position=False)
                 
-                if direction == "FORWARD":
+                if direction == "RIGHT":
                     total_steps += steps_needed
                 else:
                     total_steps -= steps_needed
@@ -3999,9 +4026,9 @@ def preview_video_stream():
                 frame = scanner.preview_stream.get_frame(timeout=0.5)
                 if frame is None:
                     none_count += 1
-                    # If no frame for ~2s, try restarting the capture stream
-                    if time.time() - last_frame_time > 2.0 and none_count > 10:
-                        if scanner.preview_stream.restart_if_stale(max_age_sec=2.0):
+                    # If no frame for ~1.5s, try restarting the capture stream
+                    if time.time() - last_frame_time > 1.5 and none_count > 8:
+                        if scanner.preview_stream.restart_if_stale(max_age_sec=1.5):
                             last_frame_time = time.time()
                             none_count = 0
                     time.sleep(0.05)
