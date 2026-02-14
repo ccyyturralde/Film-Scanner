@@ -61,15 +61,6 @@
                         <input type="checkbox" id="preview-invert-toggle" onchange="togglePreviewInvert()">
                         Invert (view only)
                     </label>
-                    <div style="display:flex;align-items:center;gap:8px;">
-                        <label for="video-quality-select" style="font-size:0.9em;color:#9ca3af;">Quality:</label>
-                        <select id="video-quality-select" onchange="setVideoQuality()" style="padding:4px 8px;background:#374151;color:#f9fafb;border:1px solid #4b5563;border-radius:4px;font-size:0.9em;">
-                            <option value="low">Low (Fast)</option>
-                            <option value="medium" selected>Medium</option>
-                            <option value="high">High</option>
-                            <option value="ultra">Ultra (Slow)</option>
-                        </select>
-                    </div>
                 </div>
                 <div class="preview-buttons">
                     <button class="btn btn-primary btn-large" id="preview-btn" onclick="capturePreview()">

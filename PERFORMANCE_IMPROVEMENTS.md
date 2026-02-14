@@ -5,21 +5,8 @@ This document outlines performance optimizations implemented to reduce lag and i
 
 ## Changes Made
 
-### 1. Video Quality Presets
-Added four quality presets for optimal performance based on network speed:
-
-| Quality | Resolution | JPEG Quality | Best For |
-|---------|-----------|--------------|----------|
-| **Low** | 640x360 | 60% | Slow/laggy networks, mobile |
-| **Medium** | 960x540 | 70% | Balanced (default) |
-| **High** | 1280x720 | 80% | Fast networks |
-| **Ultra** | 1920x1080 | 85% | Local/gigabit networks only |
-
-**Default changed from 1280x720 (High) to 960x540 (Medium)** for better out-of-box performance.
-
-#### Usage:
-- **Web UI:** Quality dropdown in Live Preview section
-- **API:** `POST /api/stream/quality` with `{"quality": "low|medium|high|ultra"}`
+### 1. Video Stream (1080p)
+The preview stream is fixed at 1080p (1920x1080) with 80% JPEG quality. No quality or resolution settings—always full 1080p.
 
 ### 2. ScanLight RGB Slider Optimization
 **Problem:** Each slider movement sent immediate network request, causing lag when adjusting colors.
