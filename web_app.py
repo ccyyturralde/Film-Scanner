@@ -278,10 +278,13 @@ class CaptureCardStream:
     CAPTURE_WIDTH = 1920
     CAPTURE_HEIGHT = 1080
 
+    # Preview stream is downscaled for performance; full 1080p used for captures only.
+    STREAM_OUTPUT_WIDTH = 960
+
     def __init__(self, scanner, device: Optional[Union[str, int]] = None, max_age: float = 2.0):
         self.scanner = scanner
         self.device = device if device is not None else find_capture_card_device()
-        self.output_width = self.CAPTURE_WIDTH
+        self.output_width = self.STREAM_OUTPUT_WIDTH
         self.capture_width = self.CAPTURE_WIDTH
         self.capture_height = self.CAPTURE_HEIGHT
         self.jpeg_quality = 80
@@ -950,6 +953,61 @@ class FilmScanner:
             self.broadcast_status()
             return False
     
+    def send_and_wait(self, cmd, timeout: float = 10.0) -> bool:
+        """
+        Send a motor command and block until the Arduino confirms completion.
+        
+        The Arduino sends 'POS:<number>' after every move_steps() call.
+        Waiting for this prevents command stacking: if we send the next move
+        before the first finishes, commands pile up in the serial buffer and
+        the motor runs much longer than intended.
+        
+        Returns True if the command completed, False on error/timeout.
+        """
+        if not self.arduino:
+            return False
+        
+        try:
+            # Drain any stale data so we only see the response to THIS command
+            self.arduino.reset_input_buffer()
+            self.arduino.write(f"{cmd}\n".encode())
+            
+            # Wait for POS: response (motor move complete) or timeout
+            deadline = time.time() + timeout
+            buf = ""
+            while time.time() < deadline:
+                if self.arduino.in_waiting:
+                    chunk = self.arduino.read(self.arduino.in_waiting).decode('ascii', errors='ignore')
+                    buf += chunk
+                    # Check for POS: line which signals move is done
+                    for line in buf.split('\n'):
+                        line = line.strip()
+                        if line.startswith('POS:'):
+                            try:
+                                self.position = int(line.split(':')[1].strip())
+                            except (ValueError, IndexError):
+                                pass
+                            return True
+                        elif line == 'LOCKED':
+                            self.log("⚠ Motor is locked")
+                            return False
+                else:
+                    time.sleep(0.01)
+            
+            # Timeout - motor may still be moving
+            self.log(f"⚠ Timed out waiting for motor completion ({cmd})")
+            return False
+            
+        except (serial.SerialException, OSError) as e:
+            print(f"✗ Serial error in send_and_wait '{cmd}': {e}")
+            try:
+                if self.arduino:
+                    self.arduino.close()
+            except Exception:
+                pass
+            self.arduino = None
+            return False
+
     def check_camera(self, retry_with_usb_clear=True, max_retries=3, force=False):
         """Check if camera is connected with detailed logging
 
@@ -1436,11 +1494,11 @@ class FilmScanner:
                         steps = 150  # Far from left - big push
                     
                     self.log(f"   Gap at {gap_fraction:.0%} -> FORWARD {steps}")
-                    moved = self.send(self.cmd_advance(steps), update_position=False)
+                    moved = self.send_and_wait(self.cmd_advance(steps))
                     if not moved:
                         return False, "Motor failed", {"mode": "error", "total_steps": total_steps, "confidence": 0}
                     total_steps += steps
-                    time.sleep(0.08 + steps * 0.002)  # Faster timing
+                    time.sleep(0.1)  # Brief settle after motor confirmed done
                     
                 except Exception as e:
                     self.log(f"   Error: {e}")
@@ -1456,7 +1514,7 @@ class FilmScanner:
             
             # Use multi-pass approach with progressively stricter detection
             for fine_attempt in range(8):  # Increased attempts for better coverage
-                time.sleep(0.25)
+                time.sleep(0.15)  # Brief settle (send_and_wait confirmed motor done)
                 fine_frame, _ = self.get_alignment_frame(timeout=0.8)
                 if not fine_frame:
                     continue
@@ -1619,9 +1677,9 @@ class FilmScanner:
                             
                             self.log(f"   Left edge gap (rightmost: {rightmost_gap}px) -> BACKWARD {fine_steps}")
                             
-                            self.send(self.cmd_backup(fine_steps), update_position=False)
+                            self.send_and_wait(self.cmd_backup(fine_steps))
                             total_steps -= fine_steps
-                            time.sleep(0.15 + fine_steps * 0.002)
+                            time.sleep(0.1)
                             continue
                     
                     elif right_gap_width > clear_threshold:
@@ -1644,9 +1702,9 @@ class FilmScanner:
                             
                             self.log(f"   Right edge gap (leftmost: {leftmost_gap}px, extent: {gap_extent}px) -> FORWARD {fine_steps}")
                             
-                            self.send(self.cmd_advance(fine_steps), update_position=False)
+                            self.send_and_wait(self.cmd_advance(fine_steps))
                             total_steps += fine_steps
-                            time.sleep(0.15 + fine_steps * 0.002)
+                            time.sleep(0.1)
                             continue
                         
                 except Exception as e:
@@ -1693,9 +1751,9 @@ class FilmScanner:
             max_attempts = 5
             
             for attempt in range(max_attempts):
-                # Get fresh frame
+                # Get fresh frame (send_and_wait confirmed motor done, brief settle only)
                 if attempt > 0:
-                    time.sleep(0.3)
+                    time.sleep(0.15)
                     frame_bytes, _ = self.get_alignment_frame(timeout=0.8)
                     if not frame_bytes:
                         continue
@@ -1772,9 +1830,9 @@ class FilmScanner:
                     # No gap found - search forward
                     if not gap_regions:
                         self.log(f"   No gap detected, searching forward...")
-                        self.send(self.cmd_advance(100), update_position=False)
+                        self.send_and_wait(self.cmd_advance(100))
                         total_steps += 100
-                        time.sleep(0.4)
+                        time.sleep(0.15)
                         continue
                     
                     # Pick the best gap
@@ -1821,13 +1879,13 @@ class FilmScanner:
                         cmd = self.cmd_advance(steps)
                         self.log(f"   Gap left of center -> moving FORWARD {steps} steps")
                     
-                    # Execute move
-                    moved = self.send(cmd, update_position=False)
+                    # Execute move — wait for completion
+                    moved = self.send_and_wait(cmd)
                     if not moved:
                         return False, "Motor failed", {"mode": "error", "total_steps": total_steps, "confidence": 0}
                     
                     total_steps += steps if direction == "FORWARD" else -steps
-                    time.sleep(0.3 + steps * 0.003)
+                    time.sleep(0.15)
                     
                 except Exception as e:
                     self.log(f"   Error: {e}")
@@ -1870,7 +1928,7 @@ class FilmScanner:
         
         for iteration in range(max_iters):
             if iteration > 0:
-                time.sleep(0.25)
+                time.sleep(0.15)  # Brief settle after motor (send_and_wait confirmed completion)
             
             frame_bytes, _ = self.get_alignment_frame(timeout=0.8)
             if not frame_bytes:
@@ -1959,7 +2017,7 @@ class FilmScanner:
                         else:
                             steps = 120  # Far from left
                         self.log(f"   Moving FORWARD {steps} steps")
-                        self.send(self.cmd_advance(steps), update_position=False)
+                        self.send_and_wait(self.cmd_advance(steps))
                         total_steps_moved += steps
                     else:
                         # HALF FRAME: center the gap in the middle
@@ -1983,16 +2041,16 @@ class FilmScanner:
                                     "iterations": iteration + 1,
                                 }
                         
-                        # Move to center gap: h = forward, H = backward (this hardware)
+                        # Move to center gap
                         if offset > 0:
                             steps = max(10, min(40, int(abs(offset) / 4)))
                             self.log(f"   Gap right of center -> FORWARD {steps}")
-                            self.send(self.cmd_advance(steps), update_position=False)
+                            self.send_and_wait(self.cmd_advance(steps))
                             total_steps_moved += steps
                         else:
                             steps = max(8, min(25, int(abs(offset) / 4)))
                             self.log(f"   Gap left of center (overshot) -> BACKWARD {steps}")
-                            self.send(self.cmd_backup(steps), update_position=False)
+                            self.send_and_wait(self.cmd_backup(steps))
                             total_steps_moved -= steps
                 
                 elif saw_gap and not has_gap:
@@ -2008,12 +2066,12 @@ class FilmScanner:
                     else:
                         # HALF FRAME: gap disappeared but we need it centered - keep searching
                         self.log(f"   [{iteration+1}] Gap lost, searching forward...")
-                        self.send(self.cmd_advance(80), update_position=False)
+                        self.send_and_wait(self.cmd_advance(80))
                         total_steps_moved += 80
                 else:
                     # No gap yet - keep moving forward
                     self.log(f"   [{iteration+1}] No gap yet, advancing...")
-                    self.send(self.cmd_advance(100), update_position=False)
+                    self.send_and_wait(self.cmd_advance(100))
                     total_steps_moved += 100
                     
             except Exception as e:
@@ -2083,7 +2141,9 @@ class FilmScanner:
         
         for iteration in range(max_iterations):
             if iteration > 0:
-                time.sleep(0.25)
+                # Brief settle after previous move completed (send_and_wait already
+                # confirmed the motor stopped, this is just for physical vibration)
+                time.sleep(0.15)
             
             # Get frame and detect sprockets
             frame_bytes, _ = self.get_alignment_frame(timeout=0.8)
@@ -2119,8 +2179,8 @@ class FilmScanner:
                 # Check if we need sprockets to align
                 if sprocket_count < 2:
                     self.log(f"   ⚠ Not enough sprocket holes detected ({sprocket_count})")
-                    # Move a bit to find sprockets
-                    self.send(self.cmd_advance(50), update_position=False)
+                    # Move a bit to find sprockets — wait for completion
+                    self.send_and_wait(self.cmd_advance(50))
                     total_steps += 50
                     continue
                 
@@ -2161,7 +2221,7 @@ class FilmScanner:
                     cmd = self.cmd_advance(steps_needed)
                 
                 self.log(f"   → Moving {direction} {steps_needed} steps (offset={offset}px)")
-                self.send(cmd, update_position=False)
+                self.send_and_wait(cmd)
                 
                 if direction == "RIGHT":
                     total_steps += steps_needed
@@ -2227,10 +2287,11 @@ class FilmScanner:
             
             self.log(f"   Frame pitch: {frame_pitch_px:.1f}px (smoothed), Steps: {steps_per_frame}")
             
-            # Move forward one frame
-            self.send(self.cmd_advance(steps_per_frame), update_position=False)
-            # Settle time so film/motor stop before we grab next frame for alignment (helps on Pi)
-            time.sleep(0.5 + steps_per_frame * 0.002)
+            # Move forward one frame — wait for Arduino to confirm completion
+            # so we don't stack another command while the motor is still running.
+            self.send_and_wait(self.cmd_advance(steps_per_frame), timeout=15.0)
+            # Brief settle so film physically stops before we grab the next frame
+            time.sleep(0.3)
             
             # Fine-tune alignment: more iterations and tighter tolerance to correct 1–2 sprocket errors
             success, msg, info = self.auto_align_sprocket(max_iterations=12, tolerance_px=15)
@@ -3878,18 +3939,26 @@ def preview_video_stream():
 
     def generate():
         last_frame_time = time.time()
-        no_frame_duration_before_recover = 4.0  # If no frame for this long, try to restart thread if dead
+        last_yield_time = 0.0
+        min_frame_interval = 1.0 / 15  # Cap at ~15 fps to reduce Pi CPU / WiFi load
+        no_frame_duration_before_recover = 4.0
+
         while True:
             try:
                 frame = scanner.preview_stream.get_frame(timeout=1.2)
                 if frame is None:
-                    # If capture thread may have died (e.g. after heavy use on Pi), restart it
                     if time.time() - last_frame_time >= no_frame_duration_before_recover:
-                        scanner.ensure_preview_stream()  # No-op if running; starts thread if dead
+                        scanner.ensure_preview_stream()
                         last_frame_time = time.time()
                     time.sleep(0.05)
                     continue
                 last_frame_time = time.time()
+
+                # Frame-rate limiting: skip this frame if we yielded too recently
+                now = time.time()
+                if now - last_yield_time < min_frame_interval:
+                    time.sleep(0.005)
+                    continue
 
                 out = frame
                 if invert:
@@ -3906,6 +3975,7 @@ def preview_video_stream():
 
                 yield (b'--frame\r\n'
                        b'Content-Type: image/jpeg\r\n\r\n' + out + b'\r\n')
+                last_yield_time = time.time()
             except GeneratorExit:
                 break
             except Exception:
