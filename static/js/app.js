@@ -230,7 +230,12 @@ async function apiCall(endpoint, data = {}) {
             },
             body: JSON.stringify(data)
         });
-        return await response.json();
+        const out = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            out.success = out.success ?? false;
+            out.httpStatus = response.status;
+        }
+        return out;
     } catch (error) {
         console.error('API call failed:', error);
         return { success: false, message: 'Network error' };
@@ -415,44 +420,54 @@ async function refreshCameraSettings() {
     }
 }
 
+let captureRequestInProgress = false;
+
 async function capture() {
-    const btn = event.target;
-    setButtonProcessing(btn, true);
-
-    const autoAlignCheckbox = document.getElementById('auto-align-before-capture');
-    const result = await apiCall('capture', { auto_align: autoAlignCheckbox ? autoAlignCheckbox.checked : false });
-
-    setButtonProcessing(btn, false);
-
-    if (!result.success) {
-        alert(result.message || 'Capture failed');
+    if (captureRequestInProgress) {
+        console.log('Capture: ignoring duplicate request (previous still in progress)');
         return;
     }
+    const btn = event.target;
+    setButtonProcessing(btn, true);
+    captureRequestInProgress = true;
+
+    try {
+        const autoAlignCheckbox = document.getElementById('auto-align-before-capture');
+        const result = await apiCall('capture', { auto_align: autoAlignCheckbox ? autoAlignCheckbox.checked : false });
+
+        if (!result.success) {
+            const msg = result.message || 'Capture failed';
+            if (result.httpStatus === 409 || (msg && msg.indexOf('already in progress') !== -1)) {
+                console.warn('Capture: ' + msg);
+            } else {
+                alert(msg);
+            }
+            return;
+        }
 
     // Auto-refresh preview after capture if enabled
     if (previewState.autoRefresh) {
         setTimeout(() => capturePreview(), 500);
     }
     
-    // If auto-capture is enabled, continue capturing automatically
-    if (result.auto_capture_enabled && scannerState.autoCaptureEnabled) {
-        // Mark as auto-capturing
-        scannerState.isAutoCapturing = true;
-        
-        // Update UI to show we're in auto-capture mode
-        updateAutoCaptureUI();
-        
-        // Continue with next capture after a brief delay to allow status updates
-        setTimeout(() => {
-            if (scannerState.isAutoCapturing) {
-                console.log('Auto-capture: triggering next frame');
-                capture();
-            }
-        }, 1000);
-    } else {
-        // Auto-capture finished or disabled
-        scannerState.isAutoCapturing = false;
-        updateAutoCaptureUI();
+        // If auto-capture is enabled, continue capturing automatically
+        if (result.auto_capture_enabled && scannerState.autoCaptureEnabled) {
+            scannerState.isAutoCapturing = true;
+            updateAutoCaptureUI();
+            // Delay before next capture so Pi can finish advance and settle
+            setTimeout(() => {
+                if (scannerState.isAutoCapturing) {
+                    console.log('Auto-capture: triggering next frame');
+                    capture();
+                }
+            }, 2000);
+        } else {
+            scannerState.isAutoCapturing = false;
+            updateAutoCaptureUI();
+        }
+    } finally {
+        setButtonProcessing(btn, false);
+        captureRequestInProgress = false;
     }
 }
 
@@ -615,14 +630,20 @@ async function restartVideoStreamIfFrozen() {
         alert('Restart failed: ' + (result.message || 'Unknown error'));
         return;
     }
+    const timestamp = document.getElementById('preview-timestamp');
+    if (timestamp) timestamp.textContent = result.message || 'Restarting...';
+    // Server does full restart in background (~3s). Reload stream after delay so new connection gets fresh stream.
     if (previewState.videoActive) {
         const streamImg = document.getElementById('preview-video-stream');
         const invertParam = previewState.inverted ? '1' : '0';
         streamImg.src = '';
-        streamImg.src = `/api/preview_video_stream?invert=${invertParam}&t=${Date.now()}`;
+        setTimeout(() => {
+            if (previewState.videoActive && streamImg) {
+                streamImg.src = `/api/preview_video_stream?invert=${invertParam}&t=${Date.now()}`;
+            }
+            if (timestamp) timestamp.textContent = 'Preview restarted.';
+        }, 3500);
     }
-    const timestamp = document.getElementById('preview-timestamp');
-    if (timestamp) timestamp.textContent = result.message || 'Preview restarted.';
 }
 
 async function autoAlign() {

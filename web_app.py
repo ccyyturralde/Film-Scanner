@@ -633,6 +633,8 @@ class FilmScanner:
     
         # RLock to prevent gphoto2 conflicts across routes (reentrant for recursive calls)
         self.camera_op_lock = threading.RLock()
+        # Lock for entire capture+advance flow so we never run two at once (avoids double capture / partial advance)
+        self.capture_workflow_lock = threading.Lock()
 
         # Stream control: Using capture card for preview/viewfinder
         # gphoto2 is now only used for autofocus and capture (no viewfinder/preview)
@@ -2227,7 +2229,8 @@ class FilmScanner:
             
             # Move forward one frame
             self.send(self.cmd_advance(steps_per_frame), update_position=False)
-            time.sleep(0.3 + steps_per_frame * 0.002)
+            # Settle time so film/motor stop before we grab next frame for alignment (helps on Pi)
+            time.sleep(0.5 + steps_per_frame * 0.002)
             
             # Fine-tune alignment: more iterations and tighter tolerance to correct 1–2 sprocket errors
             success, msg, info = self.auto_align_sprocket(max_iterations=12, tolerance_px=15)
@@ -2954,100 +2957,115 @@ def capture():
     In CALIBRATION mode:
     - Uses fixed frame_advance distance
     """
-    data = request.json or {}
-    auto_align_before = data.get('auto_align', False)
+    # Prevent overlapping capture+advance (double capture, partial advance on Pi)
+    if not scanner.capture_workflow_lock.acquire(blocking=False):
+        return jsonify({
+            'success': False,
+            'message': 'Capture already in progress. Wait for the current capture and advance to finish.',
+            'frame_count': scanner.frame_count,
+        }), 409
 
-    if not scanner.roll_name:
-        return jsonify({'success': False, 'message': 'Create roll first'})
-    
-    # Force camera check for user-initiated capture
-    if not scanner.check_camera(force=True):
-        return jsonify({'success': False, 'message': 'Camera not connected'})
-    
-    # Optional pre-capture fine-tune (only does minor adjustments if gap visible on edge)
-    # Respects both the checkbox AND the global auto_alignment_enabled setting
-    if auto_align_before and scanner.alignment_mode in ("stream", "sprocket") and scanner.auto_alignment_enabled:
-        try:
-            # Only do edge fine-tune, not full realignment
-            scanner.log("Pre-capture edge check...")
-            if scanner.alignment_mode == "sprocket":
-                success, msg, info = scanner.auto_align_sprocket(max_iterations=5, tolerance_px=20)
-            else:
-                success, msg, info = scanner.auto_align()
-            scanner.broadcast_status()
-            if not success:
-                scanner.log(f"Pre-capture align note: {msg}")
-                # Don't fail capture if pre-align has issues - just log it
-        except Exception as e:
-            scanner.log(f"Pre-capture align error: {e}")
+    try:
+        data = request.json or {}
+        auto_align_before = data.get('auto_align', False)
 
-    scanner.status_msg = "Capturing..."
-    scanner.broadcast_status()
-    
-    success = scanner.capture_image()
-    
-    if success:
-        scanner.status_msg = f"✓ Frame {scanner.frame_count}"
+        if not scanner.roll_name:
+            return jsonify({'success': False, 'message': 'Create roll first'})
+        
+        # Force camera check for user-initiated capture
+        if not scanner.check_camera(force=True):
+            return jsonify({'success': False, 'message': 'Camera not connected'})
+        
+        # Optional pre-capture fine-tune (only does minor adjustments if gap visible on edge)
+        # Respects both the checkbox AND the global auto_alignment_enabled setting
+        if auto_align_before and scanner.alignment_mode in ("stream", "sprocket") and scanner.auto_alignment_enabled:
+            try:
+                # Only do edge fine-tune, not full realignment
+                scanner.log("Pre-capture edge check...")
+                if scanner.alignment_mode == "sprocket":
+                    success, msg, info = scanner.auto_align_sprocket(max_iterations=5, tolerance_px=20)
+                else:
+                    success, msg, info = scanner.auto_align()
+                scanner.broadcast_status()
+                if not success:
+                    scanner.log(f"Pre-capture align note: {msg}")
+                    # Don't fail capture if pre-align has issues - just log it
+            except Exception as e:
+                scanner.log(f"Pre-capture align error: {e}")
+
+        scanner.status_msg = "Capturing..."
         scanner.broadcast_status()
         
-        # Wait for exposure to complete if auto-capture is enabled
-        if scanner.auto_capture_enabled:
-            scanner.log(f"⏱️ Waiting {scanner.auto_capture_delay}s for exposure...")
-            scanner.status_msg = f"⏱️ Frame {scanner.frame_count} - Waiting for exposure..."
-            scanner.broadcast_status()
-            time.sleep(scanner.auto_capture_delay)
+        success = scanner.capture_image()
         
-        # Auto-advance AFTER capture (only in 35mm mode with Arduino)
-        # In 120 mode (hand feed), skip all motor operations
-        if scanner.scanner_mode == "120":
-            # 120 mode: No auto-advance, user manually feeds film
-            scanner.status_msg = f"✓ Frame {scanner.frame_count} (hand feed next)"
-        elif scanner.alignment_mode == "sprocket" and scanner.auto_alignment_enabled:
-            # SPROCKET MODE: Use sprocket hole detection for precise frame advance
-            time.sleep(0.3)  # Brief pause before advancing
-            try:
-                adv_success, adv_msg, adv_info = scanner.advance_and_align_sprocket()
-                if adv_success:
-                    scanner.status_msg = f"✓ Frame {scanner.frame_count} → Ready for next"
-                else:
-                    scanner.status_msg = f"✓ Frame {scanner.frame_count} (advance: {adv_msg})"
-            except Exception as e:
-                scanner.log(f"Sprocket advance error: {e}")
-                scanner.status_msg = f"✓ Frame {scanner.frame_count} (advance error)"
-        elif scanner.alignment_mode == "stream" and scanner.auto_alignment_enabled:
-            # STREAM MODE with auto-alignment: Use advance_and_align (always moves FORWARD/right)
-            time.sleep(0.3)  # Brief pause before advancing
-            try:
-                adv_success, adv_msg, adv_info = scanner.advance_and_align()
-                if adv_success:
-                    scanner.status_msg = f"✓ Frame {scanner.frame_count} → Ready for next"
-                else:
-                    scanner.status_msg = f"✓ Frame {scanner.frame_count} (advance: {adv_msg})"
-            except Exception as e:
-                scanner.log(f"Advance error: {e}")
-                scanner.status_msg = f"✓ Frame {scanner.frame_count} (advance failed)"
-        elif scanner.mode == 'calibrated' and scanner.auto_advance:
-            # CALIBRATION MODE: Use fixed frame_advance distance (h = advance on this hardware)
-            if scanner.frame_mode == "half":
-                advance = scanner.half_frame_advance or scanner.frame_advance
-            else:
-                advance = scanner.frame_advance
+        if success:
+            scanner.status_msg = f"✓ Frame {scanner.frame_count}"
+            scanner.broadcast_status()
             
-            if advance:
-                time.sleep(0.3)
-                if scanner.send(scanner.cmd_advance(advance)):
-                    scanner.status_msg = f"✓ Frame {scanner.frame_count} → Ready for next"
-                else:
+            # Wait for exposure to complete if auto-capture is enabled
+            if scanner.auto_capture_enabled:
+                scanner.log(f"⏱️ Waiting {scanner.auto_capture_delay}s for exposure...")
+                scanner.status_msg = f"⏱️ Frame {scanner.frame_count} - Waiting for exposure..."
+                scanner.broadcast_status()
+                time.sleep(scanner.auto_capture_delay)
+            
+            # Auto-advance AFTER capture (only in 35mm mode with Arduino)
+            # In 120 mode (hand feed), skip all motor operations
+            if scanner.scanner_mode == "120":
+                # 120 mode: No auto-advance, user manually feeds film
+                scanner.status_msg = f"✓ Frame {scanner.frame_count} (hand feed next)"
+            elif scanner.alignment_mode == "sprocket" and scanner.auto_alignment_enabled:
+                # SPROCKET MODE: Use sprocket hole detection for precise frame advance
+                time.sleep(0.3)  # Brief pause before advancing
+                try:
+                    adv_success, adv_msg, adv_info = scanner.advance_and_align_sprocket()
+                    if adv_success:
+                        scanner.status_msg = f"✓ Frame {scanner.frame_count} → Ready for next"
+                    else:
+                        scanner.status_msg = f"✓ Frame {scanner.frame_count} (advance: {adv_msg})"
+                except Exception as e:
+                    scanner.log(f"Sprocket advance error: {e}")
+                    scanner.status_msg = f"✓ Frame {scanner.frame_count} (advance error)"
+            elif scanner.alignment_mode == "stream" and scanner.auto_alignment_enabled:
+                # STREAM MODE with auto-alignment: Use advance_and_align (always moves FORWARD/right)
+                time.sleep(0.3)  # Brief pause before advancing
+                try:
+                    adv_success, adv_msg, adv_info = scanner.advance_and_align()
+                    if adv_success:
+                        scanner.status_msg = f"✓ Frame {scanner.frame_count} → Ready for next"
+                    else:
+                        scanner.status_msg = f"✓ Frame {scanner.frame_count} (advance: {adv_msg})"
+                except Exception as e:
+                    scanner.log(f"Advance error: {e}")
                     scanner.status_msg = f"✓ Frame {scanner.frame_count} (advance failed)"
-    else:
-        scanner.status_msg = "❌ Capture failed!"
-    
-    scanner.broadcast_status()
-    return jsonify({
-        'success': success,
-        'auto_capture_enabled': scanner.auto_capture_enabled,
-        'frame_count': scanner.frame_count
-    })
+            elif scanner.mode == 'calibrated' and scanner.auto_advance:
+                # CALIBRATION MODE: Use fixed frame_advance distance (h = advance on this hardware)
+                if scanner.frame_mode == "half":
+                    advance = scanner.half_frame_advance or scanner.frame_advance
+                else:
+                    advance = scanner.frame_advance
+                
+                if advance:
+                    time.sleep(0.3)
+                    if scanner.send(scanner.cmd_advance(advance)):
+                        scanner.status_msg = f"✓ Frame {scanner.frame_count} → Ready for next"
+                    else:
+                        scanner.status_msg = f"✓ Frame {scanner.frame_count} (advance failed)"
+            else:
+                # No advance path matched (e.g. auto-alignment off and not calibrated)
+                scanner.status_msg = f"✓ Frame {scanner.frame_count} (no advance - enable Auto-Alignment or calibrated mode)"
+                scanner.log("Capture OK but no advance: auto_alignment_enabled or calibrated mode required for auto-advance")
+        else:
+            scanner.status_msg = "❌ Capture failed!"
+        
+        scanner.broadcast_status()
+        return jsonify({
+            'success': success,
+            'auto_capture_enabled': scanner.auto_capture_enabled,
+            'frame_count': scanner.frame_count
+        })
+    finally:
+        scanner.capture_workflow_lock.release()
 
 
 @app.route('/api/auto_align', methods=['POST'])
@@ -3859,14 +3877,19 @@ def preview_video_stream():
     invert = request.args.get('invert', '0') in ('1', 'true', 'True', 'yes')
 
     def generate():
-        # Do not call restart_if_stale from here: it blocks the response 2.5s+ and freezes
-        # the browser. User can click "Restart preview" if the stream is stuck.
+        last_frame_time = time.time()
+        no_frame_duration_before_recover = 4.0  # If no frame for this long, try to restart thread if dead
         while True:
             try:
                 frame = scanner.preview_stream.get_frame(timeout=1.2)
                 if frame is None:
+                    # If capture thread may have died (e.g. after heavy use on Pi), restart it
+                    if time.time() - last_frame_time >= no_frame_duration_before_recover:
+                        scanner.ensure_preview_stream()  # No-op if running; starts thread if dead
+                        last_frame_time = time.time()
                     time.sleep(0.05)
                     continue
+                last_frame_time = time.time()
 
                 out = frame
                 if invert:
@@ -3985,22 +4008,31 @@ def stream_info():
     })
 
 
+def _do_full_stream_restart():
+    """Background: stop stream, wait for device release, start again. Avoids blocking HTTP."""
+    try:
+        scanner.log("↻ Full stream restart (release + 2.5s delay)...")
+        scanner.preview_stream.stop()
+        time.sleep(2.5)
+        scanner.preview_stream.start()
+        scanner.log("↻ Stream restart complete")
+    except Exception as e:
+        scanner.log(f"✗ Stream restart failed: {e}")
+
+
 @app.route('/api/stream/restart', methods=['POST'])
 def stream_restart():
     """
     Restart the preview stream.
     POST body: { "full": true } to do a full recovery (stop + 2.5s delay + start).
-    Use full=true when the stream is frozen; otherwise quick restart for settings.
+    Returns immediately so the client does not hit a timeout; full restart runs in background.
     """
     try:
         data = request.json or {}
         full_recovery = data.get('full', False)
         if full_recovery:
-            scanner.log("↻ Full stream restart (release + 2.5s)...")
-            scanner.preview_stream.stop()
-            time.sleep(2.5)
-            scanner.preview_stream.start()
-            msg = 'Stream restarted (full recovery)'
+            threading.Thread(target=_do_full_stream_restart, daemon=True).start()
+            msg = 'Restarting stream... (reload in a few seconds if needed)'
         else:
             scanner.preview_stream.restart_stream()
             msg = 'Stream restarted'
@@ -4029,80 +4061,87 @@ def handle_status_request():
     scanner.check_camera(force=False)
     emit('status_update', scanner.get_status())
 if __name__ == '__main__':
-    # Handle command line arguments
-    import argparse
-    parser = argparse.ArgumentParser(description='Film Scanner Web Application')
-    parser.add_argument('--reset', action='store_true', help='Reset configuration and run setup')
-    parser.add_argument('--config', action='store_true', help='Show current configuration')
-    args = parser.parse_args()
-    
-    # Initialize configuration manager
-    config_mgr = ConfigManager()
-    
-    # Handle special commands
-    if args.reset:
-        config_mgr.delete_config()
-        print("\n✓ Configuration reset. Restart the application to run setup.\n")
-        sys.exit(0)
-    
-    if args.config:
-        config_mgr.print_config()
-        sys.exit(0)
-    
-    # Get or create configuration
-    print("\n" + "="*60)
-    print("   FILM SCANNER WEB APPLICATION")
-    print("="*60 + "\n")
-    
-    config = config_mgr.get_config()
-    if not config:
-        print("\n❌ Setup failed or cancelled\n")
+    try:
+        # Handle command line arguments
+        import argparse
+        parser = argparse.ArgumentParser(description='Film Scanner Web Application')
+        parser.add_argument('--reset', action='store_true', help='Reset configuration and run setup')
+        parser.add_argument('--config', action='store_true', help='Show current configuration')
+        args = parser.parse_args()
+        
+        # Initialize configuration manager
+        config_mgr = ConfigManager()
+        
+        # Handle special commands
+        if args.reset:
+            config_mgr.delete_config()
+            print("\n✓ Configuration reset. Restart the application to run setup.\n")
+            sys.exit(0)
+        
+        if args.config:
+            config_mgr.print_config()
+            sys.exit(0)
+        
+        # Get or create configuration
+        print("\n" + "="*60)
+        print("   FILM SCANNER WEB APPLICATION")
+        print("="*60 + "\n")
+        
+        config = config_mgr.get_config()
+        if not config:
+            print("\n❌ Setup failed or cancelled\n")
+            sys.exit(1)
+        
+        # Display configuration
+        print(f"\n📍 Mode: {config.get('mode', 'unknown')}")
+        print(f"📍 Pi IP: {config.get('pi_ip', 'unknown')}")
+        print(f"📍 Port: {config.get('port', 5000)}")
+        
+        # USB cleanup: non-fatal so app still starts if this hangs/fails at boot
+        try:
+            clear_usb_for_camera()
+        except Exception as e:
+            print(f"⚠ USB cleanup skipped: {e}")
+        
+        # Auto-connect to Arduino on startup (non-fatal)
+        print("\n🔌 Searching for Arduino (R3/R4 supported)...")
+        try:
+            if scanner.find_arduino():
+                print(f"✓ Arduino connected: {scanner.arduino_board}")
+                print(f"   Port: {scanner.arduino_port}")
+            else:
+                print("✗ Arduino not found (you can connect later via the web interface)")
+        except Exception as e:
+            print(f"⚠ Arduino check skipped: {e}")
+        
+        # Camera check (non-fatal)
+        print("\n📷 Camera Detection")
+        try:
+            if scanner.check_camera(retry_with_usb_clear=True, max_retries=3):
+                print(f"✓ Camera ready: {scanner.camera_model}")
+            else:
+                print("⚠ Camera not detected at startup")
+        except Exception as e:
+            print(f"⚠ Camera check skipped: {e}")
+        
+        # Start web server
+        host = '0.0.0.0'
+        port = config.get('port', 5000)
+        pi_ip = config.get('pi_ip', 'localhost')
+        
+        print("\n" + "="*60)
+        print("   WEB SERVER STARTING")
+        print("="*60)
+        print(f"\n🌐 Access the scanner from your device:")
+        print(f"   • http://{pi_ip}:{port}")
+        print("\n💡 Tip: To reset configuration, run:")
+        print("   python3 web_app.py --reset")
+        print("="*60 + "\n")
+        
+        socketio.run(app, host=host, port=port, debug=False, allow_unsafe_werkzeug=True)
+    except SystemExit:
+        raise
+    except Exception as e:
+        print("\n❌ Film Scanner failed to start:")
+        traceback.print_exc()
         sys.exit(1)
-    
-    # Display configuration
-    print(f"\n📍 Mode: {config.get('mode', 'unknown')}")
-    print(f"📍 Pi IP: {config.get('pi_ip', 'unknown')}")
-    print(f"📍 Port: {config.get('port', 5000)}")
-    
-    # Thoroughly clear USB to make room for the camera
-    # This kills gphoto2, gvfs auto-mount daemons, and resets USB if needed
-    # Critical for touchscreen setups where USB devices may block camera access
-    clear_usb_for_camera()
-    
-    # Auto-connect to Arduino on startup
-    print("\n🔌 Searching for Arduino (R3/R4 supported)...")
-    if scanner.find_arduino():
-        print(f"✓ Arduino connected: {scanner.arduino_board}")
-        print(f"   Port: {scanner.arduino_port}")
-    else:
-        print("✗ Arduino not found (you can connect later via the web interface)")
-        print("   Supported boards: Arduino Uno R3, R4 Minima, R4 WiFi")
-    
-    # Check for camera - do actual detection at startup
-    print("\n📷 Camera Detection")
-    print("  • Connection: USB via gphoto2")
-    print("  • Supported: Canon R100 and other PTP cameras")
-    
-    # Actually check for camera at startup
-    if scanner.check_camera(retry_with_usb_clear=True, max_retries=3):
-        print(f"✓ Camera ready: {scanner.camera_model}")
-    else:
-        print("⚠ Camera not detected at startup")
-        print("  Press FIX CAM on touchscreen or reconnect USB")
-    
-    # Start web server
-    host = '0.0.0.0'
-    port = config.get('port', 5000)
-    pi_ip = config.get('pi_ip', 'localhost')
-    
-    print("\n" + "="*60)
-    print("   WEB SERVER STARTING")
-    print("="*60)
-    print(f"\n🌐 Access the scanner from your device:")
-    print(f"   • http://{pi_ip}:{port}")
-    print("\n💡 Tip: To reset configuration, run:")
-    print("   python3 web_app.py --reset")
-    print("="*60 + "\n")
-    
-    # Run without debug mode to prevent reloads that disrupt Arduino connection
-    socketio.run(app, host=host, port=port, debug=False, allow_unsafe_werkzeug=True)

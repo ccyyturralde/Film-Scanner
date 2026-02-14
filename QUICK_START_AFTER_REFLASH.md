@@ -262,4 +262,28 @@ sudo bash scripts/setup_pi.sh  # Re-run setup to update services
 
 ---
 
+### Web app won't load after reboot
+
+1. **Check if the service is running**
+   ```bash
+   sudo systemctl status film-scanner.service
+   ```
+2. **See why it failed** (last 80 lines of log; look for "❌ Film Scanner failed to start" and the traceback below it)
+   ```bash
+   journalctl -u film-scanner.service -n 80 --no-pager
+   ```
+3. **Try starting the app manually** (to see errors in the terminal)
+   ```bash
+   cd /opt/film-scanner   # or your clone path
+   .venv/bin/python web_app.py
+   ```
+4. **If config is missing or broken**, reset and re-run setup:
+   ```bash
+   .venv/bin/python web_app.py --reset
+   # then run again to go through setup
+   .venv/bin/python web_app.py
+   ```
+
+---
+
 **Need help?** Check the full documentation in the `/docs` folder or logs via `journalctl`.
