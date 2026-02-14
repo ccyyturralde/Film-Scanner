@@ -387,19 +387,19 @@ class CaptureCardStream:
 
     def restart_if_stale(self, max_age_sec: float = 2.5) -> bool:
         """
-        If the stream is running but no new frame for max_age_sec, stop and restart it.
-        Returns True if a restart was performed. Call from MJPEG generator when frames stop.
+        If no new frame for max_age_sec (stream dead or stuck), stop, wait for device
+        release, then start again. Works even when the capture thread has already exited.
+        Returns True if a restart was performed.
         """
-        if not self.is_running():
-            return False
         with self.lock:
             ts = self.last_frame_ts
         if time.time() - ts <= max_age_sec:
             return False
         try:
-            self.scanner.log("⚠ Video stream stuck (no new frame), restarting...")
+            self.scanner.log("⚠ Video stream stuck or dead, restarting (release + 2.5s delay)...")
             self.stop()
-            time.sleep(0.3)
+            # Force device fully released before reopen (only fix for USB/V4L2 freeze)
+            time.sleep(2.5)
             self.start()
             return True
         except Exception as e:
@@ -642,10 +642,10 @@ class CaptureCardStream:
                 self.cap = cap
 
             consecutive_failures = 0
-            max_failures_before_exit = 200  # ~2s at 0.01 sleep
-            read_timeout_sec = 2.5  # cap.read() can block on USB stall; timeout and restart
+            max_failures_before_exit = 100  # ~1s of no frames then exit for restart
+            read_timeout_sec = 2.0  # cap.read() can block on USB stall; timeout and restart
             stream_start_time = time.time()
-            stream_refresh_interval = 90.0  # Voluntary restart every 90s to clear latent stalls
+            stream_refresh_interval = 45.0  # Voluntary restart every 45s to avoid latent freezes
             read_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cap_read")
 
             while not self.stop_event.is_set():
@@ -734,6 +734,8 @@ class CaptureCardStream:
                     cap.release()
                 except Exception:
                     pass
+                # Let kernel/USB release the device before anything reopens it
+                time.sleep(2.0)
 
 
 # Arduino USB Vendor/Product IDs for automatic detection
@@ -4021,9 +4023,9 @@ def preview_video_stream():
                 frame = scanner.preview_stream.get_frame(timeout=0.5)
                 if frame is None:
                     none_count += 1
-                    # If no frame for ~1.5s, try restarting the capture stream
-                    if time.time() - last_frame_time > 1.5 and none_count > 8:
-                        if scanner.preview_stream.restart_if_stale(max_age_sec=1.5):
+                    # No frame: restart if stale (works even when capture thread has died)
+                    if time.time() - last_frame_time > 1.2 and none_count >= 6:
+                        if scanner.preview_stream.restart_if_stale(max_age_sec=1.2):
                             last_frame_time = time.time()
                             none_count = 0
                     time.sleep(0.05)
@@ -4359,12 +4361,26 @@ def stream_info():
 
 @app.route('/api/stream/restart', methods=['POST'])
 def stream_restart():
-    """Restart the preview stream (to apply new settings)."""
+    """
+    Restart the preview stream.
+    POST body: { "full": true } to do a full recovery (stop + 2.5s delay + start).
+    Use full=true when the stream is frozen; otherwise quick restart for settings.
+    """
     try:
-        scanner.preview_stream.restart_stream()
+        data = request.json or {}
+        full_recovery = data.get('full', False)
+        if full_recovery:
+            scanner.log("↻ Full stream restart (release + 2.5s)...")
+            scanner.preview_stream.stop()
+            time.sleep(2.5)
+            scanner.preview_stream.start()
+            msg = 'Stream restarted (full recovery)'
+        else:
+            scanner.preview_stream.restart_stream()
+            msg = 'Stream restarted'
         return jsonify({
             'success': True,
-            'message': 'Stream restarted',
+            'message': msg,
             'resolution': scanner.preview_stream.get_resolution_info(),
         })
     except Exception as e:

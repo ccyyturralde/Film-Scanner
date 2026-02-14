@@ -600,6 +600,25 @@ function stopVideoStream() {
     if (stillImg) stillImg.style.display = 'block';
 }
 
+async function restartVideoStreamIfFrozen() {
+    const btn = document.getElementById('preview-video-restart-btn');
+    if (btn) btn.disabled = true;
+    const result = await apiCall('stream/restart', { full: true });
+    if (btn) btn.disabled = false;
+    if (!result.success) {
+        alert('Restart failed: ' + (result.message || 'Unknown error'));
+        return;
+    }
+    if (previewState.videoActive) {
+        const streamImg = document.getElementById('preview-video-stream');
+        const invertParam = previewState.inverted ? '1' : '0';
+        streamImg.src = '';
+        streamImg.src = `/api/preview_video_stream?invert=${invertParam}&t=${Date.now()}`;
+    }
+    const timestamp = document.getElementById('preview-timestamp');
+    if (timestamp) timestamp.textContent = result.message || 'Preview restarted.';
+}
+
 async function autoAlign() {
     const btn = event.target;
     setButtonProcessing(btn, true);
