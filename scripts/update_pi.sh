@@ -48,7 +48,20 @@ rsync -a --delete \
     --exclude ".venv" \
     "$REPO_ROOT"/ "$APP_DIR"/
 
-echo "Restarting film-scanner.service ..."
-systemctl restart film-scanner.service
-
-echo "Done. Check: systemctl status film-scanner.service"
+# Restart whichever service is active.
+# The touchscreen service manages web_app.py internally, so if it's running
+# we restart that (which will re-launch web_app.py). Otherwise restart the
+# standalone web service.
+if systemctl is-active --quiet film-scanner-touchscreen.service; then
+    echo "Restarting film-scanner-touchscreen.service (manages web app) ..."
+    systemctl restart film-scanner-touchscreen.service
+    echo "Done. Check: systemctl status film-scanner-touchscreen.service"
+elif systemctl is-enabled --quiet film-scanner.service 2>/dev/null; then
+    echo "Restarting film-scanner.service ..."
+    systemctl restart film-scanner.service
+    echo "Done. Check: systemctl status film-scanner.service"
+else
+    echo "No active scanner service found. Start manually if needed:"
+    echo "  sudo systemctl start film-scanner-touchscreen.service"
+    echo "  # or: sudo systemctl start film-scanner.service"
+fi
