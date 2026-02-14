@@ -1676,7 +1676,7 @@ class FilmScanner:
                         steps = 150  # Far from left - big push
                     
                     self.log(f"   Gap at {gap_fraction:.0%} -> FORWARD {steps}")
-                    moved = self.send(f"h{steps}", update_position=False)
+                    moved = self.send(f"H{steps}", update_position=False)
                     if not moved:
                         return False, "Motor failed", {"mode": "error", "total_steps": total_steps, "confidence": 0}
                     total_steps += steps
@@ -1859,7 +1859,7 @@ class FilmScanner:
                             
                             self.log(f"   Left edge gap (rightmost: {rightmost_gap}px) -> BACKWARD {fine_steps}")
                             
-                            self.send(f"H{fine_steps}", update_position=False)
+                            self.send(f"h{fine_steps}", update_position=False)
                             total_steps -= fine_steps
                             time.sleep(0.15 + fine_steps * 0.002)
                             continue
@@ -1884,7 +1884,7 @@ class FilmScanner:
                             
                             self.log(f"   Right edge gap (leftmost: {leftmost_gap}px, extent: {gap_extent}px) -> FORWARD {fine_steps}")
                             
-                            self.send(f"h{fine_steps}", update_position=False)
+                            self.send(f"H{fine_steps}", update_position=False)
                             total_steps += fine_steps
                             time.sleep(0.15 + fine_steps * 0.002)
                             continue
@@ -2012,7 +2012,7 @@ class FilmScanner:
                     # No gap found - search forward
                     if not gap_regions:
                         self.log(f"   No gap detected, searching forward...")
-                        self.send("h100", update_position=False)
+                        self.send("H100", update_position=False)
                         total_steps += 100
                         time.sleep(0.4)
                         continue
@@ -2049,16 +2049,16 @@ class FilmScanner:
                     offset_px = gap_center - frame_center  # Positive = gap is right of center
                     
                     if offset_px > 0:
-                        # Gap is RIGHT of center - move BACKWARD to shift gap left (H = back)
+                        # Gap is RIGHT of center - move BACKWARD to shift gap left
                         steps = max(20, min(150, int(abs(offset_px) / 2)))
                         direction = "BACKWARD"
-                        cmd = f"H{steps}"
+                        cmd = f"h{steps}"
                         self.log(f"   Gap right of center -> moving BACKWARD {steps} steps")
                     else:
-                        # Gap is LEFT of center - move FORWARD to shift gap right (h = forward)
+                        # Gap is LEFT of center - move FORWARD to shift gap right
                         steps = max(20, min(150, int(abs(offset_px) / 2)))
                         direction = "FORWARD"
-                        cmd = f"h{steps}"
+                        cmd = f"H{steps}"
                         self.log(f"   Gap left of center -> moving FORWARD {steps} steps")
                     
                     # Execute move
@@ -2199,7 +2199,7 @@ class FilmScanner:
                         else:
                             steps = 120  # Far from left
                         self.log(f"   Moving FORWARD {steps} steps")
-                        self.send(f"h{steps}", update_position=False)
+                        self.send(f"H{steps}", update_position=False)
                         total_steps_moved += steps
                     else:
                         # HALF FRAME: center the gap in the middle
@@ -2223,20 +2223,16 @@ class FilmScanner:
                                     "iterations": iteration + 1,
                                 }
                         
-                        # Move to center gap (h = forward, H = backward; matches manual arrows)
-                        # offset > 0 means gap is RIGHT of center (needs more forward)
-                        # offset < 0 means gap is LEFT of center (we overshot)
+                        # Move to center gap: H = forward, h = backward (this hardware)
                         if offset > 0:
-                            # Gap RIGHT of center - move FORWARD to bring it to center
                             steps = max(10, min(40, int(abs(offset) / 4)))
                             self.log(f"   Gap right of center -> FORWARD {steps}")
-                            self.send(f"h{steps}", update_position=False)
+                            self.send(f"H{steps}", update_position=False)
                             total_steps_moved += steps
                         else:
-                            # Gap LEFT of center - we overshot, small backward correction
                             steps = max(8, min(25, int(abs(offset) / 4)))
                             self.log(f"   Gap left of center (overshot) -> BACKWARD {steps}")
-                            self.send(f"H{steps}", update_position=False)
+                            self.send(f"h{steps}", update_position=False)
                             total_steps_moved -= steps
                 
                 elif saw_gap and not has_gap:
@@ -2252,12 +2248,12 @@ class FilmScanner:
                     else:
                         # HALF FRAME: gap disappeared but we need it centered - keep searching
                         self.log(f"   [{iteration+1}] Gap lost, searching forward...")
-                        self.send("h80", update_position=False)
+                        self.send("H80", update_position=False)
                         total_steps_moved += 80
                 else:
                     # No gap yet - keep moving forward
                     self.log(f"   [{iteration+1}] No gap yet, advancing...")
-                    self.send("h100", update_position=False)
+                    self.send("H100", update_position=False)
                     total_steps_moved += 100
                     
             except Exception as e:
@@ -2359,8 +2355,8 @@ class FilmScanner:
                 # Check if we need sprockets to align
                 if sprocket_count < 2:
                     self.log(f"   ⚠ Not enough sprocket holes detected ({sprocket_count})")
-                    # Move a bit to find sprockets (h = forward, same as manual)
-                    self.send("h50", update_position=False)
+                    # Move a bit to find sprockets (H = forward on this hardware)
+                    self.send("H50", update_position=False)
                     total_steps += 50
                     continue
                 
@@ -2392,14 +2388,13 @@ class FilmScanner:
                 steps_needed = int(abs(offset) / px_per_step)
                 steps_needed = max(8, min(steps_needed, 200))  # Clamp between 8-200
                 
-                # Determine direction: detector says positive = move film right.
-                # Sprocket alignment uses opposite motor sense (swap h/H) so nudge goes correct way.
+                # Determine direction: detector says positive = move film right. H = forward on this hardware.
                 if offset > 0:
                     direction = "RIGHT"
-                    cmd = f"H{steps_needed}"
+                    cmd = f"h{steps_needed}"
                 else:
                     direction = "LEFT"
-                    cmd = f"h{steps_needed}"
+                    cmd = f"H{steps_needed}"
                 
                 self.log(f"   → Moving {direction} {steps_needed} steps (offset={offset}px)")
                 self.send(cmd, update_position=False)
@@ -2459,8 +2454,8 @@ class FilmScanner:
             
             self.log(f"   Frame pitch: {frame_pitch_px:.1f}px, Steps: {steps_per_frame}")
             
-            # Move forward one frame (h = same direction as manual "forward")
-            self.send(f"h{steps_per_frame}", update_position=False)
+            # Move forward one frame (H = advance on this hardware)
+            self.send(f"H{steps_per_frame}", update_position=False)
             time.sleep(0.3 + steps_per_frame * 0.002)
             
             # Fine-tune alignment
@@ -2720,8 +2715,8 @@ class FilmScanner:
             mode_label = "full-frame"
         
         if advance:
-            # Use 'h' for advance (same direction as manual "forward" / pancake motor)
-            success = self.send(f'h{advance}')
+            # Use 'H' for advance (this hardware: H = advance to next frame)
+            success = self.send(f'H{advance}')
             if success:
                 self.status_msg = f"Advanced {advance} steps ({mode_label})"
                 return True
@@ -2744,8 +2739,8 @@ class FilmScanner:
             mode_label = "full-frame"
         
         if advance:
-            # Use 'H' for backup (opposite of advance / manual "forward")
-            success = self.send(f'H{advance}')
+            # Use 'h' for backup (opposite of advance)
+            success = self.send(f'h{advance}')
             if success:
                 self.status_msg = f"Backed up {advance} steps ({mode_label})"
                 return True
@@ -3187,7 +3182,7 @@ def capture():
                 scanner.log(f"Advance error: {e}")
                 scanner.status_msg = f"✓ Frame {scanner.frame_count} (advance failed)"
         elif scanner.mode == 'calibrated' and scanner.auto_advance:
-            # CALIBRATION MODE: Use fixed frame_advance distance (same direction as manual "forward")
+            # CALIBRATION MODE: Use fixed frame_advance distance (H = advance direction on this hardware)
             if scanner.frame_mode == "half":
                 advance = scanner.half_frame_advance or scanner.frame_advance
             else:
@@ -3195,7 +3190,7 @@ def capture():
             
             if advance:
                 time.sleep(0.3)
-                if scanner.send(f'h{advance}'):
+                if scanner.send(f'H{advance}'):
                     scanner.status_msg = f"✓ Frame {scanner.frame_count} → Ready for next"
                 else:
                     scanner.status_msg = f"✓ Frame {scanner.frame_count} (advance failed)"
