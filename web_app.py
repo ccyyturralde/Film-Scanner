@@ -278,18 +278,20 @@ class CaptureCardStream:
     CAPTURE_WIDTH = 1920
     CAPTURE_HEIGHT = 1080
 
-    # Preview stream is downscaled for performance; full 1080p used for captures only.
+    # MJPEG stream is downscaled to 960px in the capture thread for performance.
+    # A raw full-res numpy frame is kept alongside for alignment/sprocket detection.
     STREAM_OUTPUT_WIDTH = 960
 
     def __init__(self, scanner, device: Optional[Union[str, int]] = None, max_age: float = 2.0):
         self.scanner = scanner
         self.device = device if device is not None else find_capture_card_device()
-        self.output_width = self.STREAM_OUTPUT_WIDTH
+        self.output_width = self.STREAM_OUTPUT_WIDTH  # MJPEG stream at 960px
         self.capture_width = self.CAPTURE_WIDTH
         self.capture_height = self.CAPTURE_HEIGHT
         self.jpeg_quality = 80
         self.max_age = max_age
-        self.latest_frame: Optional[bytes] = None
+        self.latest_frame: Optional[bytes] = None      # 960px JPEG for MJPEG stream
+        self.latest_raw_frame: Optional[np.ndarray] = None  # Full-res numpy for alignment
         self.last_frame_ts: float = 0.0
         
         # Thread control
@@ -352,7 +354,7 @@ class CaptureCardStream:
         self.thread = None
 
     def get_frame(self, timeout: float = 0.8) -> Optional[bytes]:
-        """Return latest fresh frame (<= max_age seconds) or None."""
+        """Return latest fresh 960px JPEG for the MJPEG stream, or None."""
         deadline = time.time() + timeout
         while time.time() < deadline:
             with self.lock:
@@ -360,6 +362,20 @@ class CaptureCardStream:
                 ts = self.last_frame_ts
             if frame and (time.time() - ts) <= self.max_age:
                 return frame
+            time.sleep(0.05)
+        return None
+
+    def get_full_frame(self, timeout: float = 0.8) -> Optional[bytes]:
+        """Return latest full-resolution JPEG for alignment/sprocket detection."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with self.lock:
+                raw = self.latest_raw_frame
+                ts = self.last_frame_ts
+            if raw is not None and (time.time() - ts) <= self.max_age:
+                ret, jpeg = cv2.imencode('.jpg', raw, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                if ret:
+                    return jpeg.tobytes()
             time.sleep(0.05)
         return None
 
@@ -483,16 +499,20 @@ class CaptureCardStream:
                     continue
                 consecutive_failures = 0
 
-                # Resize for output if needed
+                # Keep full-res frame for alignment/sprocket detection
+                raw_frame = frame
+
+                # Resize for MJPEG stream output
                 if self.output_width and frame.shape[1] != self.output_width:
                     height = int(frame.shape[0] * (self.output_width / frame.shape[1]))
                     frame = cv2.resize(frame, (self.output_width, height), interpolation=cv2.INTER_AREA)
 
-                # Convert to JPEG
+                # Convert to JPEG (960px for stream)
                 ret, jpeg_bytes = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality])
                 if ret:
                     with self.lock:
                         self.latest_frame = jpeg_bytes.tobytes()
+                        self.latest_raw_frame = raw_frame
                         self.last_frame_ts = time.time()
                 
                 # Calculate FPS
@@ -695,16 +715,16 @@ class FilmScanner:
 
     def get_alignment_frame(self, timeout: float = 1.0) -> Tuple[Optional[bytes], bool]:
         """
-        Get RAW frame from capture card for alignment.
+        Get full-resolution frame from capture card for alignment.
         Returns (frame_bytes, used_stream_flag).
         
         NOTE: This always returns the original, non-inverted frame.
         The 'invert' setting in the UI is for viewing only and does
         NOT affect alignment detection.
         """
-        # Try live stream first
+        # Get full-res frame from live stream (not the 960px MJPEG version)
         if self.ensure_preview_stream():
-            frame = self.preview_stream.get_frame(timeout=timeout)
+            frame = self.preview_stream.get_full_frame(timeout=timeout)
             if frame:
                 return frame, True
 
@@ -3970,7 +3990,7 @@ def preview_video_stream():
                     pil_img = Image.fromarray(img)
                     pil_img = ImageOps.invert(pil_img)
                     buf = io.BytesIO()
-                    pil_img.save(buf, format='JPEG', quality=80)
+                    pil_img.save(buf, format='JPEG', quality=75)
                     out = buf.getvalue()
 
                 yield (b'--frame\r\n'
