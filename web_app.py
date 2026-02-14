@@ -25,7 +25,7 @@ import subprocess
 import time
 import os
 from datetime import datetime
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 from collections import deque
 import json
 import threading
@@ -239,18 +239,32 @@ def clear_usb_for_camera():
     return True
 
 def find_capture_card_device():
-    """Find the first available video capture device (e.g., /dev/video0)"""
-    for i in range(10):  # Check /dev/video0 through /dev/video9
+    """
+    Find the first available video capture device (e.g. USB capture card on Raspberry Pi).
+    - Prefer /dev/video0 through /dev/video9 (V4L2 on Linux).
+    - Fallback: try integer indices 0..9 in case device is available by index only.
+    Returns device path (str), device index (int), or None if none found.
+    """
+    # 1) Prefer /dev/video* (V4L2 on Raspberry Pi / Linux)
+    for i in range(10):
         device = f"/dev/video{i}"
         if os.path.exists(device):
             try:
-                # Try to open the device to verify it's accessible
                 cap = cv2.VideoCapture(device)
                 if cap.isOpened():
                     cap.release()
                     return device
             except Exception:
                 pass
+    # 2) Fallback: integer indices
+    for i in range(10):
+        try:
+            cap = cv2.VideoCapture(i)
+            if cap.isOpened():
+                cap.release()
+                return i
+        except Exception:
+            pass
     return None
 
 
@@ -276,9 +290,9 @@ class CaptureCardStream:
         "360p": (480, 360),
     }
 
-    def __init__(self, scanner, device: Optional[str] = None, output_width: int = 1280, max_age: float = 1.5):
+    def __init__(self, scanner, device: Optional[Union[str, int]] = None, output_width: int = 1280, max_age: float = 1.5):
         self.scanner = scanner
-        self.device = device or find_capture_card_device()
+        self.device = device if device is not None else find_capture_card_device()
         
         # Resolution settings
         self.output_width = output_width  # Width to resize output to (for web stream)
@@ -316,12 +330,15 @@ class CaptureCardStream:
         return self.thread is not None and self.thread.is_alive()
 
     def start(self) -> bool:
-        """Start stream if not already running."""
-        if not self.device:
-            self.last_error = "No capture card device found (check /dev/video*)"
-            self.scanner.log("✗ Capture card not found - check /dev/video* devices")
+        """Start stream if not already running. Re-searches for device if not found (e.g. plugged in later)."""
+        # Re-search for capture card when device is missing (e.g. first use or after disconnect)
+        if self.device is None:
+            self.device = find_capture_card_device()
+        if self.device is None:
+            self.last_error = "No capture card found (check USB /dev/video* or camera index)"
+            self.scanner.log("✗ Capture card not found - check USB connection and /dev/video* or camera index")
             return False
-        
+
         with self.lock:
             if self.is_running():
                 return True
@@ -575,10 +592,12 @@ class CaptureCardStream:
             self.scanner.log(f"   Output width: {self.output_width}px")
             
             cap = cv2.VideoCapture(self.device)
-            
+
             if not cap.isOpened():
                 self.last_error = f"Failed to open capture card {self.device}"
                 self.scanner.log(f"✗ Failed to open capture card {self.device}")
+                with self.lock:
+                    self.device = None  # Force re-search on next start()
                 return
 
             # Set capture resolution
@@ -3921,15 +3940,18 @@ def preview_video_stream():
     """
     MJPEG stream of live preview frames from capture card.
     Optional query param ?invert=1 for UI-only inversion.
+    Returns 503 if capture card cannot be started (client can show error and retry).
     """
     if not scanner.stream_enabled:
-        return jsonify({'success': False, 'message': 'Preview stream disabled'})
-    
+        return jsonify({'success': False, 'message': 'Preview stream disabled'}), 503
+
+    if not scanner.ensure_preview_stream():
+        msg = scanner.preview_stream.last_error or 'Unable to start capture card stream'
+        return jsonify({'success': False, 'message': msg}), 503
+
     invert = request.args.get('invert', '0') in ('1', 'true', 'True', 'yes')
 
     def generate():
-        # Start the stream once; avoid repeated restarts
-        scanner.ensure_preview_stream()
         while True:
             try:
                 frame = scanner.preview_stream.get_frame(timeout=0.5)

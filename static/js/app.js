@@ -552,12 +552,34 @@ async function capturePreviewVideo() {
 function startVideoStream() {
     const streamImg = document.getElementById('preview-video-stream');
     const previewContainer = document.getElementById('preview-container');
+    const timestamp = document.getElementById('preview-timestamp');
     const invertParam = previewState.inverted ? '1' : '0';
     // Stop auto-refresh of stills while streaming
     previewState.autoRefresh = false;
     const autoRefreshToggle = document.getElementById('auto-refresh-toggle');
     if (autoRefreshToggle) autoRefreshToggle.checked = false;
     stopAutoRefresh();
+
+    // If stream fails to load (e.g. 503 - capture card not found), show message and allow retry
+    streamImg.onerror = function() {
+        previewState.videoActive = false;
+        streamImg.src = '';
+        streamImg.style.display = 'none';
+        const stillImg = document.getElementById('preview-image');
+        if (stillImg) stillImg.style.display = 'block';
+        if (timestamp) timestamp.textContent = 'Video preview unavailable. Checking...';
+        // Get server message (triggers re-search for capture card)
+        apiCall('get_preview_video', {}).then(function(result) {
+            const msg = (result && !result.success && result.message)
+                ? result.message
+                : 'Capture card not found. Check USB connection and /dev/video* on the Pi, then try again.';
+            if (timestamp) timestamp.textContent = msg;
+            alert('Video preview failed: ' + msg);
+        }).catch(function() {
+            if (timestamp) timestamp.textContent = 'Capture card not found. Check USB and try Start Video Preview again.';
+            alert('Video preview failed. Check capture card USB connection and try again.');
+        });
+    };
 
     // Show stream element, hide still image to avoid confusion
     const stillImg = document.getElementById('preview-image');
@@ -566,7 +588,6 @@ function startVideoStream() {
     streamImg.style.display = 'block';
     previewContainer.style.display = 'block';
     previewState.videoActive = true;
-    const timestamp = document.getElementById('preview-timestamp');
     if (timestamp) timestamp.textContent = 'Video stream active...';
 }
 
