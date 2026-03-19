@@ -439,8 +439,47 @@ header h1 {
     transition: filter 0.2s ease;
 }
 
+#preview-media-wrapper {
+    position: relative;
+}
+
 #preview-image.inverted {
     filter: invert(1);
+}
+
+#preview-crosshair {
+    position: absolute;
+    width: 28px;
+    height: 28px;
+    border: 2px solid #ef4444;
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    z-index: 5;
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.7);
+}
+
+#preview-crosshair::before,
+#preview-crosshair::after {
+    content: '';
+    position: absolute;
+    background: #ef4444;
+}
+
+#preview-crosshair::before {
+    left: 50%;
+    top: -7px;
+    width: 2px;
+    height: 40px;
+    transform: translateX(-50%);
+}
+
+#preview-crosshair::after {
+    top: 50%;
+    left: -7px;
+    width: 40px;
+    height: 2px;
+    transform: translateY(-50%);
 }
 
 .preview-info {

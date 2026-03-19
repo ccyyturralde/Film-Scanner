@@ -86,11 +86,23 @@ def encode_preview_bytes(preview_bytes: bytes, invert: bool = False) -> str:
     return base64.b64encode(preview_bytes).decode('utf-8')
 
 
+CAMERA_USB_BRANDS = ("canon", "fujifilm", "fuji", "nikon", "sony", "olympus", "panasonic")
+
+
+def _camera_brand_from_lsusb_line(line: str) -> Optional[str]:
+    """Return matched camera brand name from an lsusb line, if present."""
+    line_lower = (line or "").lower()
+    for brand in CAMERA_USB_BRANDS:
+        if brand in line_lower:
+            return brand
+    return None
+
+
 def clear_usb_for_camera():
     """
     Thoroughly clear USB to make room for the camera connection.
-    This addresses issues where touchscreen or other USB devices 
-    cause gphoto2 to fail to detect the Canon R100.
+    This addresses issues where touchscreen or other USB devices
+    cause gphoto2 to fail to detect the camera.
     
     Kills:
     - gphoto2 processes
@@ -163,9 +175,9 @@ def clear_usb_for_camera():
     # Wait for processes to fully release USB
     time.sleep(0.5)
     
-    # Try to reset USB devices for Canon cameras (Linux only)
+    # Try to reset USB devices for known camera brands (Linux only)
     try:
-        # Find Canon camera USB devices
+        # Find camera USB devices
         lsusb_result = subprocess.run(
             ["lsusb"],
             capture_output=True,
@@ -175,11 +187,12 @@ def clear_usb_for_camera():
         
         if lsusb_result.returncode == 0:
             for line in lsusb_result.stdout.split('\n'):
-                if 'canon' in line.lower():
-                    print(f"   📷 Found Canon device: {line.strip()}")
+                brand = _camera_brand_from_lsusb_line(line)
+                if brand:
+                    print(f"   📷 Found {brand.title()} device: {line.strip()}")
                     
                     # Extract bus and device numbers for potential USB reset
-                    # Format: Bus 001 Device 005: ID 04a9:32da Canon Inc. ...
+                    # Format: Bus 001 Device 005: ID 04a9:32da Vendor Name ...
                     parts = line.split()
                     if len(parts) >= 6:
                         bus = parts[1]
@@ -549,6 +562,339 @@ class CaptureCardStream:
                 time.sleep(2.0)
 
 
+class GPhotoPreviewStream:
+    """
+    USB live preview via gphoto2 --capture-preview.
+    Useful when no HDMI capture card is connected.
+    """
+
+    STREAM_OUTPUT_WIDTH = 960
+
+    def __init__(self, scanner, max_age: float = 3.0):
+        self.scanner = scanner
+        self.device = "gphoto2"
+        self.output_width = self.STREAM_OUTPUT_WIDTH
+        self.capture_width = 0
+        self.capture_height = 0
+        self.jpeg_quality = 80
+        self.max_age = max_age
+
+        self.latest_frame: Optional[bytes] = None
+        self.latest_raw_frame: Optional[np.ndarray] = None
+        self.last_frame_ts: float = 0.0
+
+        self.thread: Optional[threading.Thread] = None
+        self.stop_event = threading.Event()
+        self.lock = threading.Lock()
+        self.last_error: Optional[str] = None
+
+        self.actual_width = 0
+        self.actual_height = 0
+        self.fps = 0.0
+
+    def is_running(self) -> bool:
+        return self.thread is not None and self.thread.is_alive()
+
+    def start(self) -> bool:
+        if shutil.which("gphoto2") is None:
+            self.last_error = "gphoto2 not found in PATH"
+            self.scanner.log("✗ gphoto2 not found - cannot start USB live preview")
+            return False
+
+        with self.lock:
+            if self.is_running():
+                return True
+            self.stop_event.clear()
+            self.thread = threading.Thread(target=self._run_stream, daemon=True)
+            self.thread.start()
+        return True
+
+    def stop(self):
+        self.stop_event.set()
+        if self.thread:
+            self.thread.join(timeout=1.2)
+        self.thread = None
+
+    def get_frame(self, timeout: float = 0.8) -> Optional[bytes]:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with self.lock:
+                frame = self.latest_frame
+                ts = self.last_frame_ts
+            if frame and (time.time() - ts) <= self.max_age:
+                return frame
+            time.sleep(0.05)
+        return None
+
+    def get_full_frame(self, timeout: float = 0.8) -> Optional[bytes]:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with self.lock:
+                raw = self.latest_raw_frame
+                ts = self.last_frame_ts
+            if raw is not None and (time.time() - ts) <= self.max_age:
+                ret, jpeg = cv2.imencode('.jpg', raw, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                if ret:
+                    return jpeg.tobytes()
+            time.sleep(0.05)
+        return None
+
+    def get_resolution_info(self) -> dict:
+        return {
+            "capture_width": self.capture_width,
+            "capture_height": self.capture_height,
+            "output_width": self.output_width,
+            "actual_width": self.actual_width,
+            "actual_height": self.actual_height,
+            "fps": self.fps,
+            "jpeg_quality": self.jpeg_quality,
+        }
+
+    def restart_stream(self):
+        was_running = self.is_running()
+        if was_running:
+            self.stop()
+            time.sleep(0.2)
+            self.start()
+
+    def _run_stream(self):
+        frame_count = 0
+        fps_start_time = time.time()
+        consecutive_failures = 0
+        max_failures_before_log = 10
+
+        self.scanner.log("▶ Starting USB live preview stream via gphoto2")
+        while not self.stop_event.is_set():
+            lock_acquired = False
+            try:
+                lock_acquired = self.scanner.camera_op_lock.acquire(timeout=0.8)
+                if not lock_acquired:
+                    time.sleep(0.05)
+                    continue
+
+                result = subprocess.run(
+                    ["gphoto2", "--capture-preview", "--stdout"],
+                    capture_output=True,
+                    timeout=3,
+                )
+                preview_bytes = result.stdout or b""
+
+                if result.returncode != 0 and not preview_bytes:
+                    consecutive_failures += 1
+                    err = (result.stderr or b"").decode("utf-8", errors="ignore").strip()
+                    if err:
+                        self.last_error = err
+                    if consecutive_failures >= max_failures_before_log and consecutive_failures % max_failures_before_log == 0:
+                        self.scanner.log(f"⚠ USB preview retries: {consecutive_failures} ({self.last_error or 'unknown gphoto2 error'})")
+                    time.sleep(0.1)
+                    continue
+
+                arr = np.frombuffer(preview_bytes, dtype=np.uint8)
+                img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                if img is None:
+                    consecutive_failures += 1
+                    self.last_error = "gphoto2 returned non-image preview bytes"
+                    time.sleep(0.08)
+                    continue
+
+                consecutive_failures = 0
+                self.actual_width = int(img.shape[1])
+                self.actual_height = int(img.shape[0])
+                self.capture_width = self.actual_width
+                self.capture_height = self.actual_height
+
+                stream_img = img
+                if self.output_width and img.shape[1] != self.output_width:
+                    out_h = int(img.shape[0] * (self.output_width / img.shape[1]))
+                    stream_img = cv2.resize(img, (self.output_width, out_h), interpolation=cv2.INTER_AREA)
+
+                ok, jpeg = cv2.imencode('.jpg', stream_img, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality])
+                if ok:
+                    with self.lock:
+                        self.latest_frame = jpeg.tobytes()
+                        self.latest_raw_frame = img
+                        self.last_frame_ts = time.time()
+
+                frame_count += 1
+                elapsed = time.time() - fps_start_time
+                if elapsed >= 2.0:
+                    self.fps = frame_count / elapsed
+                    frame_count = 0
+                    fps_start_time = time.time()
+
+                time.sleep(0.03)
+            except subprocess.TimeoutExpired:
+                self.last_error = "gphoto2 preview timed out"
+                time.sleep(0.1)
+            except Exception as e:
+                self.last_error = str(e)
+                time.sleep(0.1)
+            finally:
+                if lock_acquired:
+                    try:
+                        self.scanner.camera_op_lock.release()
+                    except Exception:
+                        pass
+
+
+class HybridPreviewStream:
+    """Preview abstraction that can use capture card or gphoto2 live preview."""
+
+    def __init__(self, scanner):
+        self.scanner = scanner
+        self.capture_card_stream = CaptureCardStream(scanner)
+        self.gphoto_stream = GPhotoPreviewStream(scanner)
+        self.active_backend: Optional[str] = None  # capture_card | gphoto
+        self._last_error: Optional[str] = None
+
+    @property
+    def device(self):
+        if self.active_backend == "gphoto":
+            return self.gphoto_stream.device
+        return self.capture_card_stream.device
+
+    @property
+    def last_error(self):
+        if self.active_backend == "gphoto":
+            return self.gphoto_stream.last_error or self._last_error
+        if self.active_backend == "capture_card":
+            return self.capture_card_stream.last_error or self._last_error
+        return self._last_error
+
+    @property
+    def capture_width(self):
+        stream = self._active_stream() or self.capture_card_stream
+        return stream.capture_width
+
+    @property
+    def capture_height(self):
+        stream = self._active_stream() or self.capture_card_stream
+        return stream.capture_height
+
+    @property
+    def output_width(self):
+        stream = self._active_stream() or self.capture_card_stream
+        return stream.output_width
+
+    @property
+    def fps(self):
+        stream = self._active_stream()
+        return stream.fps if stream else 0.0
+
+    def _active_stream(self):
+        if self.active_backend == "capture_card":
+            return self.capture_card_stream
+        if self.active_backend == "gphoto":
+            return self.gphoto_stream
+        return None
+
+    def is_running(self) -> bool:
+        stream = self._active_stream()
+        return bool(stream and stream.is_running())
+
+    def _build_backend_order(self):
+        pref = getattr(self.scanner, "preview_source_preference", "auto")
+        if pref == "capture_card":
+            return ["capture_card"]
+        if pref == "gphoto":
+            return ["gphoto"]
+        return ["capture_card", "gphoto"]
+
+    def _start_backend(self, backend: str) -> bool:
+        if backend == "capture_card":
+            if self.capture_card_stream.start():
+                self.active_backend = "capture_card"
+                self._last_error = None
+                self.scanner.log("✓ Preview source: capture card")
+                return True
+            self._last_error = self.capture_card_stream.last_error
+            return False
+
+        if backend == "gphoto":
+            if not self.scanner.check_camera(force=False):
+                self._last_error = "Camera not connected for gphoto preview"
+                return False
+            if self.gphoto_stream.start():
+                self.active_backend = "gphoto"
+                self._last_error = None
+                self.scanner.log("✓ Preview source: USB live preview (gphoto2)")
+                return True
+            self._last_error = self.gphoto_stream.last_error
+            return False
+
+        self._last_error = f"Unknown preview backend: {backend}"
+        return False
+
+    def start(self) -> bool:
+        if self.is_running():
+            return True
+
+        errors = []
+        for backend in self._build_backend_order():
+            if self._start_backend(backend):
+                return True
+            errors.append(f"{backend}: {self._last_error or 'failed'}")
+
+        self.active_backend = None
+        self._last_error = "; ".join(errors) if errors else "No preview backend available"
+        self.scanner.log(f"✗ Unable to start preview stream ({self._last_error})")
+        return False
+
+    def stop(self):
+        self.capture_card_stream.stop()
+        self.gphoto_stream.stop()
+        self.active_backend = None
+
+    def get_frame(self, timeout: float = 0.8) -> Optional[bytes]:
+        if not self.is_running() and not self.start():
+            return None
+
+        stream = self._active_stream()
+        if not stream:
+            return None
+
+        frame = stream.get_frame(timeout=timeout)
+        if frame is not None:
+            return frame
+
+        # Auto mode failover: if capture card stalls, try gphoto preview.
+        if self.scanner.preview_source_preference == "auto" and self.active_backend == "capture_card":
+            self.capture_card_stream.stop()
+            if self._start_backend("gphoto"):
+                return self.gphoto_stream.get_frame(timeout=timeout)
+        return None
+
+    def get_full_frame(self, timeout: float = 0.8) -> Optional[bytes]:
+        if not self.is_running() and not self.start():
+            return None
+
+        stream = self._active_stream()
+        if not stream:
+            return None
+
+        frame = stream.get_full_frame(timeout=timeout)
+        if frame is not None:
+            return frame
+
+        if self.scanner.preview_source_preference == "auto" and self.active_backend == "capture_card":
+            self.capture_card_stream.stop()
+            if self._start_backend("gphoto"):
+                return self.gphoto_stream.get_full_frame(timeout=timeout)
+        return None
+
+    def get_resolution_info(self) -> dict:
+        stream = self._active_stream() or self.capture_card_stream
+        info = stream.get_resolution_info()
+        info["backend"] = self.active_backend or "none"
+        return info
+
+    def restart_stream(self):
+        stream = self._active_stream()
+        if stream:
+            stream.restart_stream()
+        else:
+            self.start()
+
 # Arduino USB Vendor/Product IDs for automatic detection
 ARDUINO_USB_IDS = {
     # Arduino Uno R3 and compatible
@@ -659,15 +1005,20 @@ class FilmScanner:
         # Lock for entire capture+advance flow so we never run two at once (avoids double capture / partial advance)
         self.capture_workflow_lock = threading.Lock()
 
-        # Stream control: Using capture card for preview/viewfinder
-        # gphoto2 is now only used for autofocus and capture (no viewfinder/preview)
-        self.stream_enabled = True  # Stream enabled via capture card (not gphoto2)
+        # Stream control:
+        # - capture card when available
+        # - optional gphoto2 USB live preview (e.g. Fujifilm X-T5 without capture card)
+        self.stream_enabled = True
+        preview_pref = os.environ.get("FS_PREVIEW_SOURCE", "auto").strip().lower()
+        if preview_pref not in ("auto", "capture_card", "gphoto"):
+            preview_pref = "auto"
+        self.preview_source_preference = preview_pref
 
-        # Capture card device (auto-detected or can be set)
+        # Capture card device placeholder (legacy field retained for compatibility)
         self.capture_card_device = None
 
-        # Live preview stream from capture card - always 1080p
-        self.preview_stream = CaptureCardStream(self)
+        # Live preview stream abstraction (capture card and/or gphoto2)
+        self.preview_stream = HybridPreviewStream(self)
 
         # Load persisted alignment settings (best-effort)
         try:
@@ -697,25 +1048,25 @@ class FilmScanner:
 
     def ensure_preview_stream(self) -> bool:
         """
-        Ensure capture card preview stream is running.
+        Ensure preview stream is running (capture card or gphoto2).
         Returns True if stream is running or successfully started, False otherwise.
         """
         try:
             return self.preview_stream.start()
         except Exception as e:
-            self.log(f"✗ Failed to start capture card stream: {e}")
+            self.log(f"✗ Failed to start preview stream: {e}")
             return False
 
     def stop_preview_stream(self):
-        """Stop capture card preview stream (safe to call even if not running)."""
+        """Stop preview stream (safe to call even if not running)."""
         try:
             self.preview_stream.stop()
         except Exception as e:
-            self.log(f"✗ Failed to stop capture card stream: {e}")
+            self.log(f"✗ Failed to stop preview stream: {e}")
 
     def get_alignment_frame(self, timeout: float = 1.0) -> Tuple[Optional[bytes], bool]:
         """
-        Get full-resolution frame from capture card for alignment.
+        Get full-resolution frame from active preview backend for alignment.
         Returns (frame_bytes, used_stream_flag).
         
         NOTE: This always returns the original, non-inverted frame.
@@ -1033,14 +1384,14 @@ class FilmScanner:
 
         Args:
             retry_with_usb_clear: If camera not found, clear USB and retry
-            max_retries: Number of retry attempts (Canon cameras need multiple tries)
+            max_retries: Number of retry attempts (some cameras need multiple tries)
             force: If True, bypass rate limiting and check immediately
             
-        IMPORTANT: Running gphoto2 commands frequently can reset Canon camera
-        date/time settings. This method is rate-limited to prevent that issue.
+        IMPORTANT: Running gphoto2 commands too frequently can destabilize some
+        cameras (including occasional date/time resets). This is rate-limited.
         """
         # Rate limiting: Don't check camera more than once every 60 seconds
-        # unless forced. Frequent gphoto2 calls can reset Canon date/time!
+        # unless forced. Frequent gphoto2 calls can disturb camera state.
         CAMERA_CHECK_INTERVAL = 60  # seconds
         
         current_time = time.time()
@@ -1062,28 +1413,28 @@ class FilmScanner:
             
             print("\n📷 Checking camera connection...")
             
-            # First, check if Canon is visible on USB at all
+            # First, check if a known camera brand is visible on USB
             try:
                 lsusb_result = subprocess.run(
                     ["lsusb"],
                     capture_output=True, text=True, timeout=5
                 )
-                canon_on_usb = False
+                camera_on_usb = False
                 if lsusb_result.returncode == 0:
                     for line in lsusb_result.stdout.split('\n'):
-                        if 'canon' in line.lower():
+                        if _camera_brand_from_lsusb_line(line):
                             print(f"   USB: {line.strip()}")
-                            canon_on_usb = True
-                    if not canon_on_usb:
-                        print("   USB: No Canon device found on USB bus")
+                            camera_on_usb = True
+                    if not camera_on_usb:
+                        print("   USB: No known camera device found on USB bus")
             except Exception as e:
                 print(f"   USB check error: {e}")
             
-            # Try detection with retries (Canon R100 is finicky)
+            # Try detection with retries (some camera USB/PTP stacks are finicky)
             for attempt in range(max_retries):
                 if attempt > 0:
                     print(f"   Retry {attempt}/{max_retries-1}...")
-                    time.sleep(1.5)  # Canon needs time between attempts
+                    time.sleep(1.5)  # Camera often needs a pause between attempts
                 
                 # Run gphoto2 --auto-detect
                 result = subprocess.run(
@@ -1216,10 +1567,10 @@ class FilmScanner:
     
     def get_camera_settings(self):
         """Fetch basic exposure settings (best-effort; keys may vary by camera)."""
-        keys = {
-            "aperture": "aperture",
-            "iso": "iso",
-            "shutterspeed": "shutterspeed",
+        key_candidates = {
+            "aperture": ("aperture", "f-number", "fnumber"),
+            "iso": ("iso", "isoauto", "autoiso"),
+            "shutterspeed": ("shutterspeed", "shutter-speed", "shutterspeed2"),
         }
         values = {}
 
@@ -1239,36 +1590,41 @@ class FilmScanner:
                 return None
             return None
 
-        for name, key in keys.items():
-            values[name] = read_config(key)
+        for name, candidates in key_candidates.items():
+            value = None
+            for key in candidates:
+                value = read_config(key)
+                if value is not None:
+                    break
+            values[name] = value
 
         return values
     
     def check_viewfinder_state(self):
         """
-        Viewfinder state - always returns True since we use capture card for preview.
-        gphoto2 viewfinder is not used (only autofocus and capture).
+        Viewfinder state.
+        Returns True when preview streaming is enabled.
         """
-        self.viewfinder_enabled = True  # Always enabled via capture card
+        self.viewfinder_enabled = self.stream_enabled
         return True
 
     def enable_viewfinder(self):
         """
-        Viewfinder disabled - using capture card instead.
-        gphoto2 is only used for autofocus and capture.
+        Legacy compatibility method.
+        Preview stream is managed separately and remains always-on when enabled.
         """
-        return False
+        return self.stream_enabled
     
     def disable_viewfinder(self):
         """
-        Viewfinder disabled - using capture card instead.
-        gphoto2 is only used for autofocus and capture.
+        Legacy compatibility method.
+        Preview stream is managed separately and remains always-on when enabled.
         """
-        return False
+        return self.stream_enabled
     
     def capture_image(self, retry=True):
         """Capture image to camera SD card with exclusive access"""
-        # No preview stream to pause - using capture card for preview
+        # Preview stream runs independently from still capture.
 
         # Ensure exclusive access - RLock allows recursive acquisition by same thread
         with self.camera_op_lock:
@@ -1319,15 +1675,61 @@ class FilmScanner:
 
     def capture_preview_bytes(self):
         """
-        Get preview frame from capture card.
-        gphoto2 is only used for autofocus and capture (no viewfinder/preview).
+        Get preview frame from active preview backend.
         """
         if not self.ensure_preview_stream():
-            raise RuntimeError("Unable to start capture card stream")
+            raise RuntimeError("Unable to start preview stream")
         frame = self.preview_stream.get_frame(timeout=2.0)
         if not frame:
-            raise RuntimeError("No frame available from capture card")
+            raise RuntimeError("No frame available from preview backend")
         return frame
+
+    def sample_preview_rgb(self, norm_x: float, norm_y: float, sample_radius: int = 2):
+        """
+        Sample RGB from the active preview stream at normalized coordinates.
+        Returns dict with rgb values in 0-255 range and sampling metadata.
+        """
+        frame = self.preview_stream.get_frame(timeout=1.5)
+        if not frame:
+            raise RuntimeError("No frame available from preview stream")
+
+        arr = np.frombuffer(frame, dtype=np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img is None:
+            raise RuntimeError("Failed to decode preview frame")
+
+        h, w = img.shape[:2]
+        if w <= 0 or h <= 0:
+            raise RuntimeError("Invalid preview frame dimensions")
+
+        x = int(round(max(0.0, min(1.0, norm_x)) * (w - 1)))
+        y = int(round(max(0.0, min(1.0, norm_y)) * (h - 1)))
+        radius = max(0, min(int(sample_radius), 25))
+
+        x0 = max(0, x - radius)
+        x1 = min(w - 1, x + radius)
+        y0 = max(0, y - radius)
+        y1 = min(h - 1, y + radius)
+
+        roi = img[y0:y1 + 1, x0:x1 + 1]
+        if roi.size == 0:
+            raise RuntimeError("Sampling region was empty")
+
+        # OpenCV uses BGR ordering; convert to RGB-like output expected by users.
+        b_mean = float(np.mean(roi[:, :, 0]))
+        g_mean = float(np.mean(roi[:, :, 1]))
+        r_mean = float(np.mean(roi[:, :, 2]))
+
+        return {
+            "rgb": {
+                "r": int(round(r_mean)),
+                "g": int(round(g_mean)),
+                "b": int(round(b_mean)),
+            },
+            "pixel": {"x": x, "y": y},
+            "sample_box": {"x0": x0, "y0": y0, "x1": x1, "y1": y1},
+            "frame_size": {"width": w, "height": h},
+        }
 
     def auto_align(self, max_step=600, min_step=50, margin_px=60):
         """
@@ -1349,7 +1751,7 @@ class FilmScanner:
         # Get frame
         frame_bytes, stream_used = self.get_alignment_frame(timeout=1.0)
         if not frame_bytes:
-            self.log("✗ No frame from capture card")
+            self.log("✗ No frame from preview stream")
             return False, "No frame", {"mode": "error", "total_steps": 0, "confidence": 0}
         
         self.log(f"   Got frame: {len(frame_bytes)} bytes (stream={stream_used})")
@@ -2181,14 +2583,22 @@ class FilmScanner:
                 # Store result for UI
                 self.last_sprocket_result = result
                 
-                # Update calibration if we got good data (and smoothed pitch for stable advance)
+                # Update calibration if we got good data — with validation
                 if result.sprocket_pitch_px:
-                    self.sprocket_pitch_px = result.sprocket_pitch_px
-                    if self.sprocket_pitch_px_smoothed is None:
-                        self.sprocket_pitch_px_smoothed = result.sprocket_pitch_px
-                    else:
-                        self.sprocket_pitch_px_smoothed = 0.75 * self.sprocket_pitch_px_smoothed + 0.25 * result.sprocket_pitch_px
-                    self.px_per_mm = result.px_per_mm
+                    new_p = result.sprocket_pitch_px
+                    # Reject wild outliers that would corrupt the smoothed pitch
+                    accept = True
+                    if self.sprocket_pitch_px_smoothed is not None:
+                        ratio = new_p / self.sprocket_pitch_px_smoothed
+                        if ratio < 0.65 or ratio > 1.35:
+                            accept = False
+                    if accept:
+                        self.sprocket_pitch_px = new_p
+                        if self.sprocket_pitch_px_smoothed is None:
+                            self.sprocket_pitch_px_smoothed = new_p
+                        else:
+                            self.sprocket_pitch_px_smoothed = 0.8 * self.sprocket_pitch_px_smoothed + 0.2 * new_p
+                        self.px_per_mm = result.px_per_mm
                 
                 sprocket_count = len(result.sprocket_holes)
                 offset = result.offset_px
@@ -2288,12 +2698,24 @@ class FilmScanner:
                 self.log("⚠ No sprocket calibration, falling back to gap detection")
                 return self.advance_and_align(max_iters)
             
-            # Use smoothed pitch for advance to avoid frame-to-frame jitter (reduces overshoot/undershoot)
             new_pitch = result.sprocket_pitch_px
+            
+            # --- Validate detected pitch ---
+            # Reject obviously wrong detections (e.g. clear base merging holes).
+            # If we have a smoothed reference, new pitch must be within ±35%.
+            if self.sprocket_pitch_px_smoothed is not None:
+                ratio = new_pitch / self.sprocket_pitch_px_smoothed
+                if ratio < 0.65 or ratio > 1.35:
+                    self.log(f"   ⚠ Detected pitch {new_pitch:.1f}px rejected "
+                             f"(smoothed={self.sprocket_pitch_px_smoothed:.1f}px, "
+                             f"ratio={ratio:.2f}). Using smoothed value.")
+                    new_pitch = self.sprocket_pitch_px_smoothed  # Keep old value
+            
+            # Update smoothed pitch (EMA)
             if self.sprocket_pitch_px_smoothed is None:
                 self.sprocket_pitch_px_smoothed = new_pitch
             else:
-                self.sprocket_pitch_px_smoothed = 0.75 * self.sprocket_pitch_px_smoothed + 0.25 * new_pitch
+                self.sprocket_pitch_px_smoothed = 0.8 * self.sprocket_pitch_px_smoothed + 0.2 * new_pitch
             pitch_for_advance = self.sprocket_pitch_px_smoothed
             self.sprocket_pitch_px = new_pitch
             
@@ -2305,7 +2727,8 @@ class FilmScanner:
             steps_per_frame = round(frame_pitch_px / px_per_step)
             steps_per_frame = max(1, steps_per_frame)
             
-            self.log(f"   Frame pitch: {frame_pitch_px:.1f}px (smoothed), Steps: {steps_per_frame}")
+            self.log(f"   Frame pitch: {frame_pitch_px:.1f}px (smoothed), Steps: {steps_per_frame}, "
+                     f"confidence: {result.confidence:.0%}, sprockets: {len(result.sprocket_holes)}")
             
             # Move forward one frame — wait for Arduino to confirm completion
             # so we don't stack another command while the motor is still running.
@@ -2317,14 +2740,22 @@ class FilmScanner:
             success, msg, info = self.auto_align_sprocket(max_iterations=12, tolerance_px=15)
             
             info["advance_steps"] = steps_per_frame
-            # Refine px_per_step from observed movement (helps accuracy over time)
+            # Refine px_per_step from observed movement — but ONLY when confident.
+            # Bad detections on clear base can produce garbage ratios that drift
+            # px_per_step to unusable values.
             align_steps = info.get("total_steps", 0)
             total_steps_used = steps_per_frame + align_steps
-            if total_steps_used > 50 and frame_pitch_px > 0:
+            align_confidence = info.get("confidence", 0)
+            if (total_steps_used > 50 and frame_pitch_px > 0
+                    and align_confidence >= 0.5
+                    and abs(align_steps) < steps_per_frame * 0.25):
+                # Only refine when alignment was good and correction was small
                 observed_px_per_step = frame_pitch_px / total_steps_used
                 old_pps = self.px_per_step if hasattr(self, 'px_per_step') and self.px_per_step else 3.0
-                self.px_per_step = 0.9 * old_pps + 0.1 * observed_px_per_step
-                info["px_per_step_refined"] = self.px_per_step
+                # Clamp to ±30% of current value to prevent runaway drift
+                if 0.7 * old_pps <= observed_px_per_step <= 1.3 * old_pps:
+                    self.px_per_step = 0.9 * old_pps + 0.1 * observed_px_per_step
+                    info["px_per_step_refined"] = self.px_per_step
             return success, msg, info
             
         except Exception as e:
@@ -2371,10 +2802,10 @@ class FilmScanner:
 
     def detect_alignment_roi(self, padding: float = 0.0, min_area_ratio: float = 0.05):
         """
-        Detect alignment ROI from capture card frame.
+        Detect alignment ROI from preview stream frame.
         gphoto2 is only used for autofocus and capture (not preview).
         """
-        # Get frame from capture card
+        # Get frame from active preview stream
         frame_bytes, _ = self.get_alignment_frame(timeout=2.0)
         if not frame_bytes:
             return None
@@ -2790,6 +3221,8 @@ class FilmScanner:
                 'stream_resolution': f"{self.preview_stream.capture_width}x{self.preview_stream.capture_height}",
                 'stream_output_width': self.preview_stream.output_width,
                 'stream_fps': round(self.preview_stream.fps, 1),
+                'preview_source_preference': self.preview_source_preference,
+                'preview_source_active': self.preview_stream.get_resolution_info().get('backend', 'none'),
                 'motor_advance_reversed': self.motor_advance_reversed,
             }
         
@@ -3655,7 +4088,7 @@ def set_half_frame_advance_route():
 @app.route('/api/preview_roi', methods=['POST'])
 def preview_roi_route():
     """
-    Detect ROI from capture card frame and optionally return an overlay.
+    Detect ROI from preview stream frame and optionally return an overlay.
     Request JSON: {apply_roi: bool, overlay: bool}
     """
     data = request.json or {}
@@ -3711,11 +4144,19 @@ def preview_roi_route():
 @app.route('/api/capture_card_diagnostic', methods=['POST'])
 def capture_card_diagnostic_route():
     """
-    Diagnostic endpoint to test capture card and gap detection.
+    Diagnostic endpoint to test preview stream and gap detection.
     Returns detailed info about what the detector sees.
     """
+    active_backend = scanner.preview_stream.get_resolution_info().get('backend', 'none')
     result = {
         'success': False,
+        'preview': {
+            'backend': active_backend,
+            'device': scanner.preview_stream.device,
+            'is_running': scanner.preview_stream.is_running(),
+            'last_error': scanner.preview_stream.last_error,
+        },
+        # Backward compatibility for existing clients.
         'capture_card': {
             'device': scanner.preview_stream.device,
             'is_running': scanner.preview_stream.is_running(),
@@ -3810,19 +4251,19 @@ def logs_route():
     return jsonify({'success': True, 'logs': scanner.get_logs(limit=limit)})
 @app.route('/api/detect_alignment_roi', methods=['POST'])
 def detect_alignment_roi_route():
-    """Detect alignment ROI from capture card frame"""
+    """Detect alignment ROI from preview stream frame."""
     if not scanner.stream_enabled:
         return jsonify({'success': False, 'message': 'Preview stream disabled'})
     
     roi = scanner.detect_alignment_roi()
     if roi:
-        scanner.status_msg = "✓ ROI detected from capture card"
+        scanner.status_msg = "✓ ROI detected from preview stream"
         scanner.broadcast_status()
         return jsonify({'success': True, 'roi': roi})
     else:
         scanner.status_msg = "✗ ROI detection failed"
         scanner.broadcast_status()
-        return jsonify({'success': False, 'message': 'ROI detection failed - check capture card'})
+        return jsonify({'success': False, 'message': 'ROI detection failed - check preview stream'})
 @app.route('/api/calibrate', methods=['POST'])
 def calibrate():
     """Start or continue calibration"""
@@ -3890,7 +4331,7 @@ def new_strip():
     return jsonify({'success': True})
 @app.route('/api/get_preview', methods=['POST'])
 def get_preview():
-    """Get a single frame from the capture card preview stream"""
+    """Get a single frame from the active preview stream."""
     data = request.json or {}
     invert = bool(data.get('invert')) if isinstance(data, dict) else False
 
@@ -3898,17 +4339,18 @@ def get_preview():
         return jsonify({'success': False, 'message': 'Preview stream disabled'})
 
     if not scanner.ensure_preview_stream():
-        return jsonify({'success': False, 'message': 'Unable to start capture card stream'})
+        return jsonify({'success': False, 'message': 'Unable to start preview stream'})
 
     frame = scanner.preview_stream.get_frame(timeout=1.5)
     if not frame:
-        return jsonify({'success': False, 'message': 'No frame available from capture card'})
+        return jsonify({'success': False, 'message': 'No frame available from preview stream'})
 
     try:
         image_data = encode_preview_bytes(frame, invert=invert)
-        scanner.status_msg = "✓ Capture card preview frame"
+        backend = scanner.preview_stream.get_resolution_info().get('backend', 'unknown')
+        scanner.status_msg = f"✓ Preview frame ({backend})"
         scanner.broadcast_status()
-        return jsonify({'success': True, 'image': image_data, 'source': 'capture_card'})
+        return jsonify({'success': True, 'image': image_data, 'source': backend})
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)})
 
@@ -3916,7 +4358,7 @@ def get_preview():
 @app.route('/api/get_preview_video', methods=['POST'])
 def get_preview_video():
     """
-    Get a single frame from the capture card video stream for testing.
+    Get a single frame from the active preview video stream for testing.
     Optional invert (UI-only) via JSON {invert: true}.
     """
     data = request.json or {}
@@ -3926,33 +4368,77 @@ def get_preview_video():
         return jsonify({'success': False, 'message': 'Preview stream disabled'})
 
     if not scanner.ensure_preview_stream():
-        return jsonify({'success': False, 'message': 'Unable to start capture card stream'})
+        return jsonify({'success': False, 'message': 'Unable to start preview stream'})
 
     frame = scanner.preview_stream.get_frame(timeout=1.5)
     if not frame:
-        return jsonify({'success': False, 'message': 'No frame available from capture card'})
+        return jsonify({'success': False, 'message': 'No frame available from preview stream'})
 
     try:
         image_data = encode_preview_bytes(frame, invert=invert)
-        scanner.status_msg = "✓ Capture card video frame"
+        backend = scanner.preview_stream.get_resolution_info().get('backend', 'unknown')
+        scanner.status_msg = f"✓ Preview video frame ({backend})"
         scanner.broadcast_status()
-        return jsonify({'success': True, 'image': image_data, 'source': 'capture_card'})
+        return jsonify({'success': True, 'image': image_data, 'source': backend})
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/preview_rgb', methods=['POST'])
+def preview_rgb_route():
+    """
+    Sample RGB values from a user-selected point in the live preview.
+    Request JSON:
+      - x_norm: float in [0,1]
+      - y_norm: float in [0,1]
+      - radius: optional int sample radius in pixels (default 2)
+    """
+    data = request.json or {}
+    try:
+        x_norm = float(data.get('x_norm', 0.5))
+        y_norm = float(data.get('y_norm', 0.5))
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'message': 'x_norm and y_norm must be numeric'}), 400
+
+    if not (0.0 <= x_norm <= 1.0 and 0.0 <= y_norm <= 1.0):
+        return jsonify({'success': False, 'message': 'x_norm and y_norm must be between 0.0 and 1.0'}), 400
+
+    radius_raw = data.get('radius', 2)
+    try:
+        radius = int(radius_raw)
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'message': 'radius must be an integer'}), 400
+
+    if not scanner.stream_enabled:
+        return jsonify({'success': False, 'message': 'Preview stream disabled'}), 400
+
+    if not scanner.ensure_preview_stream():
+        return jsonify({'success': False, 'message': scanner.preview_stream.last_error or 'Unable to start preview stream'}), 503
+
+    try:
+        sampled = scanner.sample_preview_rgb(norm_x=x_norm, norm_y=y_norm, sample_radius=radius)
+        backend = scanner.preview_stream.get_resolution_info().get('backend', 'unknown')
+        return jsonify({
+            'success': True,
+            'source': backend,
+            **sampled,
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
 
 
 @app.route('/api/preview_video_stream')
 def preview_video_stream():
     """
-    MJPEG stream of live preview frames from capture card.
+    MJPEG stream of live preview frames from active backend.
     Optional query param ?invert=1 for UI-only inversion.
-    Returns 503 if capture card cannot be started (client can show error and retry).
+    Returns 503 if preview stream cannot be started (client can show error and retry).
     """
     if not scanner.stream_enabled:
         return jsonify({'success': False, 'message': 'Preview stream disabled'}), 503
 
     if not scanner.ensure_preview_stream():
-        msg = scanner.preview_stream.last_error or 'Unable to start capture card stream'
+        msg = scanner.preview_stream.last_error or 'Unable to start preview stream'
         return jsonify({'success': False, 'message': msg}), 503
 
     invert = request.args.get('invert', '0') in ('1', 'true', 'True', 'yes')
@@ -4020,7 +4506,7 @@ def autofocus_route():
 def camera_settings_route():
     """Return basic exposure settings (aperture/iso/shutter) if available.
     
-    NOTE: Uses rate-limited camera check to avoid Canon date/time reset issue.
+    NOTE: Uses rate-limited camera check to avoid repeated gphoto2 perturbing camera state.
     """
     # Use rate-limited check - settings request is less critical
     if not scanner.check_camera(force=False):
@@ -4036,7 +4522,7 @@ def refresh_camera_route():
     Use this to reconnect to the camera after power cycling or USB reconnect.
     This bypasses the rate limiting that prevents frequent checks.
     
-    NOTE: Frequent gphoto2 commands can reset Canon camera date/time settings.
+    NOTE: Frequent gphoto2 commands can disturb some camera settings/state.
     Only use this when you need to verify camera connection.
     """
     # Force an immediate camera check
@@ -4087,14 +4573,51 @@ def update_step_sizes():
 
 @app.route('/api/stream/info', methods=['GET'])
 def stream_info():
-    """Get stream status (fixed 1080p)."""
+    """Get stream status for active preview backend."""
+    info = scanner.preview_stream.get_resolution_info()
     return jsonify({
         'success': True,
         'stream_enabled': scanner.stream_enabled,
         'stream_running': scanner.preview_stream.is_running(),
-        'resolution': scanner.preview_stream.get_resolution_info(),
+        'resolution': info,
+        'preview_source_preference': scanner.preview_source_preference,
+        'preview_source_active': info.get('backend', 'none'),
         'device': scanner.preview_stream.device,
         'last_error': scanner.preview_stream.last_error,
+    })
+
+
+@app.route('/api/preview_source', methods=['GET', 'POST'])
+def preview_source():
+    """Get or update preview source preference: auto, capture_card, or gphoto."""
+    valid = {'auto', 'capture_card', 'gphoto'}
+
+    if request.method == 'GET':
+        info = scanner.preview_stream.get_resolution_info()
+        return jsonify({
+            'success': True,
+            'preference': scanner.preview_source_preference,
+            'active': info.get('backend', 'none'),
+        })
+
+    data = request.json or {}
+    preference = str(data.get('source', '')).strip().lower()
+    if preference not in valid:
+        return jsonify({
+            'success': False,
+            'message': "Invalid source. Use 'auto', 'capture_card', or 'gphoto'.",
+        }), 400
+
+    scanner.preview_source_preference = preference
+    scanner.stop_preview_stream()
+    started = scanner.ensure_preview_stream()
+    info = scanner.preview_stream.get_resolution_info()
+    scanner.broadcast_status()
+    return jsonify({
+        'success': started,
+        'preference': scanner.preview_source_preference,
+        'active': info.get('backend', 'none'),
+        'message': 'Preview source updated' if started else (scanner.preview_stream.last_error or 'Failed to start preview source'),
     })
 
 
@@ -4144,8 +4667,8 @@ def handle_connect():
 def handle_status_request():
     """Handle status request
     
-    NOTE: Camera check is rate-limited to prevent Canon date/time reset issue.
-    Frequent gphoto2 commands can cause Canon cameras to reset their clock.
+    NOTE: Camera check is rate-limited to avoid disturbing camera state via
+    repeated gphoto2 probing.
     """
     # Use rate-limited camera check (won't actually check if checked recently)
     scanner.check_camera(force=False)

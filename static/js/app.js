@@ -18,7 +18,12 @@ let previewState = {
     autoRefresh: false,
     refreshInterval: 1000,
     refreshTimer: null,
-    videoActive: false
+    videoActive: false,
+    crosshair: {
+        xNorm: null,
+        yNorm: null,
+        visible: false
+    }
 };
 
 let settingsState = {
@@ -588,6 +593,7 @@ function startVideoStream() {
         streamImg.style.display = 'none';
         const stillImg = document.getElementById('preview-image');
         if (stillImg) stillImg.style.display = 'block';
+        redrawPreviewCrosshair();
         if (timestamp) timestamp.textContent = 'Video preview unavailable. Checking...';
         // Get server message (triggers re-search for capture card)
         apiCall('get_preview_video', {}).then(function(result) {
@@ -609,7 +615,149 @@ function startVideoStream() {
     streamImg.style.display = 'block';
     previewContainer.style.display = 'block';
     previewState.videoActive = true;
+    redrawPreviewCrosshair();
     if (timestamp) timestamp.textContent = 'Video stream active...';
+}
+
+function getPreviewRGBRadius() {
+    const radiusInput = document.getElementById('preview-rgb-radius');
+    if (!radiusInput) return 2;
+    const radius = parseInt(radiusInput.value, 10);
+    if (Number.isNaN(radius)) return 2;
+    return Math.max(0, Math.min(25, radius));
+}
+
+function getActivePreviewElement() {
+    const streamImg = document.getElementById('preview-video-stream');
+    const stillImg = document.getElementById('preview-image');
+    if (previewState.videoActive && streamImg && streamImg.style.display !== 'none') {
+        return streamImg;
+    }
+    return stillImg;
+}
+
+function hidePreviewCrosshair() {
+    const crosshair = document.getElementById('preview-crosshair');
+    if (!crosshair) return;
+    crosshair.style.display = 'none';
+    previewState.crosshair.visible = false;
+}
+
+function drawPreviewCrosshair(xNorm, yNorm) {
+    const crosshair = document.getElementById('preview-crosshair');
+    const imgEl = getActivePreviewElement();
+    if (!crosshair || !imgEl) return;
+
+    const rect = imgEl.getBoundingClientRect();
+    const wrapperRect = (crosshair.parentElement || imgEl).getBoundingClientRect();
+    if (!rect || rect.width <= 0 || rect.height <= 0) {
+        hidePreviewCrosshair();
+        return;
+    }
+
+    const clampedX = Math.max(0, Math.min(1, xNorm));
+    const clampedY = Math.max(0, Math.min(1, yNorm));
+    const xPx = rect.left - wrapperRect.left + (clampedX * rect.width);
+    const yPx = rect.top - wrapperRect.top + (clampedY * rect.height);
+
+    crosshair.style.left = `${xPx}px`;
+    crosshair.style.top = `${yPx}px`;
+    crosshair.style.display = 'block';
+
+    previewState.crosshair.xNorm = clampedX;
+    previewState.crosshair.yNorm = clampedY;
+    previewState.crosshair.visible = true;
+}
+
+function redrawPreviewCrosshair() {
+    if (!previewState.crosshair.visible) return;
+    if (previewState.crosshair.xNorm == null || previewState.crosshair.yNorm == null) return;
+    drawPreviewCrosshair(previewState.crosshair.xNorm, previewState.crosshair.yNorm);
+}
+
+function updatePreviewRGBReadout(result) {
+    const readout = document.getElementById('preview-rgb-readout');
+    const meta = document.getElementById('preview-rgb-meta');
+    if (!readout || !meta) return;
+
+    if (!result || !result.success || !result.rgb) {
+        readout.textContent = 'R -, G -, B -';
+        meta.textContent = (result && result.message) ? result.message : 'Sampling failed';
+        return;
+    }
+
+    const r = result.rgb.r;
+    const g = result.rgb.g;
+    const b = result.rgb.b;
+    readout.textContent = `R ${r}, G ${g}, B ${b}`;
+
+    const px = result.pixel || {};
+    const src = result.source || 'preview';
+    meta.textContent = `${src} @ x:${px.x ?? '-'} y:${px.y ?? '-'}`;
+}
+
+async function samplePreviewRGBAtNormalized(xNorm, yNorm) {
+    drawPreviewCrosshair(xNorm, yNorm);
+    const result = await apiCall('preview_rgb', {
+        x_norm: Math.max(0, Math.min(1, xNorm)),
+        y_norm: Math.max(0, Math.min(1, yNorm)),
+        radius: getPreviewRGBRadius(),
+    });
+    if (!(result && result.success)) {
+        hidePreviewCrosshair();
+    }
+    updatePreviewRGBReadout(result);
+}
+
+function normalizedPointFromEvent(imgEl, evt) {
+    if (!imgEl) return null;
+    const rect = imgEl.getBoundingClientRect();
+    if (!rect || rect.width <= 0 || rect.height <= 0) return null;
+
+    let clientX = evt.clientX;
+    let clientY = evt.clientY;
+    if ((clientX === undefined || clientY === undefined) && evt.touches && evt.touches.length > 0) {
+        clientX = evt.touches[0].clientX;
+        clientY = evt.touches[0].clientY;
+    }
+    if (clientX === undefined || clientY === undefined) return null;
+
+    const xNorm = (clientX - rect.left) / rect.width;
+    const yNorm = (clientY - rect.top) / rect.height;
+    return {
+        x: Math.max(0, Math.min(1, xNorm)),
+        y: Math.max(0, Math.min(1, yNorm)),
+    };
+}
+
+function samplePreviewRGBFromEvent(evt) {
+    const target = evt.currentTarget || evt.target;
+    if (!target) return;
+    const p = normalizedPointFromEvent(target, evt);
+    if (!p) return;
+    samplePreviewRGBAtNormalized(p.x, p.y);
+}
+
+function attachPreviewRGBSampling() {
+    const stillImg = document.getElementById('preview-image');
+    const streamImg = document.getElementById('preview-video-stream');
+
+    if (stillImg) {
+        stillImg.style.cursor = 'crosshair';
+        stillImg.addEventListener('click', samplePreviewRGBFromEvent);
+        stillImg.addEventListener('touchstart', samplePreviewRGBFromEvent, { passive: true });
+        stillImg.addEventListener('load', redrawPreviewCrosshair);
+    }
+    if (streamImg) {
+        streamImg.style.cursor = 'crosshair';
+        streamImg.addEventListener('click', samplePreviewRGBFromEvent);
+        streamImg.addEventListener('touchstart', samplePreviewRGBFromEvent, { passive: true });
+        streamImg.addEventListener('load', redrawPreviewCrosshair);
+    }
+}
+
+async function samplePreviewRGBAtCenter() {
+    await samplePreviewRGBAtNormalized(0.5, 0.5);
 }
 
 function stopVideoStream() {
@@ -619,6 +767,7 @@ function stopVideoStream() {
     previewState.videoActive = false;
     const stillImg = document.getElementById('preview-image');
     if (stillImg) stillImg.style.display = 'block';
+    redrawPreviewCrosshair();
 }
 
 async function restartVideoStreamIfFrozen() {
@@ -1319,5 +1468,7 @@ async function deleteScanlightProfile() {
 
 // Initialize ScanLight on page load
 window.addEventListener('load', () => {
+    attachPreviewRGBSampling();
     fetchScanlightStatus();
+    window.addEventListener('resize', redrawPreviewCrosshair);
 });

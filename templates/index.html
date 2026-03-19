@@ -78,10 +78,22 @@
                 </div>
             </div>
             <div id="preview-container" style="display: none;">
-                <img id="preview-image" src="" alt="Live Preview" style="max-width:100%; border:1px solid #444;">
-                <img id="preview-video-stream" src="" alt="Video Preview" style="display:none; margin-top:10px; max-width:100%; border:1px solid #444;">
+                <div id="preview-media-wrapper">
+                    <img id="preview-image" src="" alt="Live Preview" style="max-width:100%; border:1px solid #444;">
+                    <img id="preview-video-stream" src="" alt="Video Preview" style="display:none; margin-top:10px; max-width:100%; border:1px solid #444;">
+                    <div id="preview-crosshair" aria-hidden="true" style="display:none;"></div>
+                </div>
                 <div class="preview-info">
                     <span id="preview-timestamp"></span>
+                </div>
+                <div class="preview-info" style="margin-top:8px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+                    <span><strong>Sample RGB:</strong> <span id="preview-rgb-readout">R 0, G 0, B 0</span></span>
+                    <span id="preview-rgb-meta" style="opacity:0.8;">Click/tap preview to sample</span>
+                    <label style="display:flex; align-items:center; gap:6px;">
+                        Radius
+                        <input id="preview-rgb-radius" type="number" min="0" max="25" value="2" style="width:64px;">
+                    </label>
+                    <button class="btn btn-secondary" onclick="samplePreviewRGBAtCenter()">Sample Center</button>
                 </div>
              </div>
          </section>

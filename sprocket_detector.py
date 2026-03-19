@@ -148,6 +148,8 @@ def detect_sprocket_holes_in_region(
     Detect sprocket holes in a region using contour detection.
     
     Sprocket holes appear as bright rectangles (light shining through).
+    Works on both dark-based (dense negative) and clear-based films by
+    using CLAHE contrast enhancement and adaptive thresholding.
     
     Args:
         region: Grayscale image region (top or bottom sprocket area)
@@ -166,18 +168,35 @@ def detect_sprocket_holes_in_region(
     
     h, w = region.shape[:2]
     
-    # Normalize to 0-1
-    normalized = region.astype(np.float32) / 255.0
+    # --- CLAHE contrast enhancement ---
+    # Critical for clear/transparent base stocks where the sprocket holes
+    # and film base are both bright. CLAHE enhances LOCAL contrast so the
+    # physical edges of sprocket holes become visible even on clear film.
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 4))
+    enhanced = clahe.apply(region)
     
-    # Apply adaptive threshold to find bright regions
-    # Sprocket holes are significantly brighter than surrounding film
-    binary = (normalized > brightness_threshold).astype(np.uint8) * 255
+    # --- Multi-strategy detection ---
+    # Strategy 1: Global brightness threshold (works well on dark base)
+    normalized = enhanced.astype(np.float32) / 255.0
+    binary_global = (normalized > brightness_threshold).astype(np.uint8) * 255
     
-    # Also try Otsu's method for robustness
-    _, binary_otsu = cv2.threshold(region, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # Strategy 2: Otsu's automatic threshold (adapts to histogram)
+    _, binary_otsu = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     
-    # Combine both methods
-    binary = cv2.bitwise_or(binary, binary_otsu)
+    # Strategy 3: Adaptive threshold (LOCAL neighborhood comparison)
+    # This is the key strategy for clear base stocks -- it finds regions
+    # that are brighter than their immediate surroundings, regardless of
+    # absolute brightness. Block size must be large enough to span a
+    # sprocket hole + surrounding film.
+    block_size = max(31, (min(h, w) // 4) | 1)  # Ensure odd
+    binary_adaptive = cv2.adaptiveThreshold(
+        enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY, block_size, -8
+    )
+    
+    # Combine all strategies (union of detections)
+    binary = cv2.bitwise_or(binary_global, binary_otsu)
+    binary = cv2.bitwise_or(binary, binary_adaptive)
     
     # Morphological operations to clean up
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
@@ -206,12 +225,19 @@ def detect_sprocket_holes_in_region(
         if aspect < min_aspect or aspect > max_aspect:
             continue
         
-        # Check if region is actually bright (not just noise)
+        # Check if region is actually bright (use original, not enhanced)
         roi = region[y:y+rect_h, x:x+rect_w]
         if roi.size == 0:
             continue
         mean_brightness = roi.mean() / 255.0
-        if mean_brightness < brightness_threshold * 0.8:
+        
+        # For clear base, the absolute brightness check must be relaxed
+        # because the whole image may be bright.  Instead check that the
+        # hole is brighter than the region average (relative contrast).
+        region_mean = region.mean() / 255.0
+        relative_bright = mean_brightness > region_mean * 0.95
+        absolute_bright = mean_brightness >= brightness_threshold * 0.7
+        if not (relative_bright or absolute_bright):
             continue
         
         # Calculate confidence based on:
@@ -247,6 +273,9 @@ def calculate_sprocket_pitch(sprockets: List[SprocketHole]) -> Optional[float]:
     """
     Calculate the average pixel distance between sprocket holes.
     
+    Uses median + IQR outlier rejection to handle missed or false sprocket
+    detections (common on clear base stocks).
+    
     Returns pixels per sprocket pitch, or None if insufficient data.
     """
     if len(sprockets) < 2:
@@ -262,8 +291,22 @@ def calculate_sprocket_pitch(sprockets: List[SprocketHole]) -> Optional[float]:
     if not distances:
         return None
     
-    # Use median for robustness against outliers
-    return float(np.median(distances))
+    median_d = float(np.median(distances))
+    
+    # Reject outliers using IQR (inter-quartile range)
+    # This handles cases where a sprocket was missed (distance ~2x pitch)
+    # or a false detection split one pitch into two (~0.5x pitch)
+    if len(distances) >= 3:
+        q1 = float(np.percentile(distances, 25))
+        q3 = float(np.percentile(distances, 75))
+        iqr = q3 - q1
+        lower = q1 - 1.5 * max(iqr, median_d * 0.15)
+        upper = q3 + 1.5 * max(iqr, median_d * 0.15)
+        filtered = [d for d in distances if lower <= d <= upper]
+        if filtered:
+            return float(np.median(filtered))
+    
+    return median_d
 
 
 def find_frame_boundaries(
