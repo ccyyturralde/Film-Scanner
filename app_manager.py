@@ -227,10 +227,17 @@ class AppManager:
         if not os.path.exists(log_path):
             return
         
+        # Keep the reader resilient across restarts/rotations:
+        # when the writer re-opens with 'w', the old inode can become stale.
+        f = None
+        current_inode = None
         try:
-            with open(log_path, 'r') as f:
-                # Start at beginning of file
-                while not self._stop_event.is_set():
+            while not self._stop_event.is_set():
+                try:
+                    if f is None:
+                        f = open(log_path, 'r')
+                        current_inode = os.fstat(f.fileno()).st_ino
+
                     line = f.readline()
                     if line:
                         entry = self._parse_log_line(line, 'logfile')
@@ -256,11 +263,36 @@ class AppManager:
                                     callback(entry.message)
                                 except:
                                     pass
-                    else:
-                        # No new content, wait a bit
-                        time.sleep(0.5)
-        except Exception as e:
-            print(f"Log file reader error: {e}")
+                        continue
+
+                    # No new line: detect file replacement/truncation and re-open.
+                    time.sleep(0.5)
+                    try:
+                        path_stat = os.stat(log_path)
+                        file_pos = f.tell()
+                        if path_stat.st_ino != current_inode or file_pos > path_stat.st_size:
+                            try:
+                                f.close()
+                            except Exception:
+                                pass
+                            f = None
+                            current_inode = None
+                    except FileNotFoundError:
+                        try:
+                            f.close()
+                        except Exception:
+                            pass
+                        f = None
+                        current_inode = None
+                except Exception as e:
+                    print(f"Log file reader error: {e}")
+                    time.sleep(0.5)
+        finally:
+            if f is not None:
+                try:
+                    f.close()
+                except Exception:
+                    pass
     
     def _monitor_thread_func(self):
         """Thread to monitor process health"""

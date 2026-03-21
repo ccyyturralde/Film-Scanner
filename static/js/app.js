@@ -141,7 +141,6 @@ function updateUI(status) {
         status.camera_connected ? 'status-badge connected' : 'status-badge disconnected';
     
     // Status values
-    document.getElementById('roll-name').textContent = status.roll_name || 'Not set';
     document.getElementById('frame-count').textContent = status.frame_count;
     document.getElementById('position').textContent = status.position;
     document.getElementById('status-msg').textContent = status.status_msg;
@@ -193,7 +192,7 @@ function updateUI(status) {
         if (stripPanel) stripPanel.style.display = 'none';
     } else {
         // Calibration mode: show appropriate panel
-        const needsCalibration = status.strip_count === 0 && status.roll_name;
+        const needsCalibration = status.strip_count === 0;
         if (needsCalibration) {
             if (calibrationPanel) calibrationPanel.style.display = 'block';
             if (stripPanel) stripPanel.style.display = 'none';
@@ -273,28 +272,6 @@ async function connectArduino() {
     
     if (!result.success) {
         alert('Arduino not found. Check connection and try again.');
-    }
-}
-
-async function createRoll() {
-    const rollName = document.getElementById('roll-name-input').value.trim();
-    
-    if (!rollName) {
-        alert('Please enter a roll name');
-        return;
-    }
-    
-    const btn = event.target;
-    setButtonProcessing(btn, true);
-    
-    const result = await apiCall('new_roll', { roll_name: rollName });
-    
-    setButtonProcessing(btn, false);
-    
-    if (result.success) {
-        document.getElementById('roll-name-input').value = '';
-    } else {
-        alert(result.message || 'Failed to create roll');
     }
 }
 
@@ -1245,6 +1222,17 @@ let scanlightState = {
     currentProfile: 'Color'
 };
 
+function updateScanlightVisibility() {
+    const controls = document.getElementById('scanlight-controls');
+    const disconnectedNote = document.getElementById('scanlight-disconnected-note');
+    if (controls) {
+        controls.style.display = scanlightState.connected ? 'block' : 'none';
+    }
+    if (disconnectedNote) {
+        disconnectedNote.style.display = scanlightState.connected ? 'none' : 'block';
+    }
+}
+
 // Fetch ScanLight status on page load
 async function fetchScanlightStatus() {
     try {
@@ -1259,6 +1247,7 @@ async function fetchScanlightStatus() {
             
             updateScanlightUI();
             updateScanlightProfileList();
+            updateScanlightVisibility();
         }
     } catch (error) {
         console.error('Error fetching ScanLight status:', error);
@@ -1289,6 +1278,7 @@ function updateScanlightUI() {
         statusEl.textContent = scanlightState.connected ? 'Connected' : 'Disconnected';
         statusEl.className = scanlightState.connected ? 'status-badge connected' : 'status-badge disconnected';
     }
+    updateScanlightVisibility();
 }
 
 // Update profile dropdown list

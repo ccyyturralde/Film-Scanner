@@ -24,10 +24,6 @@
         <section class="status-panel full-width">
             <div class="status-grid">
                 <div class="status-item">
-                    <label>Roll:</label>
-                    <span id="roll-name">Not set</span>
-                </div>
-                <div class="status-item">
                     <label>Frame:</label>
                     <span id="frame-count">0</span>
                 </div>
@@ -39,341 +35,257 @@
             <div class="status-message" id="status-msg">Ready</div>
         </section>
 
-        <!-- Roll Management -->
-        <section class="panel full-width">
-            <h2>Roll Management</h2>
-            <div class="input-group">
-                <input type="text" id="roll-name-input" placeholder="Enter roll name...">
-                <button class="btn btn-primary" onclick="createRoll()">New Roll</button>
+        <section class="scan-workspace full-width">
+            <div class="scan-main-grid">
+                <div class="scan-focus-column">
+                    <section class="panel live-panel">
+                        <h2>Live View</h2>
+                        <p class="help-text">Large preview on laptop/iPad, compact on iPhone. Invert is view-only and does not affect alignment.</p>
+                        <div class="preview-controls">
+                            <label style="display:flex;align-items:center;gap:8px;">
+                                <input type="checkbox" id="preview-invert-toggle" onchange="togglePreviewInvert()">
+                                Invert (view only)
+                            </label>
+                            <div class="preview-buttons">
+                                <button class="btn btn-primary" id="preview-btn" onclick="capturePreview()">🖼️ Preview Image</button>
+                                <button class="btn btn-secondary" id="preview-video-btn" onclick="startVideoStream()">🎥 Start Video</button>
+                                <button class="btn btn-secondary" id="preview-video-stop-btn" onclick="stopVideoStream()">⏹ Stop Video</button>
+                                <button class="btn btn-secondary" id="preview-video-restart-btn" onclick="restartVideoStreamIfFrozen()" title="If preview is frozen, click to restart without reloading the page">↻ Restart Video</button>
+                            </div>
+                        </div>
+                        <div id="preview-container" style="display: none;">
+                            <div id="preview-media-wrapper">
+                                <img id="preview-image" src="" alt="Live Preview" style="max-width:100%; border:1px solid #444;">
+                                <img id="preview-video-stream" src="" alt="Video Preview" style="display:none; margin-top:10px; max-width:100%; border:1px solid #444;">
+                                <div id="preview-crosshair" aria-hidden="true" style="display:none;"></div>
+                            </div>
+                            <div class="preview-info">
+                                <span id="preview-timestamp"></span>
+                            </div>
+                            <div class="preview-info preview-rgb-tools">
+                                <span><strong>Sample RGB:</strong> <span id="preview-rgb-readout">R 0, G 0, B 0</span></span>
+                                <span id="preview-rgb-meta" style="opacity:0.8;">Click/tap preview to sample</span>
+                                <label style="display:flex; align-items:center; gap:6px;">
+                                    Radius
+                                    <input id="preview-rgb-radius" type="number" min="0" max="25" value="2" style="width:64px;">
+                                </label>
+                                <button class="btn btn-secondary" onclick="samplePreviewRGBAtCenter()">Sample Center</button>
+                            </div>
+                        </div>
+                    </section>
+                </div>
+
+                <div class="scan-control-column">
+                    <section class="panel">
+                        <h2>📸 Capture</h2>
+                        <div class="camera-controls">
+                            <button class="btn btn-success btn-large btn-capture" onclick="capture()">📸 CAPTURE</button>
+                            <button class="btn btn-secondary btn-large" onclick="triggerAutofocus()">🔍 Autofocus</button>
+                        </div>
+                        <div class="control-options arduino-only" id="alignment-options">
+                            <label id="auto-alignment-toggle-wrapper" style="display:flex;align-items:center;gap:8px;margin-right:16px;">
+                                <input type="checkbox" id="auto-alignment-toggle" onchange="toggleAutoAlignment()" checked>
+                                Auto-Alignment
+                            </label>
+                            <label id="auto-align-checkbox-wrapper">
+                                <input type="checkbox" id="auto-align-before-capture">
+                                Fine-tune before capture
+                            </label>
+                            <label id="motor-direction-toggle-wrapper" style="display:flex;align-items:center;gap:8px;" title="If auto-advance after capture goes the wrong way, check this. Saved permanently.">
+                                <input type="checkbox" id="motor-direction-reversed" onchange="setMotorDirectionReversed()">
+                                Reverse motor (auto-advance direction)
+                            </label>
+                        </div>
+                        <div class="control-options arduino-only" style="margin-top:8px;">
+                            <label style="display:flex;align-items:center;gap:8px;margin-right:16px;">
+                                <input type="checkbox" id="auto-capture-toggle" onchange="toggleAutoCapture()">
+                                Auto-Capture (Continuous)
+                            </label>
+                            <button class="btn btn-danger" id="stop-auto-capture-btn" onclick="stopAutoCapture()" style="display:none;">
+                                ⏹️ Stop Auto-Capture
+                            </button>
+                        </div>
+                        <div class="camera-settings">
+                            <div class="setting-group inline"><strong>Aperture:</strong> <span id="cam-aperture">n/a</span></div>
+                            <div class="setting-group inline"><strong>ISO:</strong> <span id="cam-iso">n/a</span></div>
+                            <div class="setting-group inline"><strong>Shutter:</strong> <span id="cam-shutter">n/a</span></div>
+                            <button class="btn btn-secondary" onclick="refreshCameraSettings()">Refresh Settings</button>
+                        </div>
+                    </section>
+
+                    <section class="panel arduino-only motor-sticky-panel" id="motor-controls-panel">
+                        <h2>🎛️ Motor Controls</h2>
+                        <div class="controls-grid">
+                            <button class="btn btn-secondary motor-btn" data-direction="backward" data-size="fine">⇦ Fine Back</button>
+                            <button class="btn btn-secondary motor-btn" data-direction="forward" data-size="fine">Fine Forward ⇨</button>
+                            <button class="btn btn-secondary motor-btn" data-direction="backward" data-size="coarse">⇦⇦ Coarse Back</button>
+                            <button class="btn btn-secondary motor-btn" data-direction="forward" data-size="coarse">Coarse Forward ⇨⇨</button>
+                        </div>
+                        <div class="control-options">
+                            <button class="btn btn-primary" onclick="autoAlign()" id="auto-align-btn">🎯 Auto Align</button>
+                            <button class="btn btn-secondary" onclick="zeroPosition()">Zero Position</button>
+                        </div>
+                        <div class="control-options">
+                            <span class="help-text" id="frame-mode-display">Frame: FULL</span>
+                            <button class="btn btn-secondary" onclick="setFrameMode('full')">Full</button>
+                            <button class="btn btn-secondary" onclick="setFrameMode('half')">Half</button>
+                        </div>
+                        <div class="help-text" id="auto-align-status">Auto-align not run yet.</div>
+                    </section>
+                </div>
             </div>
         </section>
 
-        <div class="main-grid">
-            <!-- Left Column: Preview, Capture, and Calibration -->
-            <div class="left-column">
-                <!-- Camera Preview (FIRST - most important for alignment) -->
-                <section class="panel">
-            <h2>Live Preview</h2>
-            <p class="help-text">Test still preview or grab a frame from the live video stream. Invert toggle is for viewing only (not used for alignment).</p>
-            <div class="preview-controls">
-                <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px;">
-                    <label style="display:flex;align-items:center;gap:8px;">
-                        <input type="checkbox" id="preview-invert-toggle" onchange="togglePreviewInvert()">
-                        Invert (view only)
-                    </label>
-                </div>
-                <div class="preview-buttons">
-                    <button class="btn btn-primary btn-large" id="preview-btn" onclick="capturePreview()">
-                        🖼️ Preview Image
-                    </button>
-                    <button class="btn btn-secondary btn-large" id="preview-video-btn" onclick="startVideoStream()">
-                        🎥 Start Video Preview
-                    </button>
-                    <button class="btn btn-secondary btn-large" id="preview-video-stop-btn" onclick="stopVideoStream()">
-                        ⏹ Stop Video Preview
-                    </button>
-                    <button class="btn btn-secondary btn-large" id="preview-video-restart-btn" onclick="restartVideoStreamIfFrozen()" title="If preview is frozen, click to restart without reloading the page">
-                        ↻ Restart preview (if frozen)
-                    </button>
-                </div>
-            </div>
-            <div id="preview-container" style="display: none;">
-                <div id="preview-media-wrapper">
-                    <img id="preview-image" src="" alt="Live Preview" style="max-width:100%; border:1px solid #444;">
-                    <img id="preview-video-stream" src="" alt="Video Preview" style="display:none; margin-top:10px; max-width:100%; border:1px solid #444;">
-                    <div id="preview-crosshair" aria-hidden="true" style="display:none;"></div>
-                </div>
-                <div class="preview-info">
-                    <span id="preview-timestamp"></span>
-                </div>
-                <div class="preview-info" style="margin-top:8px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
-                    <span><strong>Sample RGB:</strong> <span id="preview-rgb-readout">R 0, G 0, B 0</span></span>
-                    <span id="preview-rgb-meta" style="opacity:0.8;">Click/tap preview to sample</span>
-                    <label style="display:flex; align-items:center; gap:6px;">
-                        Radius
-                        <input id="preview-rgb-radius" type="number" min="0" max="25" value="2" style="width:64px;">
-                    </label>
-                    <button class="btn btn-secondary" onclick="samplePreviewRGBAtCenter()">Sample Center</button>
-                </div>
-             </div>
-         </section>
-
-                <!-- Camera Controls (SECOND - capture is the main action) -->
-                <section class="panel">
-                    <h2>📸 Capture</h2>
-                    <div class="camera-controls">
-                        <button class="btn btn-success btn-large btn-capture" onclick="capture()">
-                            📸 CAPTURE
-                        </button>
-                        <button class="btn btn-secondary btn-large" onclick="triggerAutofocus()">
-                            🔍 Autofocus
-                        </button>
-                    </div>
-                    <div class="control-options arduino-only" id="alignment-options">
-                        <label id="auto-alignment-toggle-wrapper" style="display:flex;align-items:center;gap:8px;margin-right:16px;">
-                            <input type="checkbox" id="auto-alignment-toggle" onchange="toggleAutoAlignment()" checked>
-                            Auto-Alignment
-                        </label>
-                        <label id="auto-align-checkbox-wrapper">
-                            <input type="checkbox" id="auto-align-before-capture">
-                            Fine-tune before capture
-                        </label>
-                        <label id="motor-direction-toggle-wrapper" style="display:flex;align-items:center;gap:8px;" title="If auto-advance after capture goes the wrong way, check this. Saved permanently.">
-                            <input type="checkbox" id="motor-direction-reversed" onchange="setMotorDirectionReversed()">
-                            Reverse motor (auto-advance direction)
-                        </label>
-                    </div>
-                    <div class="control-options arduino-only" style="margin-top:8px;">
-                        <label style="display:flex;align-items:center;gap:8px;margin-right:16px;">
-                            <input type="checkbox" id="auto-capture-toggle" onchange="toggleAutoCapture()">
-                            Auto-Capture (Continuous)
-                        </label>
-                        <button class="btn btn-danger" id="stop-auto-capture-btn" onclick="stopAutoCapture()" style="display:none;">
-                            ⏹️ Stop Auto-Capture
-                        </button>
-                    </div>
-                    <div class="camera-settings">
-                        <div class="setting-group inline">
-                            <strong>Aperture:</strong> <span id="cam-aperture">n/a</span>
-                        </div>
-                        <div class="setting-group inline">
-                            <strong>ISO:</strong> <span id="cam-iso">n/a</span>
-                        </div>
-                        <div class="setting-group inline">
-                            <strong>Shutter:</strong> <span id="cam-shutter">n/a</span>
-                        </div>
-                        <button class="btn btn-secondary" onclick="refreshCameraSettings()">Refresh Settings</button>
-                    </div>
-                </section>
-
-                <!-- Calibration Section - Hidden in 120 mode -->
-                <section class="panel arduino-only" id="calibration-panel">
-                    <h2>Calibration</h2>
-                    <p class="help-text">Strip 1: Position frame 1, capture, then position frame 2 and capture to learn frame spacing.</p>
-                    <div class="calibration-steps" id="calibration-steps">
-                        <button class="btn btn-large btn-warning" onclick="startCalibration()">Start Calibration</button>
-                    </div>
-                </section>
-
-                <!-- Strip Management - Hidden in 120 mode -->
-                <section class="panel arduino-only" id="strip-panel">
-                    <h2>Strip Management</h2>
-                    <div class="calibration-steps" id="strip-steps">
-                        <button class="btn btn-large btn-success" onclick="startNewStrip()">Start New Strip</button>
-                    </div>
-                </section>
-            </div>
-
-            <!-- Right Column: Motor Controls -->
-            <div class="right-column">
-                <!-- Motor Controls (THIRD - for fine-tuning alignment) - Hidden in 120 mode -->
-                <section class="panel arduino-only" id="motor-controls-panel">
-            <h2>🎛️ Motor Controls</h2>
-            <div class="controls-grid">
-                <button class="btn btn-secondary motor-btn" 
-                        data-direction="backward" 
-                        data-size="fine">
-                    ⇦ Fine Back
-                </button>
-                <button class="btn btn-secondary motor-btn" 
-                        data-direction="forward" 
-                        data-size="fine">
-                    Fine Forward ⇨
-                </button>
-                <button class="btn btn-secondary motor-btn" 
-                        data-direction="backward" 
-                        data-size="coarse">
-                    ⇦⇦ Coarse Back
-                </button>
-                <button class="btn btn-secondary motor-btn" 
-                        data-direction="forward" 
-                        data-size="coarse">
-                    Coarse Forward ⇨⇨
-                </button>
-            </div>
+        <section class="panel full-width" id="quick-tools-panel">
+            <h2>Quick Tools</h2>
             <div class="control-options">
-                <button class="btn btn-primary" onclick="autoAlign()" id="auto-align-btn">
-                    🎯 Auto Align
-                </button>
-                <button class="btn btn-secondary" onclick="zeroPosition()">
-                    Zero Position
-                </button>
+                <button class="btn btn-secondary arduino-only" onclick="connectArduino()">Reconnect Arduino</button>
+                <button class="btn btn-warning" onclick="testCapture()">🧪 Test Camera Capture</button>
             </div>
-            <div class="control-options">
-                <span class="help-text" id="frame-mode-display">Frame: FULL</span>
-                <button class="btn btn-secondary" onclick="setFrameMode('full')">Full</button>
-                <button class="btn btn-secondary" onclick="setFrameMode('half')">Half</button>
-            </div>
-             <div class="help-text" id="auto-align-status">
-                 Auto-align not run yet.
-             </div>
-         </section>
-            </div>
-        </div>
+            <div class="help-text">Test Capture takes a photo for focus/exposure checks without incrementing frame count.</div>
+        </section>
 
-        <!-- Settings and Logs: Side-by-side on desktop -->
-        <div class="desktop-two-column full-width">
-            <!-- Settings Panel -->
-            <section class="panel">
-                <h2>⚙️ Settings</h2>
-                
-                <div class="settings-section">
-                    <h3>Scanner Mode</h3>
-                    <div class="preview-buttons">
-                        <button class="btn btn-secondary" id="settings-mode-35mm" onclick="setScannerMode('35mm')">35mm (Motor)</button>
-                        <button class="btn btn-secondary" id="settings-mode-120" onclick="setScannerMode('120')">120 (Hand Feed)</button>
-                    </div>
-                    <div class="help-text" id="scanner-mode-display">Mode: 35mm</div>
-                </div>
-
-                <div class="settings-section arduino-only">
-                    <h3>Motor Step Sizes</h3>
-                    <div class="setting-group">
-                        <label for="fine-step-input">Fine Step:</label>
-                        <input type="number" id="fine-step-input" min="1" max="100" value="8">
-                        <span class="setting-unit">steps</span>
-                    </div>
-                    <div class="setting-group">
-                        <label for="coarse-step-input">Coarse Step:</label>
-                        <input type="number" id="coarse-step-input" min="1" max="500" value="192">
-                        <span class="setting-unit">steps</span>
-                    </div>
-                    <button class="btn btn-primary" onclick="updateStepSizes()">
-                        Apply Step Sizes
-                    </button>
-                </div>
-
-                <div class="settings-section">
-                    <h3>Auto-Refresh Preview</h3>
-                    <div class="setting-group">
-                        <label>
-                            <input type="checkbox" id="auto-refresh-toggle" onchange="toggleAutoRefresh()">
-                            Enable Auto-Refresh
-                        </label>
-                    </div>
-                    <div class="setting-group">
-                        <label for="refresh-interval">Interval:</label>
-                        <input type="range" id="refresh-interval" min="100" max="5000" step="100" value="1000">
-                        <span id="refresh-interval-display">1000 ms</span>
-                    </div>
-                </div>
-
-                <div class="settings-section arduino-only">
-                    <h3>Alignment Mode</h3>
-                    <div class="preview-buttons">
-                        <button class="btn btn-secondary" onclick="setAlignmentMode('stream')">Auto (Gap Detection)</button>
-                        <button class="btn btn-secondary" onclick="setAlignmentMode('sprocket')">Auto (Sprocket Holes)</button>
-                    </div>
-                    <div class="help-text" id="alignment-mode-display">Mode: Auto (Gap Detection)</div>
-                </div>
-
-                <div class="settings-section arduino-only">
-                    <h3>Auto-Capture Settings</h3>
-                    <div class="setting-group">
-                        <label>
-                            <input type="checkbox" id="auto-capture-settings-toggle" onchange="toggleAutoCapture()">
-                            Enable Continuous Auto-Capture
-                        </label>
-                        <p style="font-size:0.9em;color:#666;margin-top:4px;">
-                            Automatically captures next frame after alignment completes
-                        </p>
-                    </div>
-                    <div class="setting-group">
-                        <label for="auto-capture-delay-input">Exposure Delay (seconds):</label>
-                        <input type="number" id="auto-capture-delay-input" min="1.0" max="30.0" step="0.5" value="3.0" style="width:80px;">
-                        <button class="btn btn-secondary" onclick="setAutoCaptureDelay()">Set Delay</button>
-                        <p style="font-size:0.9em;color:#666;margin-top:4px;">
-                            Current: <span id="auto-capture-delay-value">3.0s</span>
-                        </p>
-                        <p style="font-size:0.85em;color:#888;margin-top:4px;">
-                            Wait time after capture before advancing. Adjust based on your exposure time.
-                        </p>
-                    </div>
-                </div>
-
-                <!-- ScanLight RGB Backlight Control -->
-                <div class="settings-section">
-                    <h3>💡 ScanLight Backlight</h3>
-                    <div class="scanlight-status" style="margin-bottom:12px;">
-                        <span id="scanlight-connection-status" class="status-badge disconnected">Disconnected</span>
-                    </div>
-                    
-                    <!-- RGB Sliders -->
-                    <div class="rgb-controls">
-                        <div class="rgb-slider-group">
-                            <label class="rgb-label" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-                                <span class="rgb-channel-name" style="color: #f55;font-weight:bold;">R</span>
-                                <span class="rgb-value" id="scanlight-r-value" style="font-weight:bold;min-width:40px;text-align:right;">255</span>
-                            </label>
-                            <input type="range" id="scanlight-r-slider" min="0" max="255" value="255" 
-                                   class="rgb-slider" oninput="updateScanlightRGB()" style="width:100%;">
+        <section class="panel full-width">
+            <details id="advanced-controls">
+                <summary><strong>⚙️ Settings & Advanced</strong> (tap/click to expand)</summary>
+                <div class="advanced-controls-content">
+                    <div class="settings-section">
+                        <h3>Scanner Mode</h3>
+                        <div class="preview-buttons">
+                            <button class="btn btn-secondary" id="settings-mode-35mm" onclick="setScannerMode('35mm')">35mm (Motor)</button>
+                            <button class="btn btn-secondary" id="settings-mode-120" onclick="setScannerMode('120')">120 (Hand Feed)</button>
                         </div>
-                        <div class="rgb-slider-group">
-                            <label class="rgb-label" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-                                <span class="rgb-channel-name" style="color: #5f5;font-weight:bold;">G</span>
-                                <span class="rgb-value" id="scanlight-g-value" style="font-weight:bold;min-width:40px;text-align:right;">255</span>
-                            </label>
-                            <input type="range" id="scanlight-g-slider" min="0" max="255" value="255" 
-                                   class="rgb-slider" oninput="updateScanlightRGB()" style="width:100%;">
-                        </div>
-                        <div class="rgb-slider-group">
-                            <label class="rgb-label" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-                                <span class="rgb-channel-name" style="color: #55f;font-weight:bold;">B</span>
-                                <span class="rgb-value" id="scanlight-b-value" style="font-weight:bold;min-width:40px;text-align:right;">255</span>
-                            </label>
-                            <input type="range" id="scanlight-b-slider" min="0" max="255" value="255" 
-                                   class="rgb-slider" oninput="updateScanlightRGB()" style="width:100%;">
-                        </div>
-                        
-                        <!-- RGB Preview Box -->
-                        <div class="rgb-preview" style="margin-top:12px;display:flex;align-items:center;gap:12px;">
-                            <div id="scanlight-color-preview" style="width:60px;height:60px;border:2px solid #444;border-radius:8px;background:rgb(255,255,255);"></div>
-                            <span id="scanlight-rgb-text" style="font-size:14px;font-weight:bold;">RGB(255, 255, 255)</span>
-                        </div>
+                        <div class="help-text" id="scanner-mode-display">Mode: 35mm</div>
                     </div>
-                    
-                    <!-- Profile Management -->
-                    <div class="profile-controls" style="margin-top:16px;">
+
+                    <div class="settings-section arduino-only">
+                        <h3>Motor Step Sizes</h3>
                         <div class="setting-group">
-                            <label for="scanlight-profile-select">Load Profile:</label>
-                            <select id="scanlight-profile-select" class="profile-select" style="flex:1;">
-                                <option value="">-- Select Profile --</option>
-                                <option value="Color">Color</option>
-                                <option value="B&W">B&W</option>
-                            </select>
-                            <button class="btn btn-secondary" onclick="loadScanlightProfile()">Load</button>
+                            <label for="fine-step-input">Fine Step:</label>
+                            <input type="number" id="fine-step-input" min="1" max="100" value="8">
+                            <span class="setting-unit">steps</span>
                         </div>
-                        <div class="setting-group" style="margin-top:8px;">
-                            <input type="text" id="scanlight-profile-name" placeholder="Profile name..." class="profile-name-input" style="flex:1;">
-                            <button class="btn btn-primary" onclick="saveScanlightProfile()">Save</button>
-                            <button class="btn btn-danger" onclick="deleteScanlightProfile()">Delete</button>
+                        <div class="setting-group">
+                            <label for="coarse-step-input">Coarse Step:</label>
+                            <input type="number" id="coarse-step-input" min="1" max="500" value="192">
+                            <span class="setting-unit">steps</span>
                         </div>
+                        <button class="btn btn-primary" onclick="updateStepSizes()">Apply Step Sizes</button>
+                    </div>
+
+                    <div class="settings-section">
+                        <h3>Auto-Refresh Preview</h3>
+                        <div class="setting-group">
+                            <label><input type="checkbox" id="auto-refresh-toggle" onchange="toggleAutoRefresh()"> Enable Auto-Refresh</label>
+                        </div>
+                        <div class="setting-group">
+                            <label for="refresh-interval">Interval:</label>
+                            <input type="range" id="refresh-interval" min="100" max="5000" step="100" value="1000">
+                            <span id="refresh-interval-display">1000 ms</span>
+                        </div>
+                    </div>
+
+                    <div class="settings-section arduino-only">
+                        <h3>Alignment Mode</h3>
+                        <div class="preview-buttons">
+                            <button class="btn btn-secondary" onclick="setAlignmentMode('stream')">Auto (Gap Detection)</button>
+                            <button class="btn btn-secondary" onclick="setAlignmentMode('sprocket')">Auto (Sprocket Holes)</button>
+                        </div>
+                        <div class="help-text" id="alignment-mode-display">Mode: Auto (Gap Detection)</div>
+                    </div>
+
+                    <div class="settings-section arduino-only">
+                        <h3>Auto-Capture Settings</h3>
+                        <div class="setting-group">
+                            <label><input type="checkbox" id="auto-capture-settings-toggle" onchange="toggleAutoCapture()"> Enable Continuous Auto-Capture</label>
+                        </div>
+                        <div class="setting-group">
+                            <label for="auto-capture-delay-input">Exposure Delay (seconds):</label>
+                            <input type="number" id="auto-capture-delay-input" min="1.0" max="30.0" step="0.5" value="3.0" style="width:80px;">
+                            <button class="btn btn-secondary" onclick="setAutoCaptureDelay()">Set Delay</button>
+                        </div>
+                        <p class="help-text">Current: <span id="auto-capture-delay-value">3.0s</span></p>
+                    </div>
+
+                    <section class="panel arduino-only" id="calibration-panel">
+                        <h2>Calibration</h2>
+                        <p class="help-text">Strip 1: position frame 1, capture, then position frame 2 and capture to learn spacing.</p>
+                        <div class="calibration-steps" id="calibration-steps">
+                            <button class="btn btn-large btn-warning" onclick="startCalibration()">Start Calibration</button>
+                        </div>
+                    </section>
+
+                    <section class="panel arduino-only" id="strip-panel">
+                        <h2>Strip Management</h2>
+                        <div class="calibration-steps" id="strip-steps">
+                            <button class="btn btn-large btn-success" onclick="startNewStrip()">Start New Strip</button>
+                        </div>
+                    </section>
+
+                    <section class="panel">
+                        <h2>Logs</h2>
+                        <div class="help-text">Recent messages (auto-align and system).</div>
+                        <pre id="log-output" style="max-height:400px; overflow:auto; background:#111; color:#0f0; padding:10px; border-radius:6px; white-space:pre-wrap; font-size:12px; line-height:1.3; margin-top:8px;"></pre>
+                    </section>
+                </div>
+            </details>
+        </section>
+
+        <section class="panel full-width" id="scanlight-panel">
+            <h2>💡 ScanLight Backlight</h2>
+            <div class="scanlight-status">
+                <span id="scanlight-connection-status" class="status-badge disconnected">Disconnected</span>
+            </div>
+            <div id="scanlight-disconnected-note" class="help-text">Connect ScanLight to enable RGB controls.</div>
+
+            <div id="scanlight-controls" style="display:none;">
+                <div class="rgb-controls">
+                    <div class="rgb-slider-group">
+                        <label class="rgb-label">
+                            <span class="rgb-channel-name" style="color: #f55;">R</span>
+                            <span class="rgb-value" id="scanlight-r-value">255</span>
+                        </label>
+                        <input type="range" id="scanlight-r-slider" min="0" max="255" value="255" class="rgb-slider" oninput="updateScanlightRGB()">
+                    </div>
+                    <div class="rgb-slider-group">
+                        <label class="rgb-label">
+                            <span class="rgb-channel-name" style="color: #5f5;">G</span>
+                            <span class="rgb-value" id="scanlight-g-value">255</span>
+                        </label>
+                        <input type="range" id="scanlight-g-slider" min="0" max="255" value="255" class="rgb-slider" oninput="updateScanlightRGB()">
+                    </div>
+                    <div class="rgb-slider-group">
+                        <label class="rgb-label">
+                            <span class="rgb-channel-name" style="color: #55f;">B</span>
+                            <span class="rgb-value" id="scanlight-b-value">255</span>
+                        </label>
+                        <input type="range" id="scanlight-b-slider" min="0" max="255" value="255" class="rgb-slider" oninput="updateScanlightRGB()">
+                    </div>
+
+                    <div class="rgb-preview">
+                        <div id="scanlight-color-preview" style="background:rgb(255,255,255);"></div>
+                        <span id="scanlight-rgb-text">RGB(255, 255, 255)</span>
                     </div>
                 </div>
 
-                <div class="settings-section">
-                    <h3>System</h3>
-                    <div class="control-options">
-                        <button class="btn btn-secondary arduino-only" onclick="connectArduino()">
-                            Reconnect Arduino
-                        </button>
-                        <button class="btn btn-warning" onclick="testCapture()">
-                            🧪 Test Camera Capture
-                        </button>
+                <div class="profile-controls">
+                    <div class="setting-group">
+                        <label for="scanlight-profile-select">Load Profile:</label>
+                        <select id="scanlight-profile-select" class="profile-select">
+                            <option value="">-- Select Profile --</option>
+                            <option value="Color">Color</option>
+                            <option value="B&W">B&W</option>
+                        </select>
+                        <button class="btn btn-secondary" onclick="loadScanlightProfile()">Load</button>
                     </div>
-                    <div class="help-text">
-                        Test Capture: Takes a test photo without affecting frame count.
+                    <div class="setting-group">
+                        <input type="text" id="scanlight-profile-name" placeholder="Profile name..." class="profile-name-input">
+                        <button class="btn btn-primary" onclick="saveScanlightProfile()">Save</button>
+                        <button class="btn btn-danger" onclick="deleteScanlightProfile()">Delete</button>
                     </div>
                 </div>
-            </section>
-
-            <!-- Logs Panel -->
-            <section class="panel">
-                <h2>Logs</h2>
-                <div class="help-text">Recent messages (auto-align and system).</div>
-                <pre id="log-output" style="max-height:400px; overflow:auto; background:#111; color:#0f0; padding:10px; border-radius:6px; white-space:pre-wrap; font-size:12px; line-height:1.3; margin-top:8px;"></pre>
-            </section>
-        </div>
+            </div>
+        </section>
 
         <footer class="full-width">
             <p>Access from mobile: http://&lt;computer-ip&gt;:5000</p>

@@ -991,6 +991,7 @@ class FilmScanner:
         # State persistence
         self.state_file = None
         self.settings_dir = Path.home() / ".film_scanner"
+        self._initialize_default_session()
 
         # Motor direction: SINGLE SOURCE OF TRUTH for advance/backup (frame advance, alignment).
         # advance_reversed=False → advance='h', backup='H'. If your motor goes the wrong way, set True or use UI toggle.
@@ -1045,6 +1046,24 @@ class FilmScanner:
         except Exception:
             limit = 200
         return list(self.log_buffer)[-limit:]
+
+    def _initialize_default_session(self):
+        """Create/resume the default scan session without requiring user input."""
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        base_folder = os.path.expanduser("~/scans")
+        session_name = "current-session"
+
+        self.roll_name = session_name
+        self.roll_folder = os.path.join(base_folder, date_str, session_name)
+        os.makedirs(self.roll_folder, exist_ok=True)
+        self.state_file = os.path.join(self.roll_folder, ".scan_state.json")
+
+        if os.path.exists(self.state_file):
+            self.load_state(self.roll_folder)
+            self.status_msg = "Resumed current session"
+        else:
+            self.save_state()
+            self.status_msg = "Ready"
 
     def ensure_preview_stream(self) -> bool:
         """
@@ -3270,12 +3289,9 @@ def connect_arduino():
     return jsonify({'success': success})
 @app.route('/api/new_roll', methods=['POST'])
 def new_roll():
-    """Create new roll"""
-    data = request.json
-    roll_name = data.get('roll_name', '')
-    
-    if not roll_name:
-        return jsonify({'success': False, 'message': 'Roll name required'})
+    """Create or reset scan session (legacy endpoint)."""
+    data = request.json or {}
+    roll_name = (data.get('roll_name') or '').strip() or "current-session"
     
     date_str = datetime.now().strftime("%Y-%m-%d")
     base_folder = os.path.expanduser("~/scans")
@@ -3287,14 +3303,14 @@ def new_roll():
     resume = data.get('resume', False)
     if os.path.exists(scanner.state_file) and resume:
         scanner.load_state(scanner.roll_folder)
-        scanner.status_msg = f"Resumed: {roll_name}"
+        scanner.status_msg = "Resumed current session"
     else:
         scanner.frame_count = 0
         scanner.strip_count = 0
         scanner.frames_in_strip = 0
         scanner.frame_advance = None
         scanner.frame_positions = []
-        scanner.status_msg = f"New roll: {roll_name}"
+        scanner.status_msg = "New session started"
     
     scanner.roll_name = roll_name
     scanner.save_state()
@@ -3482,9 +3498,6 @@ def capture():
     try:
         data = request.json or {}
         auto_align_before = data.get('auto_align', False)
-
-        if not scanner.roll_name:
-            return jsonify({'success': False, 'message': 'Create roll first'})
         
         # Force camera check for user-initiated capture
         if not scanner.check_camera(force=True):
@@ -4270,9 +4283,6 @@ def calibrate():
     data = request.json
     action = data.get('action', 'start')  # start, capture_frame1, capture_frame2
     
-    if not scanner.roll_name:
-        return jsonify({'success': False, 'message': 'Create roll first'})
-    
     if scanner.strip_count > 0:
         return jsonify({'success': False, 'message': 'Already calibrated'})
     
@@ -4305,9 +4315,6 @@ def calibrate():
 @app.route('/api/new_strip', methods=['POST'])
 def new_strip():
     """Start new strip"""
-    if not scanner.roll_name:
-        return jsonify({'success': False, 'message': 'Create roll first'})
-    
     if scanner.frame_advance is None:
         return jsonify({'success': False, 'message': 'Calibrate first'})
     

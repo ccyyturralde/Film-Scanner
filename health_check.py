@@ -40,7 +40,7 @@ from datetime import datetime
 # Configuration
 # ============================================================================
 
-GITHUB_REPO = "chasecee/Film-Scanner"
+GITHUB_REPO = "ccyyturralde/Film-Scanner"
 GITHUB_BRANCH = "main"
 GITHUB_RAW_BASE = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}"
 GITHUB_API_BASE = f"https://api.github.com/repos/{GITHUB_REPO}"
