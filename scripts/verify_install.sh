@@ -230,20 +230,18 @@ fi
 
 # Test 10: Alignment detector
 print_header "Alignment System"
-echo "Testing frame detection module..."
+echo "Testing sprocket detection module..."
 "$PYTHON" << 'EOF'
 try:
-    from frame_detector import detect_frame_gap, jpeg_bytes_to_color
-    print("✓ Frame detector module loaded")
-    print("✓ Automatic alignment improvements available")
+    from sprocket_detector import detect_sprockets, detect_bright_region_roi
+    print("✓ Sprocket detector module loaded")
     
-    # Test detection functions exist
     import cv2
     import numpy as np
     print("✓ OpenCV and NumPy integration OK")
     
 except ImportError as e:
-    print(f"✗ Frame detector import failed: {e}")
+    print(f"✗ Sprocket detector import failed: {e}")
     exit(1)
 EOF
 

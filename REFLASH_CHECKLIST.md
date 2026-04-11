@@ -154,33 +154,26 @@ On first launch, the web app will ask:
 
 The new alignment improvements are included! Test them:
 
-```bash
-# Test with an image file
-python3 test_alignment.py path/to/test/image.jpg
-
-# Or capture from camera
-python3 test_alignment.py
-```
+Test alignment via the web interface Auto Align button, or the `/api/detect_sprockets` API endpoint.
 
 **Expected results:**
-- ✓ 90-99% confidence (was 80%)
-- ✓ Gaps cleared on both edges
-- ✓ Detailed logging showing gap widths
-- ✓ Visualization showing detected gaps
+- ✓ 90-99% confidence
+- ✓ Precise sprocket-based frame advance
+- ✓ Detailed logging showing sprocket positions
+- ✓ Visualization showing detected sprocket holes
 
 ## ✅ Alignment Features Included
 
-Your system now has:
-- **Multi-pass edge detection** - 8 passes with adaptive thresholds
-- **Three detection methods** - Traditional, uniformity-first, adaptive percentile
+Your system uses sprocket hole detection for alignment:
+- **Sprocket-based advance** - precise 8-pitch frame steps
+- **Smoothed pitch tracking** - EMA filter rejects outliers
 - **Smart fine-tuning** - Progressive step adjustment (2.0x → 1.5x → 1.2x)
 - **Accurate confidence** - 75-99% based on actual alignment quality
-- **Better logging** - Shows gap widths and pass-by-pass progress
 
 All dependencies are already installed by `setup_pi.sh`:
 - ✓ OpenCV (cv2)
 - ✓ NumPy
-- ✓ frame_detector module
+- ✓ sprocket_detector module
 - ✓ All Flask dependencies
 
 ## ✅ Quick Command Reference
@@ -204,7 +197,6 @@ journalctl -u film-scanner-touchscreen -f  # Touchscreen logs
 
 # Testing
 bash scripts/verify_install.sh   # Verify installation
-python3 test_alignment.py <img>  # Test alignment
 
 # Configuration
 python3 web_app.py --reset        # Reset configuration
@@ -253,8 +245,8 @@ sudo systemctl restart film-scanner
 # Verify dependencies
 python3 -c "import cv2, numpy; print('OK')"
 
-# Test detector
-python3 test_detector.py
+# Test sprocket detection via web API
+curl -X POST http://localhost:5000/api/detect_sprockets
 
 # Check logs for alignment attempts
 journalctl -u film-scanner | grep "align"
@@ -267,8 +259,7 @@ Everything is in the repository:
 ```
 Film-Scanner/
 ├── web_app.py                      # Main web application
-├── frame_detector.py               # Alignment detection (ENHANCED)
-├── test_alignment.py               # Test alignment (NEW)
+├── sprocket_detector.py             # Sprocket-based alignment
 ├── requirements.txt                # Python dependencies
 ├── scripts/
 │   ├── setup_pi.sh                 # Comprehensive setup (UPDATED)
@@ -277,9 +268,8 @@ Film-Scanner/
 │   └── install.sh                  # One-line installer
 ├── arduino/film_scanner/           # Arduino firmware
 ├── docs/                           # Documentation
-├── QUICK_START_AFTER_REFLASH.md   # Quick start guide (NEW)
-├── ALIGNMENT_IMPROVEMENTS.md       # Alignment docs (NEW)
-└── REFLASH_CHECKLIST.md           # This file (NEW)
+├── QUICK_START_AFTER_REFLASH.md   # Quick start guide
+└── REFLASH_CHECKLIST.md           # This file
 ```
 
 ## ✅ Network Access

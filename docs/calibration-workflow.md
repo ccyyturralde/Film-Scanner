@@ -2,8 +2,8 @@
 
 ## Key Concepts
 
-### Frame Engagement Issue
-- First frame of each strip does not engage the sprocket until ~50% into the scanning window
+### First Frame Positioning
+- First frame of each strip must be manually positioned in the scanning window
 - Therefore: First frame position is ONLY for visual alignment, not step calibration
 - Step calibration must use frame 1 → frame 2 distance
 
@@ -15,7 +15,7 @@
 ### Strip Structure
 - 5-6 frames per strip (depending on film carrier)
 - Frame size constant throughout roll
-- Frame gap has minor variance requiring occasional touch-ups
+- Frame spacing has minor variance requiring occasional touch-ups
 
 ## Workflow Stages
 
@@ -105,7 +105,7 @@ All subsequent frames:
 ### When to Adjust
 - After loading each new strip (minor variance in first frame position)
 - If frames drift during a strip (mechanical slippage)
-- When switching film carriers (different gap characteristics)
+- When switching film carriers (different spacing characteristics)
 
 ### How to Adjust
 1. Turn off auto-advance: `A`
@@ -161,8 +161,8 @@ All subsequent frames:
 ## Troubleshooting
 
 ### Frames drifting progressively
-- Check mechanical connection
-- Verify no film slippage
+- Check roller tension and silicone ring grip
+- Verify no film slippage on rollers
 - May need to recalibrate if severe
 
 ### First frame of new strip misaligned

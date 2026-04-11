@@ -20,6 +20,7 @@ Professional-grade 35mm film scanner using Raspberry Pi, Arduino, and DSLR camer
 | Raspberry Pi | Pi 4 (2GB+ RAM recommended) |
 | Arduino | Uno R3, R4 Minima, or R4 WiFi (via USB) |
 | Motor | NEMA 17 stepper (standard or pancake) |
+| Film Transport | Rollers with silicone rings (friction drive) |
 | Driver | A4988 stepper driver |
 | Camera | Canon DSLR with USB/PTP support |
 | Power | 12V 2A for motor driver |
@@ -191,28 +192,6 @@ Run with `--check` to see issues without fixing them.
 - [API Reference](docs/api-reference.md) - Arduino command protocol
 - [Calibration Workflow](docs/calibration-workflow.md) - Scanning process
 - [Quick Reference](docs/quick-reference.md) - Command cheat sheet
-
-## Future Enhancements
-
-### ML-Based Frame Gap Detection
-
-The current auto-alignment uses computer vision (column brightness, vertical continuity, uniformity analysis) to detect frame gaps. A future enhancement would use machine learning for more robust detection:
-
-**Approach:**
-1. Build a sample image library with labeled examples:
-   - "aligned" (frame fully visible, no gap)
-   - "gap_left" (gap visible on left side)
-   - "gap_right" (gap visible on right side)
-2. Extract features: `column_uniformity`, `vertical_continuity`, `col_mean`, `col_std`
-3. Train a simple classifier (SVM or Random Forest) using scikit-learn
-4. Deploy the trained model for real-time inference on the Pi
-
-**Requirements:**
-- ~50-100 labeled sample images
-- scikit-learn for training
-- Model export via joblib
-
-**Why ML?** The key insight is that frame gaps have consistent vertical uniformity (same brightness top-to-bottom) regardless of absolute brightness. An ML model can learn this pattern more robustly than hand-tuned thresholds.
 
 ## License
 

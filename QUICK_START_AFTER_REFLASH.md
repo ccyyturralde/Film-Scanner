@@ -122,16 +122,13 @@ After setup, verify everything works:
 
 ## Alignment Improvements
 
-Your system now includes enhanced automatic alignment:
-- **Multi-pass edge detection** (8 passes with adaptive thresholds)
-- **Confidence scoring** (90-99% instead of stuck at 80%)
-- **Better gap detection** (3 methods: traditional, uniformity-first, adaptive)
+Your system now includes automatic alignment via sprocket hole detection:
+- **Sprocket-based frame advance** (precise 8-sprocket-pitch steps)
+- **Confidence scoring** (90-99%)
+- **Smoothed pitch tracking** (EMA filter for stable advance)
 - **Improved fine-tuning** (progressive step adjustment)
 
-Test alignment with:
-```bash
-python3 test_alignment.py path/to/test/image.jpg
-```
+Test alignment via the web interface Auto Align button, or the `/api/detect_sprockets` API endpoint.
 
 ## Troubleshooting
 

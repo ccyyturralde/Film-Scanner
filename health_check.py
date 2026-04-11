@@ -84,7 +84,7 @@ CORE_FILES = [
     "app_manager.py",
     "config_manager.py",
     "dependency_check.py",
-    "frame_detector.py",
+    "sprocket_detector.py",
     "framebuffer_display.py",
     "requirements.txt",
     "README.md",

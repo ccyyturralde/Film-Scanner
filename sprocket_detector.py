@@ -11,11 +11,11 @@ Detects sprocket holes on the top and/or bottom edges of 35mm film for precise f
 - Image area: 24mm x 36mm
 
 This detector finds sprocket holes as bright rectangular regions and uses their
-positions for precise frame alignment - much more reliable than gap detection
-since sprocket holes are consistent regardless of image content.
+positions for precise frame alignment. Sprocket holes are consistent regardless
+of image content, providing reliable alignment.
 
 Hardware Setup:
-- Film pulled from right side through mask
+- Film advanced by rollers with silicone rings (friction drive)
 - Full film visible including sprocket holes
 - Sprocket rows visible at top and/or bottom of preview
 """
@@ -661,6 +661,93 @@ def detect_frame_edge_sprocket(
             return peak_x + x_offset, confidence
     
     return None, 0.0
+
+
+def detect_bright_region_roi(
+    image_input,
+    min_area_ratio: float = 0.05,
+    padding: float = 0.0,
+    inner_shrink: float = 0.01,
+) -> Optional[dict]:
+    """
+    Detect the largest bright region (lit film window) within a mostly dark mask.
+
+    Args:
+        image_input: Either JPEG bytes or a grayscale numpy array.
+
+    Returns ROI as normalized fractions {x0,x1,y0,y1} or None if not found.
+    """
+    if isinstance(image_input, bytes):
+        gray = jpeg_bytes_to_gray(image_input)
+    elif isinstance(image_input, np.ndarray):
+        if image_input.ndim == 3:
+            gray = cv2.cvtColor(image_input, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = image_input
+    else:
+        return None
+
+    h, w = gray.shape[:2]
+
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=2)
+    binary = cv2.erode(binary, kernel, iterations=1)
+
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+
+    area_threshold = min_area_ratio * w * h
+    best_box: Optional[Tuple[int, int, int, int]] = None
+    best_area = 0
+
+    for c in contours:
+        x, y, bw, bh = cv2.boundingRect(c)
+        area = bw * bh
+        if area >= area_threshold and area > best_area:
+            best_area = area
+            best_box = (x, y, bw, bh)
+
+    if not best_box:
+        return None
+
+    x, y, bw, bh = best_box
+
+    shrink_x = max(1, min(10, int(round(0.003 * w))))
+    shrink_y = max(1, min(10, int(round(0.003 * h))))
+    x += shrink_x
+    y += shrink_y
+    bw = max(1, bw - 2 * shrink_x)
+    bh = max(1, bh - 2 * shrink_y)
+
+    if inner_shrink > 0:
+        inner_x = int(round(inner_shrink * bw))
+        inner_y = int(round(inner_shrink * bh))
+        if bw - 2 * inner_x >= 8 and bh - 2 * inner_y >= 4:
+            x += inner_x
+            y += inner_y
+            bw -= 2 * inner_x
+            bh -= 2 * inner_y
+
+    pad_x = int(round(padding * w))
+    pad_y = int(round(padding * h))
+    x0 = max(0, x - pad_x)
+    y0 = max(0, y - pad_y)
+    x1 = min(w, x + bw + pad_x)
+    y1 = min(h, y + bh + pad_y)
+
+    if x1 <= x0 or y1 <= y0:
+        return None
+
+    return {
+        "x0": round(x0 / w, 4),
+        "x1": round(x1 / w, 4),
+        "y0": round(y0 / h, 4),
+        "y1": round(y1 / h, 4),
+    }
 
 
 # Helper for JSON serialization

@@ -144,22 +144,15 @@ function updateUI(status) {
     document.getElementById('frame-count').textContent = status.frame_count;
     document.getElementById('position').textContent = status.position;
     document.getElementById('status-msg').textContent = status.status_msg;
-    const alignModeEl = document.getElementById('alignment-mode-display');
-    if (alignModeEl && status.alignment_mode) {
-        const modeLabel = status.alignment_mode === 'stream' ? 'Auto (Gap Detection)' : 'Auto (Sprocket Holes)';
-        alignModeEl.textContent = `Mode: ${modeLabel}`;
-    }
-    
     // Auto-align controls (hidden in 120 mode via arduino-only class)
     const autoAlignBtn = document.getElementById('auto-align-btn');
     const autoAlignCheckbox = document.getElementById('auto-align-before-capture');
     const autoAlignCheckboxWrap = document.getElementById('auto-align-checkbox-wrapper');
-    const isStreamMode = status.alignment_mode === 'stream' && !is120Mode;
     const alignEnabled = scannerState.autoAlignmentEnabled && !is120Mode;
     
-    if (autoAlignBtn) autoAlignBtn.style.display = isStreamMode && alignEnabled ? 'inline-block' : 'none';
-    if (autoAlignCheckboxWrap) autoAlignCheckboxWrap.style.display = isStreamMode ? 'inline-block' : 'none';
-    if (autoAlignCheckbox) autoAlignCheckbox.disabled = !isStreamMode || !alignEnabled;
+    if (autoAlignBtn) autoAlignBtn.style.display = alignEnabled ? 'inline-block' : 'none';
+    if (autoAlignCheckboxWrap) autoAlignCheckboxWrap.style.display = !is120Mode ? 'inline-block' : 'none';
+    if (autoAlignCheckbox) autoAlignCheckbox.disabled = !alignEnabled;
     
     // Auto-align status
     const alignText = document.getElementById('auto-align-status');
@@ -168,12 +161,11 @@ function updateUI(status) {
             alignText.textContent = 'Manual film feed mode';
         } else if (!scannerState.autoAlignmentEnabled) {
             alignText.textContent = 'Auto-alignment disabled';
-        } else if (status.alignment_confidence > 0 && status.last_gap_px != null) {
+        } else if (status.alignment_confidence > 0) {
             const conf = (status.alignment_confidence * 100).toFixed(0);
-            const pxPerStep = (status.px_per_step && !isNaN(status.px_per_step)) ? status.px_per_step.toFixed(2) : 'n/a';
-            alignText.textContent = `Gap px: ${status.last_gap_px} | Confidence: ${conf}% | px/step: ${pxPerStep}`;
+            alignText.textContent = `Confidence: ${conf}%`;
         } else {
-            alignText.textContent = 'Auto-align not run yet.';
+            alignText.textContent = 'Sprocket alignment ready.';
         }
     }
     
@@ -183,15 +175,9 @@ function updateUI(status) {
     const stripPanel = document.getElementById('strip-panel');
     
     if (is120Mode) {
-        // 120 mode: Hide all calibration/strip panels
-        if (calibrationPanel) calibrationPanel.style.display = 'none';
-        if (stripPanel) stripPanel.style.display = 'none';
-    } else if (isStreamMode) {
-        // Auto-align mode: hide calibration and strip management entirely
         if (calibrationPanel) calibrationPanel.style.display = 'none';
         if (stripPanel) stripPanel.style.display = 'none';
     } else {
-        // Calibration mode: show appropriate panel
         const needsCalibration = status.strip_count === 0;
         if (needsCalibration) {
             if (calibrationPanel) calibrationPanel.style.display = 'block';
@@ -786,23 +772,6 @@ async function autoAlign() {
         const info = result.info || {};
         const conf = info.confidence !== undefined ? (info.confidence * 100).toFixed(0) + '%' : 'n/a';
         alert(`Auto-align OK\nConfidence: ${conf}\nOffset px: ${info.offset_px ?? 'n/a'}`);
-    }
-}
-
-async function setAlignmentMode(mode) {
-    const result = await apiCall('set_alignment_mode', { mode });
-    if (!result.success) {
-        alert('Failed to set alignment mode: ' + (result.message || 'Unknown error'));
-    } else {
-        const alignModeEl = document.getElementById('alignment-mode-display');
-        if (alignModeEl) {
-            const modeLabel = result.alignment_mode === 'stream' ? 'Auto (Gap Detection)' : 'Auto (Sprocket Holes)';
-            alignModeEl.textContent = `Mode: ${modeLabel}`;
-        }
-        // If switching back to stream and video preview active, restart stream to ensure viewfinder is on
-        if (mode === 'stream' && previewState.videoActive) {
-            startVideoStream();
-        }
     }
 }
 

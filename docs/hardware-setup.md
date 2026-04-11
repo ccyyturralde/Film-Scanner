@@ -28,8 +28,8 @@
 
 ### Mechanical
 
-- Film transport mechanism
-- Film holders/reels
+- Film transport rollers with silicone rings (friction drive)
+- Film holder/mask
 - Light source (LED panel)
 
 ## Wiring Diagram
