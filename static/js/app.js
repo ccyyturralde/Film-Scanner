@@ -34,6 +34,8 @@ let settingsState = {
 let scannerState = {
     mode: '35mm',  // '35mm' or '120'
     autoAlignmentEnabled: true,
+    alignmentMethod: 'sprocket',  // 'sprocket', 'frame_gap', or 'auto'
+    filmPolarity: null,  // 'negative', 'positive', or null (auto)
     autoCaptureEnabled: false,
     autoCaptureDelay: 3.0,
     isAutoCapturing: false  // Track if auto-capture loop is active
@@ -59,6 +61,12 @@ function updateUI(status) {
     }
     if (status.auto_alignment_enabled !== undefined) {
         scannerState.autoAlignmentEnabled = status.auto_alignment_enabled;
+    }
+    if (status.alignment_method) {
+        scannerState.alignmentMethod = status.alignment_method;
+    }
+    if (status.film_polarity !== undefined) {
+        scannerState.filmPolarity = status.film_polarity;
     }
     if (status.auto_capture_enabled !== undefined) {
         scannerState.autoCaptureEnabled = status.auto_capture_enabled;
@@ -103,6 +111,22 @@ function updateUI(status) {
     const autoAlignmentToggle = document.getElementById('auto-alignment-toggle');
     if (autoAlignmentToggle) {
         autoAlignmentToggle.checked = scannerState.autoAlignmentEnabled;
+    }
+
+    // Update alignment method selectors (header + settings)
+    const alignMethodSelect = document.getElementById('alignment-method-select');
+    if (alignMethodSelect && alignMethodSelect.value !== scannerState.alignmentMethod) {
+        alignMethodSelect.value = scannerState.alignmentMethod;
+    }
+    const settingsMethodSelect = document.getElementById('settings-alignment-method');
+    if (settingsMethodSelect && settingsMethodSelect.value !== scannerState.alignmentMethod) {
+        settingsMethodSelect.value = scannerState.alignmentMethod;
+    }
+
+    // Update film polarity selector
+    const polaritySelect = document.getElementById('film-polarity-select');
+    if (polaritySelect) {
+        polaritySelect.value = scannerState.filmPolarity || '';
     }
     
     // Update auto-capture toggle (both locations)
@@ -157,15 +181,17 @@ function updateUI(status) {
     // Auto-align status
     const alignText = document.getElementById('auto-align-status');
     if (alignText) {
+        const methodLabels = { sprocket: 'Sprocket', frame_gap: 'Frame Gap', auto: 'Auto' };
+        const methodLabel = methodLabels[scannerState.alignmentMethod] || scannerState.alignmentMethod;
         if (is120Mode) {
             alignText.textContent = 'Manual film feed mode';
         } else if (!scannerState.autoAlignmentEnabled) {
             alignText.textContent = 'Auto-alignment disabled';
         } else if (status.alignment_confidence > 0) {
             const conf = (status.alignment_confidence * 100).toFixed(0);
-            alignText.textContent = `Confidence: ${conf}%`;
+            alignText.textContent = `${methodLabel} — Confidence: ${conf}%`;
         } else {
-            alignText.textContent = 'Sprocket alignment ready.';
+            alignText.textContent = `${methodLabel} alignment ready.`;
         }
     }
     
@@ -802,6 +828,28 @@ async function toggleAutoAlignment() {
     }
 }
 
+async function setAlignmentMethod() {
+    const select = document.getElementById('alignment-method-select');
+    if (!select) return;
+    const method = select.value;
+
+    const result = await apiCall('set_alignment_method', { method });
+    if (!result.success) {
+        alert('Failed to set alignment method: ' + (result.message || 'Unknown error'));
+        select.value = scannerState.alignmentMethod;
+    } else {
+        scannerState.alignmentMethod = result.alignment_method;
+        if (result.film_polarity !== undefined) {
+            scannerState.filmPolarity = result.film_polarity;
+        }
+        // Sync settings panel selector
+        const settingsSelect = document.getElementById('settings-alignment-method');
+        if (settingsSelect) settingsSelect.value = result.alignment_method;
+        updateAlignmentMethodInfo();
+        socket.emit('request_status');
+    }
+}
+
 async function setMotorDirectionReversed() {
     const checkbox = document.getElementById('motor-direction-reversed');
     const reversed = checkbox ? checkbox.checked : false;
@@ -810,6 +858,80 @@ async function setMotorDirectionReversed() {
         alert('Failed to set motor direction: ' + (result.message || 'Unknown error'));
         if (checkbox) checkbox.checked = !reversed;
     } else {
+        socket.emit('request_status');
+    }
+}
+
+async function setAlignmentMethodFromSettings() {
+    const select = document.getElementById('settings-alignment-method');
+    if (!select) return;
+    const method = select.value;
+
+    const result = await apiCall('set_alignment_method', { method });
+    if (!result.success) {
+        alert('Failed to set alignment method: ' + (result.message || 'Unknown error'));
+        select.value = scannerState.alignmentMethod;
+    } else {
+        scannerState.alignmentMethod = result.alignment_method;
+        // Sync the header selector too
+        const headerSelect = document.getElementById('alignment-method-select');
+        if (headerSelect) headerSelect.value = result.alignment_method;
+        updateAlignmentMethodInfo();
+        socket.emit('request_status');
+    }
+}
+
+async function setFilmPolarity() {
+    const select = document.getElementById('film-polarity-select');
+    if (!select) return;
+    const polarity = select.value || null;
+
+    const result = await apiCall('set_alignment_method', {
+        method: scannerState.alignmentMethod,
+        film_polarity: polarity,
+    });
+    if (!result.success) {
+        alert('Failed to set film polarity: ' + (result.message || 'Unknown error'));
+    } else {
+        scannerState.filmPolarity = result.film_polarity;
+        socket.emit('request_status');
+    }
+}
+
+function updateAlignmentMethodInfo() {
+    const infoEl = document.getElementById('alignment-method-info');
+    if (!infoEl) return;
+    const labels = { sprocket: 'Sprocket-based', frame_gap: 'Frame-gap (sprocketless)', auto: 'Auto (sprocket → frame gap fallback)' };
+    infoEl.textContent = (labels[scannerState.alignmentMethod] || scannerState.alignmentMethod) + ' alignment active.';
+}
+
+async function showAlignmentOverlay() {
+    const result = await apiCall('debug_alignment_overlay');
+    if (!result.success) {
+        alert('Debug overlay failed: ' + (result.message || 'Unknown error'));
+        return;
+    }
+    if (result.image) {
+        const previewImg = document.getElementById('preview-image');
+        if (previewImg) {
+            previewImg.src = 'data:image/jpeg;base64,' + result.image;
+        }
+    }
+}
+
+async function calibrateFrameGaps() {
+    const result = await apiCall('calibrate_frame_gaps');
+    if (!result.success) {
+        alert('Frame gap calibration failed: ' + (result.message || 'Need at least 2 visible gaps.'));
+    } else {
+        const cal = result.calibration;
+        alert(
+            `Frame gap calibration OK\n` +
+            `Pitch: ${cal.frame_pitch_px.toFixed(1)}px\n` +
+            `px/mm: ${cal.px_per_mm.toFixed(2)}\n` +
+            `Gaps found: ${cal.gaps_detected}\n` +
+            `Polarity: ${cal.film_polarity}`
+        );
         socket.emit('request_status');
     }
 }

@@ -49,6 +49,12 @@ from sprocket_detector import (
     SPROCKET_PITCH_MM,
     SPROCKETS_PER_FRAME,
 )
+from frame_detector import (
+    detect_frame_gaps,
+    calibrate_from_gaps,
+    FrameGapDetectionResult,
+    FRAME_PITCH_MM as FRAME_GAP_PITCH_MM,
+)
 import cv2
 import numpy as np
 try:
@@ -956,6 +962,13 @@ class FilmScanner:
         self.sprocket_pitch_px_smoothed = None  # Running average for stable advance (reduces overshoot/undershoot)
         self.px_per_mm = None  # Pixels per millimeter (from sprocket calibration)
         self.last_sprocket_result = None  # Last sprocket detection result
+
+        # Frame-gap-based alignment (sprocketless)
+        self.alignment_method = "sprocket"  # "sprocket", "frame_gap", or "auto"
+        self.frame_gap_pitch_px = None  # Measured frame pitch from gap detection
+        self.frame_gap_pitch_px_smoothed = None
+        self.last_frame_gap_result = None
+        self.film_polarity = None  # "negative" or "positive" (auto-detected if None)
         
         # Scanner mode: "35mm" (Arduino motor control) or "120" (hand feed, no Arduino)
         self.scanner_mode = "35mm"
@@ -2040,6 +2053,268 @@ class FilmScanner:
             self.log(f"✗ Calibration error: {e}")
             return None
 
+    # ========================================================================
+    # FRAME-GAP-BASED ALIGNMENT (sprocketless)
+    # ========================================================================
+
+    def detect_frame_gap_holes(self) -> Optional[dict]:
+        """Detect inter-frame gaps in the current preview frame."""
+        frame_bytes, _ = self.get_alignment_frame(timeout=1.0)
+        if not frame_bytes:
+            self.log("✗ No frame for gap detection")
+            return None
+
+        try:
+            result = detect_frame_gaps(
+                frame_bytes,
+                polarity=self.film_polarity,
+                expected_pitch_px=self.frame_gap_pitch_px_smoothed,
+            )
+            self.last_frame_gap_result = result
+
+            if result.frame_pitch_px:
+                self.frame_gap_pitch_px = result.frame_pitch_px
+                self.px_per_mm = result.px_per_mm
+
+            return result.to_dict()
+        except Exception as e:
+            self.log(f"✗ Frame gap detection error: {e}")
+            return None
+
+    def auto_align_frame_gap(self, max_iterations=15, tolerance_px=15):
+        """
+        Align frame using inter-frame gap detection (no sprocket holes needed).
+
+        Returns (success, message, debug_info) — same contract as auto_align_sprocket.
+        """
+        self.log("▶ Frame-gap alignment starting...")
+        total_steps = 0
+
+        for iteration in range(max_iterations):
+            if iteration > 0:
+                time.sleep(0.15)
+
+            frame_bytes, _ = self.get_alignment_frame(timeout=0.8)
+            if not frame_bytes:
+                self.log(f"   [{iteration+1}] No frame")
+                continue
+
+            try:
+                result = detect_frame_gaps(
+                    frame_bytes,
+                    polarity=self.film_polarity,
+                    alignment_tolerance_px=tolerance_px,
+                    expected_pitch_px=self.frame_gap_pitch_px_smoothed,
+                )
+                self.last_frame_gap_result = result
+
+                if result.frame_pitch_px:
+                    new_p = result.frame_pitch_px
+                    accept = True
+                    if self.frame_gap_pitch_px_smoothed is not None:
+                        ratio = new_p / self.frame_gap_pitch_px_smoothed
+                        if ratio < 0.65 or ratio > 1.35:
+                            accept = False
+                    if accept:
+                        self.frame_gap_pitch_px = new_p
+                        if self.frame_gap_pitch_px_smoothed is None:
+                            self.frame_gap_pitch_px_smoothed = new_p
+                        else:
+                            self.frame_gap_pitch_px_smoothed = (
+                                0.8 * self.frame_gap_pitch_px_smoothed + 0.2 * new_p
+                            )
+                        self.px_per_mm = result.px_per_mm
+
+                gap_count = len(result.gaps)
+                offset = result.offset_px
+                confidence = result.confidence
+
+                self.log(
+                    f"   [{iteration+1}] Gaps: {gap_count}, Offset: {offset}px, "
+                    f"Confidence: {confidence:.0%}, Polarity: {result.film_polarity}"
+                )
+
+                if gap_count < 1:
+                    self.log(f"   ⚠ No inter-frame gaps detected")
+                    self.send_and_wait(self.cmd_advance(50))
+                    total_steps += 50
+                    continue
+
+                if result.aligned:
+                    self.status_msg = "✓ Aligned (frame gap)"
+                    self.log(f"   ✓ Aligned! {total_steps} total steps")
+                    self.alignment_confidence = confidence
+                    return True, "Aligned", {
+                        "mode": "frame_gap_aligned",
+                        "total_steps": total_steps,
+                        "iterations": iteration + 1,
+                        "gap_count": gap_count,
+                        "confidence": confidence,
+                        "frame_pitch_px": result.frame_pitch_px,
+                    }
+
+                px_per_step = self.px_per_step if hasattr(self, 'px_per_step') else 3.0
+                steps_needed = int(abs(offset) / px_per_step)
+                steps_needed = max(8, min(steps_needed, 200))
+
+                if offset > 0:
+                    direction = "RIGHT"
+                    cmd = self.cmd_backup(steps_needed)
+                else:
+                    direction = "LEFT"
+                    cmd = self.cmd_advance(steps_needed)
+
+                self.log(f"   → Moving {direction} {steps_needed} steps (offset={offset}px)")
+                self.send_and_wait(cmd)
+
+                if direction == "RIGHT":
+                    total_steps += steps_needed
+                else:
+                    total_steps -= steps_needed
+
+            except Exception as e:
+                self.log(f"   Error: {e}")
+                import traceback
+                traceback.print_exc()
+                continue
+
+        self.status_msg = "⚠ Frame-gap alignment incomplete"
+        self.log(f"   Max iterations, {total_steps} total steps")
+        return True, "Moved", {
+            "mode": "frame_gap_incomplete",
+            "total_steps": total_steps,
+            "iterations": max_iterations,
+        }
+
+    def advance_and_align_frame_gap(self, max_iters=20):
+        """
+        Advance to next frame using inter-frame gap detection.
+
+        Returns (success, message, debug_info).
+        """
+        self.log("▶ Advancing to next frame (frame gap)...")
+
+        frame_bytes, _ = self.get_alignment_frame(timeout=1.0)
+        if not frame_bytes:
+            self.log("✗ No frame for gap advance")
+            return False, "No frame", {}
+
+        try:
+            result = detect_frame_gaps(
+                frame_bytes,
+                polarity=self.film_polarity,
+                expected_pitch_px=self.frame_gap_pitch_px_smoothed,
+            )
+
+            pitch = result.frame_pitch_px
+            if not pitch:
+                if self.frame_gap_pitch_px_smoothed:
+                    pitch = self.frame_gap_pitch_px_smoothed
+                    self.log("⚠ No gaps detected — using smoothed pitch")
+                else:
+                    self.log("⚠ No frame pitch detected — move film manually or try again")
+                    return False, "No frame pitch", {}
+
+            if self.frame_gap_pitch_px_smoothed is not None:
+                ratio = pitch / self.frame_gap_pitch_px_smoothed
+                if ratio < 0.65 or ratio > 1.35:
+                    self.log(
+                        f"   ⚠ Detected pitch {pitch:.1f}px rejected "
+                        f"(smoothed={self.frame_gap_pitch_px_smoothed:.1f}px). "
+                        f"Using smoothed value."
+                    )
+                    pitch = self.frame_gap_pitch_px_smoothed
+
+            if self.frame_gap_pitch_px_smoothed is None:
+                self.frame_gap_pitch_px_smoothed = pitch
+            else:
+                self.frame_gap_pitch_px_smoothed = (
+                    0.8 * self.frame_gap_pitch_px_smoothed + 0.2 * pitch
+                )
+            pitch_for_advance = self.frame_gap_pitch_px_smoothed
+            self.frame_gap_pitch_px = pitch
+
+            px_per_step = self.px_per_step if hasattr(self, 'px_per_step') else 3.0
+            steps_per_frame = round(pitch_for_advance / px_per_step)
+            steps_per_frame = max(1, steps_per_frame)
+
+            self.log(
+                f"   Frame pitch: {pitch_for_advance:.1f}px (smoothed), Steps: {steps_per_frame}, "
+                f"gaps: {len(result.gaps)}"
+            )
+
+            self.send_and_wait(self.cmd_advance(steps_per_frame), timeout=15.0)
+            time.sleep(0.3)
+
+            success, msg, info = self.auto_align_frame_gap(max_iterations=12, tolerance_px=15)
+
+            info["advance_steps"] = steps_per_frame
+            align_steps = info.get("total_steps", 0)
+            total_steps_used = steps_per_frame + align_steps
+            align_confidence = info.get("confidence", 0)
+            if (total_steps_used > 50 and pitch_for_advance > 0
+                    and align_confidence >= 0.3
+                    and abs(align_steps) < steps_per_frame * 0.25):
+                observed_px_per_step = pitch_for_advance / total_steps_used
+                old_pps = self.px_per_step if hasattr(self, 'px_per_step') and self.px_per_step else 3.0
+                if 0.7 * old_pps <= observed_px_per_step <= 1.3 * old_pps:
+                    self.px_per_step = 0.9 * old_pps + 0.1 * observed_px_per_step
+                    info["px_per_step_refined"] = self.px_per_step
+            return success, msg, info
+
+        except Exception as e:
+            self.log(f"✗ Frame gap advance error: {e}")
+            return False, str(e), {}
+
+    # ========================================================================
+    # ALIGNMENT DISPATCH (routes into sprocket or frame-gap method)
+    # ========================================================================
+
+    def auto_align_dispatch(self, **kwargs):
+        """
+        Route to the correct alignment method based on self.alignment_method.
+
+        Returns (success, message, debug_info).
+        """
+        method = self.alignment_method
+
+        if method == "frame_gap":
+            return self.auto_align_frame_gap(**kwargs)
+        elif method == "auto":
+            success, msg, info = self.auto_align_sprocket(**kwargs)
+            if not success or info.get("mode") == "sprocket_incomplete":
+                sprocket_count = info.get("sprocket_count", 0)
+                if sprocket_count < 2:
+                    self.log("   Auto: sprocket detection weak, trying frame-gap...")
+                    return self.auto_align_frame_gap(**kwargs)
+            return success, msg, info
+        else:
+            return self.auto_align_sprocket(**kwargs)
+
+    def advance_and_align_dispatch(self, **kwargs):
+        """
+        Route to the correct advance-and-align method based on self.alignment_method.
+
+        Returns (success, message, debug_info).
+        """
+        method = self.alignment_method
+
+        if method == "frame_gap":
+            return self.advance_and_align_frame_gap(**kwargs)
+        elif method == "auto":
+            if self.sprocket_pitch_px_smoothed:
+                return self.advance_and_align_sprocket(**kwargs)
+            elif self.frame_gap_pitch_px_smoothed:
+                return self.advance_and_align_frame_gap(**kwargs)
+            # No prior calibration — try sprocket first
+            success, msg, info = self.advance_and_align_sprocket(**kwargs)
+            if not success:
+                self.log("   Auto: sprocket advance failed, trying frame-gap...")
+                return self.advance_and_align_frame_gap(**kwargs)
+            return success, msg, info
+        else:
+            return self.advance_and_align_sprocket(**kwargs)
+
     def detect_alignment_roi(self, padding: float = 0.0, min_area_ratio: float = 0.05):
         """
         Detect alignment ROI from preview stream frame.
@@ -2213,6 +2488,8 @@ class FilmScanner:
             'auto_advance': self.auto_advance,
             'scanner_mode': self.scanner_mode,
             'auto_alignment_enabled': self.auto_alignment_enabled,
+            'alignment_method': self.alignment_method,
+            'film_polarity': self.film_polarity,
             'auto_capture_enabled': self.auto_capture_enabled,
             'auto_capture_delay': self.auto_capture_delay,
             'scanlight_profiles': self.scanlight_profiles,
@@ -2242,6 +2519,8 @@ class FilmScanner:
                 self.auto_advance = state.get('auto_advance', True)
                 self.scanner_mode = state.get('scanner_mode', self.scanner_mode)
                 self.auto_alignment_enabled = state.get('auto_alignment_enabled', self.auto_alignment_enabled)
+                self.alignment_method = state.get('alignment_method', self.alignment_method)
+                self.film_polarity = state.get('film_polarity', self.film_polarity)
                 self.auto_capture_enabled = state.get('auto_capture_enabled', self.auto_capture_enabled)
                 self.auto_capture_delay = state.get('auto_capture_delay', self.auto_capture_delay)
                 
@@ -2420,6 +2699,8 @@ class FilmScanner:
                 'frame_mode': self.frame_mode,
                 'scanner_mode': self.scanner_mode,
                 'auto_alignment_enabled': self.auto_alignment_enabled,
+                'alignment_method': self.alignment_method,
+                'film_polarity': self.film_polarity,
                 'auto_capture_enabled': self.auto_capture_enabled,
                 'auto_capture_delay': self.auto_capture_delay,
                 'camera_connected': self.camera_connected,
@@ -2703,11 +2984,11 @@ def capture():
         if not scanner.check_camera(force=True):
             return jsonify({'success': False, 'message': 'Camera not connected'})
         
-        # Optional pre-capture fine-tune using sprocket detection
+        # Optional pre-capture fine-tune alignment
         if auto_align_before and scanner.auto_alignment_enabled:
             try:
-                scanner.log("Pre-capture sprocket check...")
-                success, msg, info = scanner.auto_align_sprocket(max_iterations=5, tolerance_px=20)
+                scanner.log("Pre-capture alignment check...")
+                success, msg, info = scanner.auto_align_dispatch(max_iterations=5, tolerance_px=20)
                 scanner.broadcast_status()
                 if not success:
                     scanner.log(f"Pre-capture align note: {msg}")
@@ -2736,16 +3017,16 @@ def capture():
                 # 120 mode: No auto-advance, user manually feeds film
                 scanner.status_msg = f"✓ Frame {scanner.frame_count} (hand feed next)"
             elif scanner.auto_alignment_enabled:
-                # Sprocket-based advance to next frame
+                # Auto-advance to next frame using configured alignment method
                 time.sleep(0.3)
                 try:
-                    adv_success, adv_msg, adv_info = scanner.advance_and_align_sprocket()
+                    adv_success, adv_msg, adv_info = scanner.advance_and_align_dispatch()
                     if adv_success:
                         scanner.status_msg = f"✓ Frame {scanner.frame_count} → Ready for next"
                     else:
                         scanner.status_msg = f"✓ Frame {scanner.frame_count} (advance: {adv_msg})"
                 except Exception as e:
-                    scanner.log(f"Sprocket advance error: {e}")
+                    scanner.log(f"Advance error: {e}")
                     scanner.status_msg = f"✓ Frame {scanner.frame_count} (advance error)"
             elif scanner.mode == 'calibrated' and scanner.auto_advance:
                 # CALIBRATION MODE: Use fixed frame_advance distance (h = advance on this hardware)
@@ -2779,9 +3060,9 @@ def capture():
 
 @app.route('/api/auto_align', methods=['POST'])
 def auto_align_route():
-    """Align to nearest frame using sprocket hole detection."""
+    """Align to nearest frame using the configured alignment method."""
     try:
-        success, msg, info = scanner.auto_align_sprocket()
+        success, msg, info = scanner.auto_align_dispatch()
         scanner.broadcast_status()
         with scanner.lock:
             confidence = scanner.alignment_confidence
@@ -2800,9 +3081,9 @@ def auto_align_route():
 
 @app.route('/api/advance_and_align', methods=['POST'])
 def advance_and_align_route():
-    """Advance to next frame using sprocket hole detection."""
+    """Advance to next frame using the configured alignment method."""
     try:
-        success, msg, info = scanner.advance_and_align_sprocket()
+        success, msg, info = scanner.advance_and_align_dispatch()
         scanner.broadcast_status()
         return jsonify({
             'success': success,
@@ -2901,6 +3182,89 @@ def align_sprocket_route():
         'success': success,
         'message': message,
         'info': info,
+    })
+
+
+# ============================================================================
+# FRAME GAP DETECTION API ENDPOINTS
+# ============================================================================
+
+@app.route('/api/detect_frame_gaps', methods=['POST'])
+def detect_frame_gaps_route():
+    """Detect inter-frame gaps in the current frame for sprocketless alignment."""
+    result = scanner.detect_frame_gap_holes()
+    if result:
+        return jsonify({'success': True, 'result': result})
+    else:
+        return jsonify({'success': False, 'message': 'Frame gap detection failed'})
+
+
+@app.route('/api/calibrate_frame_gaps', methods=['POST'])
+def calibrate_frame_gaps_route():
+    """Calibrate scanner using visible inter-frame gaps."""
+    frame_bytes, _ = scanner.get_alignment_frame(timeout=2.0)
+    if not frame_bytes:
+        return jsonify({'success': False, 'message': 'No frame available'})
+
+    calibration = calibrate_from_gaps(frame_bytes, polarity=scanner.film_polarity)
+    if calibration:
+        scanner.frame_gap_pitch_px = calibration["frame_pitch_px"]
+        scanner.frame_gap_pitch_px_smoothed = calibration["frame_pitch_px"]
+        scanner.px_per_mm = calibration["px_per_mm"]
+        scanner.film_polarity = calibration["film_polarity"]
+        scanner.log(
+            f"✓ Frame gap calibration: {calibration['frame_pitch_px']:.1f}px/frame, "
+            f"{calibration['px_per_mm']:.2f}px/mm, polarity={calibration['film_polarity']}"
+        )
+        return jsonify({'success': True, 'calibration': calibration})
+    else:
+        return jsonify({
+            'success': False,
+            'message': 'Frame gap calibration failed - need at least 2 visible gaps',
+        })
+
+
+@app.route('/api/set_alignment_method', methods=['POST'])
+def set_alignment_method_route():
+    """
+    Set the alignment method: sprocket, frame_gap, or auto.
+
+    Also optionally accepts film_polarity: "negative", "positive", or null (auto-detect).
+    """
+    data = request.json or {}
+    method = (data.get('method') or '').strip().lower()
+
+    if method not in ('sprocket', 'frame_gap', 'auto'):
+        return jsonify({
+            'success': False,
+            'message': "method must be 'sprocket', 'frame_gap', or 'auto'",
+        })
+
+    polarity = data.get('film_polarity')
+    if polarity is not None:
+        polarity = polarity.strip().lower() if isinstance(polarity, str) else None
+        if polarity not in ('negative', 'positive', None, ''):
+            return jsonify({
+                'success': False,
+                'message': "film_polarity must be 'negative', 'positive', or null",
+            })
+        if polarity == '':
+            polarity = None
+
+    with scanner.lock:
+        scanner.alignment_method = method
+        if polarity is not None or 'film_polarity' in data:
+            scanner.film_polarity = polarity if polarity else None
+
+    label_map = {"sprocket": "Sprocket Holes", "frame_gap": "Frame Gap", "auto": "Auto"}
+    scanner.status_msg = f"Alignment: {label_map.get(method, method)}"
+    scanner.save_state()
+    scanner.broadcast_status()
+
+    return jsonify({
+        'success': True,
+        'alignment_method': scanner.alignment_method,
+        'film_polarity': scanner.film_polarity,
     })
 
 
@@ -3360,17 +3724,26 @@ def capture_card_diagnostic_route():
                     'confidence': float(sprocket_result.confidence),
                     'aligned': sprocket_result.aligned,
                 }
-                
-                # Draw detected sprocket holes on image
+
+                # Run frame gap detection
+                gap_result = detect_frame_gaps(frame_bytes, polarity=scanner.film_polarity)
+                result['frame_gap_detection'] = gap_result.to_dict()
+
+                # Draw detected sprocket holes (green)
                 for hole in sprocket_result.sprocket_holes:
                     x, y, hw, hh = hole.x, hole.y, hole.width, hole.height
                     cv2.rectangle(img, (x - hw//2, y - hh//2), (x + hw//2, y + hh//2), (0, 255, 0), 2)
+
+                # Draw detected frame gaps (cyan lines)
+                for gap in gap_result.gaps:
+                    gx = gap.center_x
+                    cv2.line(img, (gx, 0), (gx, img.shape[0]), (255, 255, 0), 2)
                 
                 # Draw center line
                 center = img.shape[1] // 2
                 cv2.line(img, (center, 0), (center, img.shape[0]), (255, 0, 0), 2)
                 
-                cv2.putText(img, f"Sprockets: {len(sprocket_result.sprocket_holes)}", (10, 30),
+                cv2.putText(img, f"Sprockets: {len(sprocket_result.sprocket_holes)}  Gaps: {len(gap_result.gaps)}", (10, 30),
                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
                 
                 success, buf = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
@@ -3386,6 +3759,93 @@ def capture_card_diagnostic_route():
         result['traceback'] = traceback.format_exc()
     
     return jsonify(result)
+
+
+@app.route('/api/debug_alignment_overlay', methods=['POST'])
+def debug_alignment_overlay_route():
+    """
+    Return a preview image with alignment debug overlay drawn on it.
+
+    Draws detected features (sprocket holes or frame gaps) depending on
+    the current alignment_method, plus a center line and text annotations.
+    """
+    try:
+        frame_bytes, _ = scanner.get_alignment_frame(timeout=2.0)
+        if not frame_bytes:
+            return jsonify({'success': False, 'message': 'No frame available'})
+
+        arr = np.frombuffer(frame_bytes, dtype=np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img is None:
+            return jsonify({'success': False, 'message': 'Failed to decode frame'})
+
+        h, w = img.shape[:2]
+        center_x = w // 2
+
+        method = scanner.alignment_method
+        detection_info = {}
+
+        if method in ("frame_gap", "auto"):
+            gap_result = detect_frame_gaps(
+                frame_bytes,
+                polarity=scanner.film_polarity,
+                expected_pitch_px=scanner.frame_gap_pitch_px_smoothed,
+            )
+            detection_info['method'] = 'frame_gap'
+            detection_info['gap_count'] = len(gap_result.gaps)
+            detection_info['offset_px'] = gap_result.offset_px
+            detection_info['confidence'] = gap_result.confidence
+            detection_info['polarity'] = gap_result.film_polarity
+
+            for gap in gap_result.gaps:
+                gx = gap.center_x
+                gw = gap.width_px // 2
+                # Cyan vertical band for each detected gap
+                overlay = img.copy()
+                cv2.rectangle(overlay, (gx - gw, 0), (gx + gw, h), (255, 255, 0), -1)
+                cv2.addWeighted(overlay, 0.25, img, 0.75, 0, img)
+                # Solid center line for gap
+                cv2.line(img, (gx, 0), (gx, h), (255, 255, 0), 2)
+
+            cv2.putText(
+                img,
+                f"Gaps: {len(gap_result.gaps)}  Off: {gap_result.offset_px}px  "
+                f"Conf: {gap_result.confidence:.0%}  [{gap_result.film_polarity}]",
+                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2,
+            )
+
+        if method in ("sprocket", "auto"):
+            sprocket_result = detect_sprockets(frame_bytes)
+            detection_info['sprocket_count'] = len(sprocket_result.sprocket_holes)
+
+            for hole in sprocket_result.sprocket_holes:
+                x, y, hw, hh = hole.x, hole.y, hole.width, hole.height
+                cv2.rectangle(img, (x - hw//2, y - hh//2), (x + hw//2, y + hh//2), (0, 255, 0), 2)
+
+            if method == "sprocket":
+                cv2.putText(
+                    img,
+                    f"Sprockets: {len(sprocket_result.sprocket_holes)}  "
+                    f"Off: {sprocket_result.offset_px}px  Conf: {sprocket_result.confidence:.0%}",
+                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2,
+                )
+
+        # Center crosshair
+        cv2.line(img, (center_x, 0), (center_x, h), (0, 0, 255), 2)
+
+        success, buf = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+        if not success:
+            return jsonify({'success': False, 'message': 'Failed to encode overlay image'})
+
+        image_data = base64.b64encode(buf.tobytes()).decode('utf-8')
+        return jsonify({
+            'success': True,
+            'image': image_data,
+            'detection': detection_info,
+        })
+
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
 
 
 @app.route('/api/logs', methods=['POST'])

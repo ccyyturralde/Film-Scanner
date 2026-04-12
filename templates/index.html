@@ -87,6 +87,14 @@
                                 <input type="checkbox" id="auto-alignment-toggle" onchange="toggleAutoAlignment()" checked>
                                 Auto-Alignment
                             </label>
+                            <label style="display:flex;align-items:center;gap:8px;margin-right:16px;" title="Detection method for frame alignment">
+                                Method:
+                                <select id="alignment-method-select" onchange="setAlignmentMethod()">
+                                    <option value="sprocket">Sprocket Holes</option>
+                                    <option value="frame_gap">Frame Gap</option>
+                                    <option value="auto">Auto</option>
+                                </select>
+                            </label>
                             <label id="auto-align-checkbox-wrapper">
                                 <input type="checkbox" id="auto-align-before-capture">
                                 Fine-tune before capture
@@ -187,7 +195,27 @@
 
                     <div class="settings-section arduino-only">
                         <h3>Alignment</h3>
-                        <div class="help-text">Sprocket hole detection</div>
+                        <div class="setting-group">
+                            <label>Method:</label>
+                            <select id="settings-alignment-method" onchange="setAlignmentMethodFromSettings()">
+                                <option value="sprocket">Sprocket Holes</option>
+                                <option value="frame_gap">Frame Gap (no sprockets)</option>
+                                <option value="auto">Auto (try both)</option>
+                            </select>
+                        </div>
+                        <div class="setting-group">
+                            <label>Film polarity:</label>
+                            <select id="film-polarity-select" onchange="setFilmPolarity()">
+                                <option value="">Auto-detect</option>
+                                <option value="negative">Negative</option>
+                                <option value="positive">Positive / Slide</option>
+                            </select>
+                        </div>
+                        <div class="control-options" style="margin-top:8px;">
+                            <button class="btn btn-secondary" onclick="showAlignmentOverlay()">🔍 Debug Overlay</button>
+                            <button class="btn btn-secondary" onclick="calibrateFrameGaps()">Calibrate from Gaps</button>
+                        </div>
+                        <div class="help-text" id="alignment-method-info">Sprocket-based alignment active.</div>
                     </div>
 
                     <div class="settings-section arduino-only">
