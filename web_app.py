@@ -55,6 +55,7 @@ from frame_detector import (
     FrameGapDetectionResult,
     FRAME_PITCH_MM as FRAME_GAP_PITCH_MM,
 )
+from alignment_learner import AlignmentLearner
 import cv2
 import numpy as np
 try:
@@ -967,6 +968,18 @@ class FilmScanner:
         self.alignment_method = "sprocket"  # "sprocket", "frame_gap", or "auto"
         self.frame_gap_pitch_px = None  # Measured frame pitch from gap detection
         self.frame_gap_pitch_px_smoothed = None
+
+        # Calibrated-advance mode: align first frame, then blind-advance with
+        # optional vision verification.  Learned from vision or manual calibration.
+        self.calibrated_advance_steps = None  # Steps per frame from vision calibration
+        self.vision_verify_after_advance = False  # Quick vision check after blind advance
+        self.spacing_corrections = []  # Per-frame step offsets for uneven cameras
+
+        # Adaptive learning: persists calibration data across sessions
+        self.learner = AlignmentLearner()
+        self.learner.load()
+        if self.learner.profile.px_per_step_count > 0:
+            self.px_per_step = self.learner.get_px_per_step()
         self.last_frame_gap_result = None
         self.film_polarity = None  # "negative" or "positive" (auto-detected if None)
         
@@ -1798,30 +1811,24 @@ class FilmScanner:
         """
         Align frame using sprocket hole detection.
 
-        Sprocket holes provide reliable alignment because they are:
-        - Precisely spaced (standard 35mm pitch: 4.75mm)
-        - High contrast (bright holes against dark film)
-        - Consistent regardless of image content
-        
-        Args:
-            max_iterations: Maximum alignment iterations
-            tolerance_px: Alignment tolerance in pixels
-            
-        Returns:
-            (success, message, debug_info)
+        Uses proportional control with damping to converge on the target
+        position.  Detects oscillation (alternating direction reversals)
+        and reduces gain to settle.  Limits cumulative blind advances
+        when sprocket detection fails.
         """
         import numpy as np
         
         self.log("▶ Sprocket-based alignment starting...")
         total_steps = 0
+        blind_advance_budget = 150
+        prev_offsets = []
+        direction_reversals = 0
+        last_direction = None
         
         for iteration in range(max_iterations):
             if iteration > 0:
-                # Brief settle after previous move completed (send_and_wait already
-                # confirmed the motor stopped, this is just for physical vibration)
                 time.sleep(0.15)
             
-            # Get frame and detect sprockets
             frame_bytes, _ = self.get_alignment_frame(timeout=0.8)
             if not frame_bytes:
                 self.log(f"   [{iteration+1}] No frame")
@@ -1834,13 +1841,10 @@ class FilmScanner:
                     alignment_tolerance_px=tolerance_px,
                 )
                 
-                # Store result for UI
                 self.last_sprocket_result = result
                 
-                # Update calibration if we got good data — with validation
                 if result.sprocket_pitch_px:
                     new_p = result.sprocket_pitch_px
-                    # Reject wild outliers that would corrupt the smoothed pitch
                     accept = True
                     if self.sprocket_pitch_px_smoothed is not None:
                         ratio = new_p / self.sprocket_pitch_px_smoothed
@@ -1860,15 +1864,17 @@ class FilmScanner:
                 
                 self.log(f"   [{iteration+1}] Sprockets: {sprocket_count}, Offset: {offset}px, Confidence: {confidence:.0%}")
                 
-                # Check if we need sprockets to align
                 if sprocket_count < 2:
-                    self.log(f"   ⚠ Not enough sprocket holes detected ({sprocket_count})")
-                    # Move a bit to find sprockets — wait for completion
-                    self.send_and_wait(self.cmd_advance(50))
-                    total_steps += 50
+                    if blind_advance_budget <= 0:
+                        self.log(f"   ⚠ Blind advance budget exhausted — stopping")
+                        break
+                    advance = min(50, blind_advance_budget)
+                    self.log(f"   ⚠ Not enough sprockets ({sprocket_count}), advancing {advance} steps")
+                    self.send_and_wait(self.cmd_advance(advance))
+                    total_steps += advance
+                    blind_advance_budget -= advance
                     continue
                 
-                # Check if aligned
                 if result.aligned:
                     self.status_msg = "✓ Aligned (sprockets)"
                     self.log(f"   ✓ Aligned! {total_steps} total steps")
@@ -1882,21 +1888,24 @@ class FilmScanner:
                         "sprocket_pitch_px": result.sprocket_pitch_px,
                     }
                 
-                # Calculate steps to move
-                if not self.sprocket_pitch_px:
-                    # No calibration - use rough estimate
-                    # Assuming ~640px width and ~2 frames visible, each frame ~320px
-                    # 8 sprockets per frame, so ~40px per sprocket
-                    px_per_step = 3.0
-                else:
-                    # Use calibrated px_per_mm and motor calibration
-                    # This can be refined based on your motor setup
-                    px_per_step = self.px_per_step if hasattr(self, 'px_per_step') else 3.0
+                px_per_step = self.px_per_step if hasattr(self, 'px_per_step') else 3.0
                 
-                steps_needed = int(abs(offset) / px_per_step)
-                steps_needed = max(8, min(steps_needed, 200))  # Clamp between 8-200
+                # Damping: reduce gain when oscillating or close to target
+                gain = 1.0
+                current_dir = 1 if offset > 0 else -1
+                if last_direction is not None and current_dir != last_direction:
+                    direction_reversals += 1
+                last_direction = current_dir
+                if direction_reversals >= 2:
+                    gain = 0.5
+                if direction_reversals >= 3:
+                    gain = 0.3
                 
-                # Determine direction: detector says positive = move film right.
+                prev_offsets.append(offset)
+                
+                steps_needed = int(abs(offset) * gain / px_per_step)
+                steps_needed = max(4, min(steps_needed, 200))
+                
                 if offset > 0:
                     direction = "RIGHT"
                     cmd = self.cmd_backup(steps_needed)
@@ -1904,7 +1913,7 @@ class FilmScanner:
                     direction = "LEFT"
                     cmd = self.cmd_advance(steps_needed)
                 
-                self.log(f"   → Moving {direction} {steps_needed} steps (offset={offset}px)")
+                self.log(f"   → Moving {direction} {steps_needed} steps (offset={offset}px, gain={gain:.1f})")
                 self.send_and_wait(cmd)
                 
                 if direction == "RIGHT":
@@ -1918,7 +1927,6 @@ class FilmScanner:
                 traceback.print_exc()
                 continue
         
-        # Max iterations reached
         self.status_msg = "⚠ Sprocket alignment incomplete"
         self.log(f"   Max iterations, {total_steps} total steps")
         return True, "Moved", {
@@ -1993,22 +2001,27 @@ class FilmScanner:
             success, msg, info = self.auto_align_sprocket(max_iterations=12, tolerance_px=15)
             
             info["advance_steps"] = steps_per_frame
-            # Refine px_per_step from observed movement — but ONLY when confident.
-            # Bad detections on clear base can produce garbage ratios that drift
-            # px_per_step to unusable values.
             align_steps = info.get("total_steps", 0)
             total_steps_used = steps_per_frame + align_steps
             align_confidence = info.get("confidence", 0)
             if (total_steps_used > 50 and frame_pitch_px > 0
                     and align_confidence >= 0.5
                     and abs(align_steps) < steps_per_frame * 0.25):
-                # Only refine when alignment was good and correction was small
                 observed_px_per_step = frame_pitch_px / total_steps_used
                 old_pps = self.px_per_step if hasattr(self, 'px_per_step') and self.px_per_step else 3.0
-                # Clamp to ±30% of current value to prevent runaway drift
                 if 0.7 * old_pps <= observed_px_per_step <= 1.3 * old_pps:
                     self.px_per_step = 0.9 * old_pps + 0.1 * observed_px_per_step
                     info["px_per_step_refined"] = self.px_per_step
+
+                # Record observation for adaptive learning
+                self.learner.record_observation(
+                    advance_steps=steps_per_frame,
+                    correction_steps=align_steps,
+                    frame_pitch_px=frame_pitch_px,
+                    confidence=align_confidence,
+                    method="sprocket",
+                )
+                self.px_per_step = self.learner.get_px_per_step()
             return success, msg, info
             
         except Exception as e:
@@ -2085,10 +2098,14 @@ class FilmScanner:
         """
         Align frame using inter-frame gap detection (no sprocket holes needed).
 
-        Returns (success, message, debug_info) — same contract as auto_align_sprocket.
+        Uses proportional control with damping and oscillation detection,
+        same strategy as auto_align_sprocket.
         """
         self.log("▶ Frame-gap alignment starting...")
         total_steps = 0
+        blind_advance_budget = 150
+        direction_reversals = 0
+        last_direction = None
 
         for iteration in range(max_iterations):
             if iteration > 0:
@@ -2135,9 +2152,14 @@ class FilmScanner:
                 )
 
                 if gap_count < 1:
-                    self.log(f"   ⚠ No inter-frame gaps detected")
-                    self.send_and_wait(self.cmd_advance(50))
-                    total_steps += 50
+                    if blind_advance_budget <= 0:
+                        self.log(f"   ⚠ Blind advance budget exhausted — stopping")
+                        break
+                    advance = min(50, blind_advance_budget)
+                    self.log(f"   ⚠ No gaps detected, advancing {advance} steps")
+                    self.send_and_wait(self.cmd_advance(advance))
+                    total_steps += advance
+                    blind_advance_budget -= advance
                     continue
 
                 if result.aligned:
@@ -2154,8 +2176,19 @@ class FilmScanner:
                     }
 
                 px_per_step = self.px_per_step if hasattr(self, 'px_per_step') else 3.0
-                steps_needed = int(abs(offset) / px_per_step)
-                steps_needed = max(8, min(steps_needed, 200))
+
+                gain = 1.0
+                current_dir = 1 if offset > 0 else -1
+                if last_direction is not None and current_dir != last_direction:
+                    direction_reversals += 1
+                last_direction = current_dir
+                if direction_reversals >= 2:
+                    gain = 0.5
+                if direction_reversals >= 3:
+                    gain = 0.3
+
+                steps_needed = int(abs(offset) * gain / px_per_step)
+                steps_needed = max(4, min(steps_needed, 200))
 
                 if offset > 0:
                     direction = "RIGHT"
@@ -2164,7 +2197,7 @@ class FilmScanner:
                     direction = "LEFT"
                     cmd = self.cmd_advance(steps_needed)
 
-                self.log(f"   → Moving {direction} {steps_needed} steps (offset={offset}px)")
+                self.log(f"   → Moving {direction} {steps_needed} steps (offset={offset}px, gain={gain:.1f})")
                 self.send_and_wait(cmd)
 
                 if direction == "RIGHT":
@@ -2260,11 +2293,245 @@ class FilmScanner:
                 if 0.7 * old_pps <= observed_px_per_step <= 1.3 * old_pps:
                     self.px_per_step = 0.9 * old_pps + 0.1 * observed_px_per_step
                     info["px_per_step_refined"] = self.px_per_step
+
+                self.learner.record_observation(
+                    advance_steps=steps_per_frame,
+                    correction_steps=align_steps,
+                    frame_pitch_px=pitch_for_advance,
+                    confidence=align_confidence,
+                    method="frame_gap",
+                )
+                self.px_per_step = self.learner.get_px_per_step()
             return success, msg, info
 
         except Exception as e:
             self.log(f"✗ Frame gap advance error: {e}")
             return False, str(e), {}
+
+    # ========================================================================
+    # CALIBRATED ADVANCE (align first frame, then blind-advance + optional check)
+    # ========================================================================
+
+    def calibrate_advance_from_vision(self):
+        """
+        Learn the step count for one frame advance using the current vision
+        detection (sprocket or frame-gap).  This replaces manual two-frame
+        calibration for users who prefer align-once-then-fire.
+
+        Returns calibration dict or None.
+        """
+        frame_bytes, _ = self.get_alignment_frame(timeout=2.0)
+        if not frame_bytes:
+            self.log("✗ No frame for vision calibration")
+            return None
+
+        try:
+            pitch_px = None
+            method_used = None
+
+            if self.alignment_method in ("sprocket", "auto"):
+                result = detect_sprockets(frame_bytes)
+                if result.sprocket_pitch_px and len(result.sprocket_holes) >= 3:
+                    pitch_px = result.sprocket_pitch_px * SPROCKETS_PER_FRAME
+                    method_used = "sprocket"
+                    self.sprocket_pitch_px = result.sprocket_pitch_px
+                    self.sprocket_pitch_px_smoothed = result.sprocket_pitch_px
+                    self.px_per_mm = result.px_per_mm
+
+            if pitch_px is None and self.alignment_method in ("frame_gap", "auto"):
+                result = detect_frame_gaps(
+                    frame_bytes,
+                    polarity=self.film_polarity,
+                )
+                if result.frame_pitch_px and len(result.gaps) >= 2:
+                    pitch_px = result.frame_pitch_px
+                    method_used = "frame_gap"
+                    self.frame_gap_pitch_px = result.frame_pitch_px
+                    self.frame_gap_pitch_px_smoothed = result.frame_pitch_px
+                    self.px_per_mm = result.px_per_mm
+
+            if pitch_px is None:
+                self.log("✗ Could not detect frame pitch — not enough features visible")
+                return None
+
+            px_per_step = self.px_per_step if self.px_per_step else 3.0
+            steps = round(pitch_px / px_per_step)
+            steps = max(1, steps)
+
+            self.calibrated_advance_steps = steps
+            self.frame_advance = steps
+            self.mode = 'calibrated'
+            self.save_state()
+
+            self.log(f"✓ Vision calibration ({method_used}): "
+                     f"{pitch_px:.1f}px pitch → {steps} steps/frame "
+                     f"(px_per_step={px_per_step:.2f})")
+
+            return {
+                "method": method_used,
+                "frame_pitch_px": pitch_px,
+                "steps_per_frame": steps,
+                "px_per_step": px_per_step,
+            }
+
+        except Exception as e:
+            self.log(f"✗ Vision calibration error: {e}")
+            return None
+
+    def advance_calibrated(self, frame_index=None):
+        """
+        Advance by the calibrated step count.  If vision_verify_after_advance
+        is enabled, performs a quick alignment check and corrects small errors.
+
+        Args:
+            frame_index: Optional 0-based frame index within the strip, used
+                         to look up per-frame spacing corrections.
+
+        Returns (success, message, info).
+        """
+        steps = self.calibrated_advance_steps or self.frame_advance
+        if not steps:
+            return False, "Not calibrated — run calibration first", {}
+
+        # Apply per-frame spacing correction for uneven cameras
+        correction = 0
+        if (frame_index is not None
+                and self.spacing_corrections
+                and frame_index < len(self.spacing_corrections)):
+            correction = self.spacing_corrections[frame_index]
+
+        # Apply learned drift compensation from the adaptive learner
+        drift_comp = self.learner.get_drift_compensation()
+        correction += drift_comp
+        steps = max(1, steps + correction)
+
+        parts = []
+        if correction:
+            parts.append(f"correction {correction:+d}")
+        if drift_comp:
+            parts.append(f"drift comp {drift_comp:+d}")
+        suffix = f" ({', '.join(parts)})" if parts else ""
+        self.log(f"▶ Calibrated advance: {steps} steps{suffix}")
+        self.send_and_wait(self.cmd_advance(steps), timeout=15.0)
+        time.sleep(0.3)
+
+        info = {"advance_steps": steps, "correction": correction}
+
+        if self.vision_verify_after_advance:
+            self.log("   Verifying alignment...")
+            success, msg, align_info = self.auto_align_dispatch(
+                max_iterations=5, tolerance_px=20,
+            )
+            info.update(align_info)
+            info["verify_offset"] = align_info.get("total_steps", 0)
+
+            # Refine calibrated_advance_steps if the correction was small and
+            # consistent — the blind advance was systematically off.
+            verify_steps = abs(info.get("verify_offset", 0))
+            if verify_steps > 0 and verify_steps < steps * 0.10:
+                direction = 1 if info.get("verify_offset", 0) > 0 else -1
+                old_steps = self.calibrated_advance_steps or steps
+                self.calibrated_advance_steps = old_steps + direction * max(1, verify_steps // 3)
+                info["steps_refined_to"] = self.calibrated_advance_steps
+
+            return success, msg, info
+
+        self.status_msg = f"✓ Advanced {steps} steps"
+        return True, "Advanced", info
+
+    def analyze_strip_spacing(self, num_frames=6, settle_time=0.4):
+        """
+        Advance through a strip measuring actual frame positions with vision
+        to detect uneven spacing.  Builds per-frame correction offsets.
+
+        Useful for old cameras with inconsistent frame spacing — run this
+        on one strip, then apply the corrections to subsequent strips.
+
+        Returns list of measurements or None on failure.
+        """
+        steps = self.calibrated_advance_steps or self.frame_advance
+        if not steps:
+            self.log("✗ Calibrate first before analyzing spacing")
+            return None
+
+        self.log(f"▶ Analyzing strip spacing ({num_frames} frames, {steps} steps/frame)...")
+        measurements = []
+
+        for i in range(num_frames):
+            self.log(f"   Frame {i+1}/{num_frames}:")
+
+            # Advance
+            self.send_and_wait(self.cmd_advance(steps), timeout=15.0)
+            time.sleep(settle_time)
+
+            # Measure alignment error
+            frame_bytes, _ = self.get_alignment_frame(timeout=1.0)
+            if not frame_bytes:
+                measurements.append({"frame": i + 1, "error_px": None, "error_steps": None})
+                continue
+
+            try:
+                offset = 0
+                confidence = 0.0
+
+                if self.alignment_method in ("sprocket", "auto"):
+                    result = detect_sprockets(frame_bytes)
+                    if result.sprocket_pitch_px and len(result.sprocket_holes) >= 2:
+                        offset = result.offset_px
+                        confidence = result.confidence
+
+                if confidence < 0.3 and self.alignment_method in ("frame_gap", "auto"):
+                    result = detect_frame_gaps(
+                        frame_bytes,
+                        polarity=self.film_polarity,
+                        expected_pitch_px=self.frame_gap_pitch_px_smoothed,
+                    )
+                    if result.frame_pitch_px:
+                        offset = result.offset_px
+                        confidence = result.confidence
+
+                px_per_step = self.px_per_step if self.px_per_step else 3.0
+                error_steps = round(offset / px_per_step) if px_per_step > 0 else 0
+
+                measurements.append({
+                    "frame": i + 1,
+                    "error_px": offset,
+                    "error_steps": error_steps,
+                    "confidence": round(confidence, 2),
+                })
+                self.log(f"     Error: {offset}px ({error_steps} steps), confidence: {confidence:.0%}")
+
+            except Exception as e:
+                self.log(f"     Error measuring: {e}")
+                measurements.append({"frame": i + 1, "error_px": None, "error_steps": None})
+
+        # Build cumulative corrections: each correction adjusts for the
+        # accumulated drift up to that frame.
+        corrections = []
+        cumulative_error = 0
+        for m in measurements:
+            err = m.get("error_steps") or 0
+            cumulative_error += err
+            corrections.append(-err)
+
+        self.spacing_corrections = corrections
+        self.save_state()
+
+        total_drift = sum(m.get("error_steps", 0) or 0 for m in measurements)
+        avg_drift = total_drift / max(1, len(measurements))
+        max_err = max((abs(m.get("error_steps", 0) or 0) for m in measurements), default=0)
+
+        self.log(f"   Spacing analysis complete:")
+        self.log(f"     Average drift: {avg_drift:+.1f} steps/frame")
+        self.log(f"     Max error: {max_err} steps")
+        self.log(f"     Corrections: {corrections}")
+
+        return {
+            "measurements": measurements,
+            "corrections": corrections,
+            "avg_drift_steps": round(avg_drift, 1),
+            "max_error_steps": max_err,
+        }
 
     # ========================================================================
     # ALIGNMENT DISPATCH (routes into sprocket or frame-gap method)
@@ -2495,11 +2762,20 @@ class FilmScanner:
             'scanlight_profiles': self.scanlight_profiles,
             'scanlight_current_profile': self.scanlight_current_profile,
             'scanlight_rgb': self.scanlight_rgb,
+            'calibrated_advance_steps': self.calibrated_advance_steps,
+            'vision_verify_after_advance': self.vision_verify_after_advance,
+            'spacing_corrections': self.spacing_corrections,
             'updated': datetime.now().isoformat()
         }
         
         with open(self.state_file, 'w') as f:
             json.dump(state, f, indent=2)
+
+        # Persist learner data alongside scanner state
+        try:
+            self.learner.save()
+        except Exception:
+            pass
     
     def load_state(self, roll_folder):
         """Load scanning state"""
@@ -2528,6 +2804,11 @@ class FilmScanner:
                 self.scanlight_profiles = state.get('scanlight_profiles', self.scanlight_profiles)
                 self.scanlight_current_profile = state.get('scanlight_current_profile', self.scanlight_current_profile)
                 self.scanlight_rgb = state.get('scanlight_rgb', self.scanlight_rgb)
+
+                # Load calibrated-advance settings
+                self.calibrated_advance_steps = state.get('calibrated_advance_steps', self.calibrated_advance_steps)
+                self.vision_verify_after_advance = state.get('vision_verify_after_advance', self.vision_verify_after_advance)
+                self.spacing_corrections = state.get('spacing_corrections', self.spacing_corrections)
                 
                 return True
         return False
@@ -2593,16 +2874,15 @@ class FilmScanner:
         """Auto-connect to ScanLight if present"""
         if not self.scanlight_connected:
             try:
-                # Auto-discover and connect
                 if self.scanlight.connect():
                     self.scanlight_connected = True
-                    # Set to current RGB values
                     self.scanlight.set_rgb(
                         self.scanlight_rgb['r'],
                         self.scanlight_rgb['g'],
                         self.scanlight_rgb['b']
                     )
-                    self.log(f"✓ ScanLight connected on {self.scanlight.port}")
+                    proto = self.scanlight.protocol or "unknown"
+                    self.log(f"✓ ScanLight ({proto}) connected on {self.scanlight.port}")
                     return True
             except Exception as e:
                 self.log(f"⚠ ScanLight not detected: {e}")
@@ -2717,6 +2997,10 @@ class FilmScanner:
                 'alignment_min_confidence': self.alignment_min_confidence,
                 'sprocket_pitch_px': self.sprocket_pitch_px,
                 'px_per_mm': self.px_per_mm,
+                'calibrated_advance_steps': self.calibrated_advance_steps,
+                'vision_verify_after_advance': self.vision_verify_after_advance,
+                'spacing_corrections': self.spacing_corrections,
+                'learner': self.learner.get_status(),
                 # Stream info
                 'stream_resolution': f"{self.preview_stream.capture_width}x{self.preview_stream.capture_height}",
                 'stream_output_width': self.preview_stream.output_width,
@@ -3014,10 +3298,9 @@ def capture():
             # Auto-advance AFTER capture (only in 35mm mode with Arduino)
             # In 120 mode (hand feed), skip all motor operations
             if scanner.scanner_mode == "120":
-                # 120 mode: No auto-advance, user manually feeds film
                 scanner.status_msg = f"✓ Frame {scanner.frame_count} (hand feed next)"
             elif scanner.auto_alignment_enabled:
-                # Auto-advance to next frame using configured alignment method
+                # Full vision-guided advance
                 time.sleep(0.3)
                 try:
                     adv_success, adv_msg, adv_info = scanner.advance_and_align_dispatch()
@@ -3029,20 +3312,29 @@ def capture():
                     scanner.log(f"Advance error: {e}")
                     scanner.status_msg = f"✓ Frame {scanner.frame_count} (advance error)"
             elif scanner.mode == 'calibrated' and scanner.auto_advance:
-                # CALIBRATION MODE: Use fixed frame_advance distance (h = advance on this hardware)
-                if scanner.frame_mode == "half":
-                    advance = scanner.half_frame_advance or scanner.frame_advance
-                else:
-                    advance = scanner.frame_advance
-                
-                if advance:
-                    time.sleep(0.3)
-                    if scanner.send(scanner.cmd_advance(advance)):
-                        scanner.status_msg = f"✓ Frame {scanner.frame_count} → Ready for next"
+                # Calibrated advance: blind step count, with optional vision verify
+                time.sleep(0.3)
+                try:
+                    frame_idx = scanner.frames_in_strip - 1 if scanner.frames_in_strip > 0 else None
+                    if scanner.frame_mode == "half":
+                        advance = scanner.half_frame_advance or scanner.frame_advance
+                        if advance:
+                            scanner.send_and_wait(scanner.cmd_advance(advance), timeout=15.0)
+                            scanner.status_msg = f"✓ Frame {scanner.frame_count} → Ready for next"
+                        else:
+                            scanner.status_msg = f"✓ Frame {scanner.frame_count} (not calibrated)"
                     else:
-                        scanner.status_msg = f"✓ Frame {scanner.frame_count} (advance failed)"
+                        adv_success, adv_msg, adv_info = scanner.advance_calibrated(
+                            frame_index=frame_idx,
+                        )
+                        if adv_success:
+                            scanner.status_msg = f"✓ Frame {scanner.frame_count} → Ready for next"
+                        else:
+                            scanner.status_msg = f"✓ Frame {scanner.frame_count} (advance: {adv_msg})"
+                except Exception as e:
+                    scanner.log(f"Advance error: {e}")
+                    scanner.status_msg = f"✓ Frame {scanner.frame_count} (advance error)"
             else:
-                # No advance path matched (e.g. auto-alignment off and not calibrated)
                 scanner.status_msg = f"✓ Frame {scanner.frame_count} (no advance - enable Auto-Alignment or calibrated mode)"
                 scanner.log("Capture OK but no advance: auto_alignment_enabled or calibrated mode required for auto-advance")
         else:
@@ -3222,6 +3514,97 @@ def calibrate_frame_gaps_route():
             'success': False,
             'message': 'Frame gap calibration failed - need at least 2 visible gaps',
         })
+
+
+@app.route('/api/calibrate_advance_vision', methods=['POST'])
+def calibrate_advance_vision_route():
+    """
+    Learn step count for one frame advance using vision detection.
+    Replaces manual two-frame calibration for align-once-then-fire workflow.
+    """
+    calibration = scanner.calibrate_advance_from_vision()
+    if calibration:
+        return jsonify({'success': True, 'calibration': calibration})
+    else:
+        return jsonify({
+            'success': False,
+            'message': 'Vision calibration failed - not enough features visible',
+        })
+
+
+@app.route('/api/advance_calibrated', methods=['POST'])
+def advance_calibrated_route():
+    """Advance by the calibrated step count with optional vision verification."""
+    data = request.json or {}
+    frame_index = data.get('frame_index')
+    success, msg, info = scanner.advance_calibrated(frame_index=frame_index)
+    scanner.broadcast_status()
+    return jsonify({'success': success, 'message': msg, 'info': info})
+
+
+@app.route('/api/analyze_spacing', methods=['POST'])
+def analyze_spacing_route():
+    """
+    Advance through a strip measuring frame positions to detect uneven spacing.
+    Builds per-frame corrections for old cameras with inconsistent spacing.
+    """
+    data = request.json or {}
+    num_frames = data.get('num_frames', 6)
+    num_frames = max(2, min(12, int(num_frames)))
+    result = scanner.analyze_strip_spacing(num_frames=num_frames)
+    if result:
+        scanner.broadcast_status()
+        return jsonify({'success': True, 'result': result})
+    else:
+        return jsonify({'success': False, 'message': 'Spacing analysis failed'})
+
+
+@app.route('/api/set_vision_verify', methods=['POST'])
+def set_vision_verify_route():
+    """Enable/disable vision verification after blind advances."""
+    data = request.json or {}
+    enabled = data.get('enabled', False)
+    scanner.vision_verify_after_advance = bool(enabled)
+    scanner.save_state()
+    scanner.broadcast_status()
+    return jsonify({
+        'success': True,
+        'vision_verify_after_advance': scanner.vision_verify_after_advance,
+    })
+
+
+@app.route('/api/set_spacing_corrections', methods=['POST'])
+def set_spacing_corrections_route():
+    """
+    Manually set per-frame spacing corrections (list of step offsets).
+    Pass an empty list to clear corrections.
+    """
+    data = request.json or {}
+    corrections = data.get('corrections', [])
+    if not isinstance(corrections, list):
+        return jsonify({'success': False, 'message': 'corrections must be a list of integers'})
+    try:
+        scanner.spacing_corrections = [int(c) for c in corrections]
+    except (ValueError, TypeError):
+        return jsonify({'success': False, 'message': 'corrections must be integers'})
+    scanner.save_state()
+    scanner.broadcast_status()
+    return jsonify({'success': True, 'spacing_corrections': scanner.spacing_corrections})
+
+
+@app.route('/api/learner_status', methods=['GET'])
+def learner_status_route():
+    """Get adaptive alignment learner status."""
+    return jsonify(scanner.learner.get_status())
+
+
+@app.route('/api/learner_reset', methods=['POST'])
+def learner_reset_route():
+    """Reset all learned alignment data (start fresh)."""
+    scanner.learner.reset()
+    scanner.px_per_step = 3.0
+    scanner.broadcast_status()
+    return jsonify({'success': True, 'message': 'Learner reset'})
 
 
 @app.route('/api/set_alignment_method', methods=['POST'])
@@ -3421,22 +3804,32 @@ def set_auto_capture_delay_route():
 
 @app.route('/api/scanlight/status')
 def scanlight_status():
-    """Get ScanLight connection status and current RGB values"""
+    """Get ScanLight connection status, current values, and capabilities"""
     try:
-        # Try to connect if not already connected
         if not scanner.scanlight_connected:
             scanner.connect_scanlight()
-        
+
         status = {
             'connected': scanner.scanlight_connected,
             'rgb': scanner.scanlight_rgb,
             'profiles': scanner.scanlight_profiles,
-            'current_profile': scanner.scanlight_current_profile
+            'current_profile': scanner.scanlight_current_profile,
         }
-        
+
         if scanner.scanlight_connected:
-            status['port'] = scanner.scanlight.port
-        
+            device_status = scanner.scanlight.get_status()
+            status['port'] = device_status.get('port')
+            status['protocol'] = device_status.get('protocol', 'unknown')
+            status['white'] = device_status.get('white', 0)
+            status['ir'] = device_status.get('ir', 0)
+            status['has_shutter'] = device_status.get('has_shutter', False)
+            status['has_white'] = device_status.get('has_white', False)
+            status['has_ir'] = device_status.get('has_ir', False)
+            status['led_temp_c'] = device_status.get('led_temp_c')
+            status['vbus_v'] = device_status.get('vbus_v')
+            status['fw_version_id'] = device_status.get('fw_version_id')
+            status['trim'] = device_status.get('trim')
+
         return jsonify({'success': True, **status})
     except Exception as e:
         return jsonify({'success': False, 'message': str(e), 'connected': False})
@@ -3547,6 +3940,88 @@ def scanlight_delete_profile():
             'success': success,
             'profiles': scanner.scanlight_profiles
         })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/scanlight/set_white', methods=['POST'])
+def scanlight_set_white():
+    """Set white LED brightness (BSL1/big scanlight only). Use for slide film."""
+    try:
+        data = request.get_json()
+        brightness = int(data.get('brightness', 255))
+        success = scanner.scanlight.set_white(brightness)
+        if success:
+            scanner.scanlight_rgb = {'r': 0, 'g': 0, 'b': 0}
+        return jsonify({'success': success, 'white': brightness})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/scanlight/set_ir', methods=['POST'])
+def scanlight_set_ir():
+    """Set IR LED brightness (BSL1/big scanlight only). For dust detection."""
+    try:
+        data = request.get_json()
+        brightness = int(data.get('brightness', 255))
+        success = scanner.scanlight.set_ir(brightness)
+        return jsonify({'success': success, 'ir': brightness})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/scanlight/set_channel', methods=['POST'])
+def scanlight_set_channel():
+    """Turn on a single colour channel (BSL1 only). For multi-pass scanning."""
+    try:
+        data = request.get_json()
+        channel = data.get('channel', 'white')
+        brightness = int(data.get('brightness', 255))
+        success = scanner.scanlight.set_single_channel(channel, brightness)
+        return jsonify({'success': success, 'channel': channel, 'brightness': brightness})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/scanlight/shutter', methods=['POST'])
+def scanlight_shutter():
+    """Trigger camera shutter via 3.5mm jack (BSL1 only)."""
+    try:
+        data = request.get_json() or {}
+        pulse_ms = int(data.get('pulse_ms', 300))
+        success = scanner.scanlight.trigger_shutter(pulse_ms)
+        return jsonify({'success': success, 'pulse_ms': pulse_ms})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/scanlight/set_trim', methods=['POST'])
+def scanlight_set_trim():
+    """Set brightness trim between left/right LED banks (BSL1 only)."""
+    try:
+        data = request.get_json()
+        r = int(data.get('r', 0))
+        g = int(data.get('g', 0))
+        b = int(data.get('b', 0))
+        w = int(data.get('w', 0))
+        success = scanner.scanlight.set_trim(r, g, b, w)
+        return jsonify({'success': success, 'trim': {'r': r, 'g': g, 'b': b, 'w': w}})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+
+@app.route('/api/scanlight/preset', methods=['POST'])
+def scanlight_preset():
+    """Set a film-stock colour preset (white/scan/ektar/portra/fuji)."""
+    try:
+        data = request.get_json()
+        preset = data.get('preset', 'scan')
+        success = scanner.scanlight.set_preset(preset)
+        if success:
+            s = scanner.scanlight
+            scanner.scanlight_rgb = {'r': s.red, 'g': s.green, 'b': s.blue}
+            scanner.save_state()
+        return jsonify({'success': success, 'preset': preset, 'rgb': scanner.scanlight_rgb})
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)})
 

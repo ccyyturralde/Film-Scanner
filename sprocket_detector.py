@@ -1,7 +1,8 @@
 """
 Sprocket Hole Detector for 35mm Film Scanner
 
-Detects sprocket holes on the top and/or bottom edges of 35mm film for precise frame alignment.
+Detects sprocket holes on the top and/or bottom edges of 35mm film for precise
+frame alignment.
 
 35mm Film Standard Specifications:
 - Sprocket pitch: 4.75mm (center to center)
@@ -10,14 +11,16 @@ Detects sprocket holes on the top and/or bottom edges of 35mm film for precise f
 - Frame width: ~38mm (including sprocket area)
 - Image area: 24mm x 36mm
 
-This detector finds sprocket holes as bright rectangular regions and uses their
-positions for precise frame alignment. Sprocket holes are consistent regardless
-of image content, providing reliable alignment.
+This detector finds sprocket holes as bright regions and uses their X positions
+for alignment.  Holes may be only partially visible (top/bottom clipped by the
+scanning window) — the detector handles this by relaxing aspect-ratio and area
+constraints and focusing on the regular horizontal spacing pattern.
 
 Hardware Setup:
-- Film advanced by rollers with silicone rings (friction drive)
-- Full film visible including sprocket holes
-- Sprocket rows visible at top and/or bottom of preview
+- Film advanced by pancake stepper + belt + rollers with silicone O-rings
+  (friction drive — no sprocket engagement)
+- Sprocket rows partially visible (~70%) at top and/or bottom of preview
+- Top and bottom of each sprocket hole may be clipped by the scanning gate
 """
 
 from dataclasses import dataclass, field
@@ -112,10 +115,15 @@ def jpeg_bytes_to_color(jpeg_bytes: bytes) -> np.ndarray:
 
 def find_sprocket_regions(
     gray: np.ndarray,
-    sprocket_fraction: float = 0.15,
+    sprocket_fraction: float = 0.18,
 ) -> Tuple[np.ndarray, np.ndarray, int, int]:
     """
     Extract the top and bottom regions where sprocket holes are expected.
+    
+    With a friction-drive transport (belt + silicone O-ring rollers), the
+    sprocket holes are partially visible at the film edges — typically ~70%
+    of the hole height is clipped by the scanning gate.  We use a generous
+    region fraction (18% of image height) to capture whatever is visible.
     
     Args:
         gray: Grayscale image
@@ -125,8 +133,6 @@ def find_sprocket_regions(
         (top_region, bottom_region, top_y_offset, bottom_y_offset)
     """
     h, w = gray.shape[:2]
-    
-    # Sprocket holes are at top and bottom edges of film
     sprocket_height = int(h * sprocket_fraction)
     
     top_region = gray[0:sprocket_height, :]
@@ -138,27 +144,32 @@ def find_sprocket_regions(
 def detect_sprocket_holes_in_region(
     region: np.ndarray,
     y_offset: int = 0,
-    min_area: int = 100,
-    max_area: int = 10000,
-    min_aspect: float = 0.3,
-    max_aspect: float = 3.0,
-    brightness_threshold: float = 0.5,
+    min_area: int = 50,
+    max_area: int = 15000,
+    min_aspect: float = 0.15,
+    max_aspect: float = 8.0,
+    brightness_threshold: float = 0.45,
+    edge_region: bool = False,
 ) -> List[SprocketHole]:
     """
     Detect sprocket holes in a region using contour detection.
     
-    Sprocket holes appear as bright rectangles (light shining through).
-    Works on both dark-based (dense negative) and clear-based films by
-    using CLAHE contrast enhancement and adaptive thresholding.
-    
+    Sprocket holes appear as bright regions (light shining through).
+    Handles partially visible holes (top/bottom clipped by scanning gate)
+    where only ~70% of the hole height is visible.  Clipped holes appear
+    as wide bright bands rather than neat rectangles, so aspect ratio and
+    area constraints are relaxed.
+
     Args:
         region: Grayscale image region (top or bottom sprocket area)
         y_offset: Y offset to add to detected positions (for global coords)
         min_area: Minimum hole area in pixels
         max_area: Maximum hole area in pixels  
-        min_aspect: Minimum width/height ratio
+        min_aspect: Minimum width/height ratio (wide for clipped holes)
         max_aspect: Maximum width/height ratio
         brightness_threshold: Minimum brightness (0-1) for hole detection
+        edge_region: True if this region is at the very edge of the image
+                     (relaxes the brightness check for clipped sprockets)
         
     Returns:
         List of detected SprocketHole objects
@@ -168,91 +179,78 @@ def detect_sprocket_holes_in_region(
     
     h, w = region.shape[:2]
     
-    # --- CLAHE contrast enhancement ---
-    # Critical for clear/transparent base stocks where the sprocket holes
-    # and film base are both bright. CLAHE enhances LOCAL contrast so the
-    # physical edges of sprocket holes become visible even on clear film.
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 4))
     enhanced = clahe.apply(region)
     
-    # --- Multi-strategy detection ---
-    # Strategy 1: Global brightness threshold (works well on dark base)
+    # Strategy 1: Global brightness threshold
     normalized = enhanced.astype(np.float32) / 255.0
     binary_global = (normalized > brightness_threshold).astype(np.uint8) * 255
     
-    # Strategy 2: Otsu's automatic threshold (adapts to histogram)
+    # Strategy 2: Otsu's automatic threshold
     _, binary_otsu = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     
-    # Strategy 3: Adaptive threshold (LOCAL neighborhood comparison)
-    # This is the key strategy for clear base stocks -- it finds regions
-    # that are brighter than their immediate surroundings, regardless of
-    # absolute brightness. Block size must be large enough to span a
-    # sprocket hole + surrounding film.
-    block_size = max(31, (min(h, w) // 4) | 1)  # Ensure odd
+    # Strategy 3: Adaptive threshold for clear base stocks
+    block_size = max(31, (min(h, w) // 4) | 1)
     binary_adaptive = cv2.adaptiveThreshold(
         enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
         cv2.THRESH_BINARY, block_size, -8
     )
     
-    # Combine all strategies (union of detections)
     binary = cv2.bitwise_or(binary_global, binary_otsu)
     binary = cv2.bitwise_or(binary, binary_adaptive)
     
-    # Morphological operations to clean up
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
     binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
     
-    # Find contours
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
     sprocket_holes = []
+    region_mean = region.mean() / 255.0
     
     for contour in contours:
         area = cv2.contourArea(contour)
-        
-        # Filter by area
         if area < min_area or area > max_area:
             continue
         
-        # Get bounding rectangle
         x, y, rect_w, rect_h = cv2.boundingRect(contour)
-        
-        # Filter by aspect ratio (sprocket holes are roughly rectangular)
-        if rect_h == 0:
+        if rect_h == 0 or rect_w == 0:
             continue
+        
         aspect = rect_w / rect_h
-        if aspect < min_aspect or aspect > max_aspect:
+        
+        # Clipped sprocket holes touching the region edge appear very wide
+        # relative to their visible height.  Accept wider aspect ratios for
+        # detections that touch the top or bottom row of the region.
+        touches_edge = (y <= 1) or (y + rect_h >= h - 1)
+        effective_max_aspect = max_aspect * 2.0 if touches_edge else max_aspect
+        
+        if aspect < min_aspect or aspect > effective_max_aspect:
             continue
         
-        # Check if region is actually bright (use original, not enhanced)
         roi = region[y:y+rect_h, x:x+rect_w]
         if roi.size == 0:
             continue
         mean_brightness = roi.mean() / 255.0
         
-        # For clear base, the absolute brightness check must be relaxed
-        # because the whole image may be bright.  Instead check that the
-        # hole is brighter than the region average (relative contrast).
-        region_mean = region.mean() / 255.0
-        relative_bright = mean_brightness > region_mean * 0.95
-        absolute_bright = mean_brightness >= brightness_threshold * 0.7
+        relative_bright = mean_brightness > region_mean * 0.92
+        absolute_bright = mean_brightness >= brightness_threshold * 0.6
         if not (relative_bright or absolute_bright):
             continue
         
-        # Calculate confidence based on:
-        # 1. How rectangular the contour is (sprocket holes are rectangular)
-        # 2. How bright the center is
-        # 3. How consistent the brightness is
         rect_area = rect_w * rect_h
         rectangularity = area / rect_area if rect_area > 0 else 0
-        
         brightness_std = roi.std() / 255.0
         uniformity = 1.0 - min(1.0, brightness_std / 0.2)
         
-        confidence = (rectangularity * 0.4 + mean_brightness * 0.3 + uniformity * 0.3)
+        confidence = rectangularity * 0.3 + mean_brightness * 0.3 + uniformity * 0.2
+        # Partial sprockets touching the edge are expected — don't penalize
+        if touches_edge:
+            confidence += 0.1
+        else:
+            confidence += 0.1 * rectangularity
+        confidence = min(1.0, confidence)
         
-        # Create sprocket hole object
         hole = SprocketHole(
             x=int(x + rect_w // 2),
             y=int(y + rect_h // 2 + y_offset),
@@ -263,9 +261,127 @@ def detect_sprocket_holes_in_region(
         )
         sprocket_holes.append(hole)
     
-    # Sort by X position (left to right)
     sprocket_holes.sort(key=lambda s: s.x)
     
+    return sprocket_holes
+
+
+def detect_sprockets_edge_profile(
+    gray: np.ndarray,
+    edge: str = "top",
+    smooth_sigma: float = 8.0,
+    band_height: int = 20,
+) -> List[SprocketHole]:
+    """
+    Detect sprocket holes using the film-edge transition zone.
+
+    At the very edge of the film (where it meets the black surround),
+    sprocket holes are dramatically brighter than the film rebate because
+    pure backlight passes through the hole vs filtered through film base.
+    This contrast is strongest in the narrow transition band (10-20 rows)
+    right at the film edge.
+
+    This approach is specifically designed for partially-clipped sprockets
+    where the scanning gate cuts off the outer portion of each hole.
+    It finds the film edge automatically, then looks at the brightness
+    pattern in the transition zone.
+
+    Args:
+        gray: Full grayscale image.
+        edge: "top" or "bottom".
+        smooth_sigma: Gaussian sigma for smoothing the 1D profile.
+        band_height: Height of the transition band to analyze.
+
+    Returns:
+        List of SprocketHole objects with accurate X positions.
+    """
+    h, w = gray.shape[:2]
+    if h < 50 or w < 100:
+        return []
+
+    # Find the film edge: scan inward from the edge to find where
+    # brightness first exceeds a threshold (film starts).
+    search_depth = min(h // 3, 400)
+
+    if edge == "top":
+        row_means = [float(gray[r, :].mean()) for r in range(search_depth)]
+        edge_row = 0
+        for r, m in enumerate(row_means):
+            if m > 25:
+                edge_row = r
+                break
+        band_start = max(0, edge_row - 5)
+        band_end = min(h, edge_row + band_height)
+        y_offset = band_start
+    else:
+        row_means = [float(gray[h - 1 - r, :].mean()) for r in range(search_depth)]
+        edge_row = 0
+        for r, m in enumerate(row_means):
+            if m > 25:
+                edge_row = r
+                break
+        band_end = min(h, h - edge_row + 5)
+        band_start = max(0, band_end - band_height)
+        y_offset = band_start
+
+    band = gray[band_start:band_end, :]
+    if band.size == 0:
+        return []
+
+    profile = band.mean(axis=0).astype(np.float64)
+
+    # Smooth
+    ksize = max(3, int(smooth_sigma * 6) | 1)
+    kernel = cv2.getGaussianKernel(ksize, smooth_sigma).flatten()
+    smoothed = np.convolve(profile, kernel, mode='same')
+
+    # Find the lit portion of the image (skip black borders)
+    lit_mask = smoothed > 8
+    lit_idx = np.where(lit_mask)[0]
+    if len(lit_idx) < 50:
+        return []
+    ls, le = int(lit_idx[0]), int(lit_idx[-1])
+    lit = smoothed[ls:le]
+    if len(lit) < 50:
+        return []
+
+    # In the transition zone, sprocket holes are peaks above the median.
+    # The film rebate between holes is dimmer because light passes through
+    # the film base rather than a clear hole.
+    med = float(np.median(lit))
+    thresh = med * 1.2
+
+    # Find bright runs (sprocket holes) above threshold
+    runs: List[Tuple[int, int]] = []
+    in_run = False
+    start = 0
+    for i in range(len(lit)):
+        if lit[i] > thresh and not in_run:
+            in_run = True
+            start = i
+        elif (lit[i] <= thresh or i == len(lit) - 1) and in_run:
+            in_run = False
+            run_width = i - start
+            if 15 < run_width < 500:
+                runs.append((start + run_width // 2, run_width))
+
+    sprocket_holes: List[SprocketHole] = []
+    for center, run_w in runs:
+        x_global = center + ls
+        peak_val = float(smoothed[x_global]) / 255.0
+        conf = min(1.0, max(0.3, peak_val * 0.8 + 0.2))
+
+        hole = SprocketHole(
+            x=x_global,
+            y=int(band_start + (band_end - band_start) // 2),
+            width=run_w,
+            height=band_end - band_start,
+            area=run_w * (band_end - band_start),
+            confidence=conf,
+        )
+        sprocket_holes.append(hole)
+
+    sprocket_holes.sort(key=lambda s: s.x)
     return sprocket_holes
 
 
@@ -362,9 +478,16 @@ def calculate_alignment_offset(
     """
     Calculate how many pixels to move for proper frame alignment.
     
-    For 35mm film with 8 sprockets per frame:
-    - Frame center is at sprocket positions 4-5 boundary
-    - Target: center the frame in the image
+    Uses the sprocket grid to detect and correct drift.  All sprockets lie
+    on a regular grid with spacing ``sprocket_pitch_px``.  The sub-pitch
+    phase of the image center on this grid is a reliable drift signal that
+    is consistent regardless of how many sprockets are visible or which
+    physical sprocket numbers they correspond to.
+    
+    Limitation: sprocket holes alone cannot identify frame boundaries
+    (they are all identical and equally spaced).  This function corrects
+    drift within ±half a sprocket pitch (~2.4 mm).  For initial absolute
+    frame positioning, use the frame-gap detector or manual alignment.
     
     Args:
         sprockets: Detected sprocket holes
@@ -378,61 +501,50 @@ def calculate_alignment_offset(
     if not sprockets:
         return 0, 0.0
     
-    # Calculate sprocket pitch if not provided
     if sprocket_pitch_px is None:
         sprocket_pitch_px = calculate_sprocket_pitch(sprockets)
     
+    center = frame_width / 2.0
+    
     if sprocket_pitch_px is None or sprocket_pitch_px <= 0:
-        # Fallback: use average sprocket position relative to center
         avg_x = np.mean([s.x for s in sprockets])
-        center = frame_width // 2
-        offset = int(center - avg_x)
-        confidence = 0.3  # Low confidence without pitch
-        return offset, confidence
+        return int(center - avg_x), 0.3
     
-    # Frame pitch in pixels (8 sprockets per frame)
-    frame_pitch_px = sprocket_pitch_px * 8
+    # Compute the sub-pitch drift.  Every sprocket position x satisfies
+    # x = grid_origin + k * pitch for some integer k.  The quantity
+    # (center - x) mod pitch is the same for ALL sprockets (since they
+    # differ by integer multiples of pitch).  Wrapping to ±pitch/2 gives
+    # the signed correction needed.
+    #
+    # We compute from each sprocket independently and take the median
+    # to be robust against one or two outlier detections.
+    half_pitch = sprocket_pitch_px / 2.0
+    residuals = []
+    for s in sprockets:
+        r = (center - s.x) % sprocket_pitch_px
+        if r > half_pitch:
+            r -= sprocket_pitch_px
+        residuals.append(r)
     
-    # Find the nearest frame boundary to the image center
-    center = frame_width // 2
+    offset_needed = int(round(float(np.median(residuals))))
     
-    # Use sprocket positions to determine frame alignment
-    # The ideal position is when a frame boundary aligns with image center
-    
-    # Find sprocket closest to center
-    closest_sprocket = min(sprockets, key=lambda s: abs(s.x - center))
-    closest_idx = sprockets.index(closest_sprocket)
-    
-    # Calculate which part of the frame we're in (0-7 sprocket positions)
-    # Position 0 = left edge of frame, position 4 = center, position 7 = right edge
-    
-    # Distance from closest sprocket to center
-    dist_to_center = closest_sprocket.x - center
-    
-    # To center a frame, we want sprocket positions 3-4 centered
-    # This puts the image area (between sprockets 2-6) centered
-    
-    # Calculate offset needed to center the nearest frame
-    # We want the midpoint between sprockets 3 and 4 (or 4 and 5) at image center
-    
-    # Simplified: move so nearest sprocket group is centered
-    # Each sprocket represents 1/8 of a frame
-    position_in_frame = (closest_idx % 8)  # 0-7
-    
-    # Ideal center is between sprockets 3-4 (position 3.5)
-    # Calculate how far we need to move
-    sprockets_to_center = 3.5 - position_in_frame
-    offset_needed = int(sprockets_to_center * sprocket_pitch_px - dist_to_center)
-    
-    # Calculate confidence based on number of sprockets and their regularity
-    if len(sprockets) >= 6:
-        confidence = 0.9
-    elif len(sprockets) >= 4:
-        confidence = 0.7
-    elif len(sprockets) >= 2:
-        confidence = 0.5
+    # Confidence: more detected sprockets with tighter residual agreement.
+    if len(residuals) >= 2:
+        spread = float(np.std(residuals))
+        regularity = max(0.0, 1.0 - spread / half_pitch)
     else:
-        confidence = 0.3
+        regularity = 0.5
+    
+    if len(sprockets) >= 6:
+        count_factor = 0.9
+    elif len(sprockets) >= 4:
+        count_factor = 0.7
+    elif len(sprockets) >= 2:
+        count_factor = 0.5
+    else:
+        count_factor = 0.3
+    
+    confidence = count_factor * (0.4 + 0.6 * regularity)
     
     return offset_needed, confidence
 
@@ -479,24 +591,42 @@ def detect_sprockets(
         gray, sprocket_region_fraction
     )
     
-    # Detect sprocket holes in each region
-    top_sprockets = detect_sprocket_holes_in_region(
+    # Try the edge-profile method first (robust for partially clipped
+    # sprockets), then fall back to contour detection.
+    top_edge = detect_sprockets_edge_profile(gray, edge="top")
+    bottom_edge = detect_sprockets_edge_profile(gray, edge="bottom")
+    edge_total = len(top_edge) + len(bottom_edge)
+
+    top_contour = detect_sprocket_holes_in_region(
         top_region,
         y_offset=top_offset,
         min_area=min_sprocket_area,
         max_area=max_sprocket_area,
         brightness_threshold=brightness_threshold,
+        edge_region=True,
     )
-    
-    bottom_sprockets = detect_sprocket_holes_in_region(
+    bottom_contour = detect_sprocket_holes_in_region(
         bottom_region,
         y_offset=bottom_offset,
         min_area=min_sprocket_area,
         max_area=max_sprocket_area,
         brightness_threshold=brightness_threshold,
+        edge_region=True,
     )
+    contour_total = len(top_contour) + len(bottom_contour)
+
+    # Pick the method that found more sprockets.  Edge-profile is
+    # preferred when available since it gives more consistent X positions
+    # for partially-clipped sprockets.
+    if edge_total >= contour_total and edge_total >= 3:
+        top_sprockets = top_edge
+        bottom_sprockets = bottom_edge
+        detection_method = "edge_profile"
+    else:
+        top_sprockets = top_contour
+        bottom_sprockets = bottom_contour
+        detection_method = "contour"
     
-    # Combine all sprockets (use X positions from both rows)
     all_sprockets = top_sprockets + bottom_sprockets
     
     # For alignment, prefer the row with more detections
@@ -529,10 +659,10 @@ def detect_sprockets(
     # Determine if aligned
     aligned = abs(offset_px) <= alignment_tolerance_px and confidence > 0.5
     
-    # Build debug info
     debug_info = {
         "image_size": {"width": w, "height": h},
         "sprocket_region_height": int(h * sprocket_region_fraction),
+        "detection_method": detection_method,
         "top_sprocket_count": len(top_sprockets),
         "bottom_sprocket_count": len(bottom_sprockets),
         "total_sprocket_count": len(all_sprockets),

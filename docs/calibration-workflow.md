@@ -100,6 +100,46 @@ All subsequent frames:
   next_position = current_position + frame_advance
 ```
 
+## Vision Calibration (Alternative)
+
+Instead of manual two-frame calibration, you can learn the advance distance
+from the current preview using sprocket holes or inter-frame gaps:
+
+**API:** `POST /api/calibrate_advance_vision`
+
+This detects the frame pitch in pixels, converts to motor steps using the
+current `px_per_step` ratio, and sets `calibrated_advance_steps`. No need
+to manually position two frames.
+
+**Requirements:**
+- At least 3 sprocket holes visible (sprocket mode) or 2 inter-frame gaps (frame_gap mode)
+- Accurate `px_per_step` ratio (improves over time with use)
+
+## Vision Verify After Advance
+
+Enable a quick vision check after each blind advance to catch drift:
+
+**API:** `POST /api/set_vision_verify` with `{"enabled": true}`
+
+When enabled, after each calibrated advance the system runs a fast
+alignment check (5 iterations max) and corrects small errors. This adds
+~1-2 seconds per frame but catches mechanical drift before it accumulates.
+
+## Uneven Frame Spacing (Old Cameras)
+
+Some older cameras have inconsistent frame spacing across the strip. The
+spacing analysis tool measures actual frame positions and builds per-frame
+correction offsets:
+
+**API:** `POST /api/analyze_spacing` with `{"num_frames": 6}`
+
+1. Advances through the strip, measuring alignment error at each frame
+2. Records per-frame step corrections
+3. Corrections are applied automatically on subsequent strips
+
+**Manual corrections:** `POST /api/set_spacing_corrections`
+with `{"corrections": [0, -3, 2, -1, 5, 0]}` (one offset per frame position).
+
 ## Fine-Tuning Strategy
 
 ### When to Adjust
